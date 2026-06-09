@@ -131,6 +131,7 @@ def _migrate_db() -> None:
         ("anime", "format",    "TEXT"),
         ("anime", "synopsis",  "TEXT"),
         ("anime", "mal_score", "REAL"),
+        ("anime", "title_ro",  "TEXT"),
     ]
     with get_conn() as conn:
         for table, col, col_type in additions:

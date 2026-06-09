@@ -18,8 +18,9 @@ Thumbs.db
 *.swp
 
 # Claude Code (personal/local overrides)
-.claude/settings.json
+.claude/
 
 # Personal
 PRD.md
 .env
+.devcontainer/

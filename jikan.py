@@ -36,6 +36,7 @@ def _normalise(item: dict) -> dict:
     return {
         "api_id":    str(item["mal_id"]),
         "title":     item.get("title_english") or item.get("title") or "",
+        "title_ro":  item.get("title") or "",
         "cover_url": (item.get("images") or {}).get("jpg", {}).get("large_image_url"),
         "genres":    [g["name"] for g in (item.get("genres") or [])],
         "year":      item.get("year"),

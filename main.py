@@ -1,9 +1,13 @@
+import io
 import json
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from database import get_conn, init_db
@@ -40,11 +44,12 @@ def search(q: str = Query("", description="Title search query")):
 def import_anime(body: AnimeCreate):
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO anime (api_id, title, cover_url, genres, year, season, episodes, format, synopsis, mal_score) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO anime (api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body.api_id,
                 body.title,
+                body.title_ro,
                 body.cover_url,
                 json.dumps(body.genres),
                 body.year,
@@ -94,7 +99,7 @@ def rankings(
 
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT a.id, a.api_id, a.title, a.cover_url, a.genres, a.year, a.season, "
+            "SELECT a.id, a.api_id, a.title, a.title_ro, a.cover_url, a.genres, a.year, a.season, "
             "       a.episodes, a.format, a.synopsis, a.mal_score, "
             "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
             "       r.overall, r.updated_at "
@@ -115,6 +120,136 @@ def rankings(
         results.append(item)
 
     return {"results": results, "count": len(results)}
+
+
+@app.post("/import/anilist-gdpr")
+async def import_anilist_gdpr(file: UploadFile):
+    raw = await file.read()
+    name = (file.filename or "").lower()
+
+    if name.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                candidates = [n for n in zf.namelist()
+                              if n.lower().endswith(".json")
+                              and "anime" in n.lower()
+                              and "manga" not in n.lower()]
+                if not candidates:
+                    candidates = [n for n in zf.namelist() if n.lower().endswith(".json")]
+                if not candidates:
+                    raise HTTPException(status_code=422, detail="No JSON file found in ZIP")
+                json_bytes = zf.read(candidates[0])
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=422, detail="Invalid ZIP file")
+        try:
+            data = json.loads(json_bytes)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail="Invalid JSON inside ZIP")
+        return {"entries": _parse_gdpr_entries(data)}
+
+    if name.endswith(".xml"):
+        return {"entries": _parse_xml_entries(raw)}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=422, detail="Invalid JSON")
+    return {"entries": _parse_gdpr_entries(data)}
+
+
+def _parse_gdpr_entries(data) -> list[dict]:
+    raw_entries: list[dict] = []
+
+    if isinstance(data, list):
+        raw_entries = data
+    elif isinstance(data, dict):
+        # {lists: [{entries: [...]}, ...]}
+        for lst in data.get("lists", []):
+            raw_entries.extend(lst.get("entries", []))
+        # fallback: {entries: [...]}
+        if not raw_entries:
+            raw_entries = data.get("entries", [])
+
+    results = []
+    scores_sample = [e.get("score", 0) for e in raw_entries if e.get("score", 0) > 0]
+    use100 = any(s > 10 for s in scores_sample)
+
+    for e in raw_entries:
+        score_raw = e.get("score", 0)
+        if not score_raw:
+            continue
+
+        score = score_raw / 10 if use100 else float(score_raw)
+        score = round(min(10.0, max(1.0, score)), 1)
+
+        # title resolution: flat string, or nested media.title object
+        title = ""
+        if isinstance(e.get("title"), str):
+            title = e["title"]
+        elif isinstance(e.get("media"), dict):
+            t = e["media"].get("title", {})
+            title = t.get("english") or t.get("romaji") or t.get("native") or ""
+        elif isinstance(e.get("title"), dict):
+            t = e["title"]
+            title = t.get("english") or t.get("romaji") or t.get("native") or ""
+
+        if not title:
+            continue
+
+        results.append({
+            "title": title.strip(),
+            "score": score,
+            "status": e.get("status", ""),
+        })
+
+    return results
+
+
+def _parse_xml_entries(xml_bytes: bytes) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid XML: {exc}")
+
+    def text(el, tag: str) -> str:
+        node = el.find(tag)
+        return (node.text or "").strip() if node is not None else ""
+
+    results = []
+    for anime in root.findall("anime"):
+        title = text(anime, "series_title")
+        score_str = text(anime, "my_score")
+        if not title or not score_str:
+            continue
+        try:
+            score = float(score_str)
+        except ValueError:
+            continue
+        if score == 0:
+            continue
+        score = round(min(10.0, max(1.0, score)), 1)
+        entry: dict = {"title": title, "score": score, "status": text(anime, "my_status")}
+        criteria = _parse_mar_comments(text(anime, "my_comments"))
+        if criteria:
+            entry["criteria"] = criteria
+        results.append(entry)
+    return results
+
+
+_MAR_COMMENTS_RE = re.compile(
+    r"Story:([\d.]+)\s+Characters:([\d.]+)\s+Animation:([\d.]+)\s+Audio:([\d.]+)\s+Enjoyment:([\d.]+)"
+)
+
+
+def _parse_mar_comments(comments: str) -> dict | None:
+    m = _MAR_COMMENTS_RE.search(comments)
+    if not m:
+        return None
+    keys = ("story", "characters", "animation", "audio", "enjoyment")
+    try:
+        return {k: round(min(10.0, max(1.0, float(v))), 1) for k, v in zip(keys, m.groups())}
+    except ValueError:
+        return None
 
 
 @app.delete("/anime/{anime_id}", status_code=204)
@@ -143,7 +278,7 @@ def anchors(
         target_genres: list[str] = json.loads(target["genres"] or "[]")
 
         rows = conn.execute(
-            f"SELECT a.id, a.title, a.cover_url, a.genres, a.year, r.{criterion} AS score "
+            f"SELECT a.id, a.title, a.title_ro, a.cover_url, a.genres, a.year, r.{criterion} AS score "
             "FROM anime a JOIN rating r ON a.id = r.anime_id "
             f"WHERE a.id != ? ORDER BY r.{criterion} DESC",
             (anime_id,),

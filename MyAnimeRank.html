@@ -206,22 +206,25 @@ const normaliseRanked = (row) => {
 
 
 /* ─── Shared UI atoms ──────────────────────────────────────────────────── */
-function Poster({ anime, w=64, radius=9, showBadge=false, style={} }) {
+function Poster({ anime, w=64, radius=9, showBadge=false, fluid=false, style={} }) {
   const [imgErr, setImgErr] = useState(false);
   const h = titleHue(anime.title), h2 = (h+38)%360;
   const initials = anime.title.replace(/[^A-Za-z0-9 ]/g,'').split(' ')
     .filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
-  const height = w * 1.42;
   const showImg = anime.cover_url && !imgErr;
+  const outerStyle = fluid
+    ? { position:'relative', width:'100%', paddingBottom:'142%', height:0, borderRadius:radius, overflow:'hidden',
+        background:`linear-gradient(150deg, oklch(0.42 0.13 ${h}), oklch(0.22 0.09 ${h2}) 78%)`,
+        boxShadow:'0 6px 18px -8px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.06) inset',
+        ...style }
+    : { position:'relative', width:w, height:w*1.42, borderRadius:radius, overflow:'hidden', flexShrink:0,
+        background:`linear-gradient(150deg, oklch(0.42 0.13 ${h}), oklch(0.22 0.09 ${h2}) 78%)`,
+        boxShadow:'0 6px 18px -8px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.06) inset',
+        ...style };
   return (
-    <div style={{
-      position:'relative', width:w, height, borderRadius:radius, overflow:'hidden', flexShrink:0,
-      background:`linear-gradient(150deg, oklch(0.42 0.13 ${h}), oklch(0.22 0.09 ${h2}) 78%)`,
-      boxShadow:'0 6px 18px -8px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.06) inset',
-      ...style,
-    }}>
+    <div style={outerStyle}>
       <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center',
-        fontFamily:'var(--mono)', fontWeight:700, fontSize:w*0.62,
+        fontFamily:'var(--mono)', fontWeight:700, fontSize: fluid ? '14%' : w*0.62,
         color:`oklch(0.9 0.12 ${h})`, opacity:0.14, letterSpacing:'-0.04em' }}>{initials}</div>
       <div style={{ position:'absolute', inset:0,
         background:'repeating-linear-gradient(125deg, rgba(255,255,255,0.045) 0 2px, transparent 2px 9px)' }} />
@@ -232,15 +235,6 @@ function Poster({ anime, w=64, radius=9, showBadge=false, style={} }) {
           style={{ position:'absolute', inset:0, width:'100%', height:'100%',
             objectFit:'cover', objectPosition:'top center' }} />
       )}
-      <div style={{
-        position:'absolute', left:0, right:0, bottom:0,
-        padding: w<80 ? '14px 7px 7px' : '22px 9px 9px',
-        background: showImg
-          ? 'linear-gradient(to top, rgba(0,0,0,0.82) 30%, rgba(0,0,0,0.3) 70%, transparent)'
-          : 'linear-gradient(to top, rgba(0,0,0,0.78), transparent)',
-        fontWeight:800, fontSize:Math.max(8.5, w*0.135), lineHeight:1.12,
-        color:'#fff', letterSpacing:'-0.01em',
-      }}>{anime.title}</div>
       {showBadge && (
         <div style={{ position:'absolute', top:7, left:7, fontFamily:'var(--mono)', fontSize:9, fontWeight:700,
           padding:'2px 6px', borderRadius:5, background:'rgba(0,0,0,0.55)', color:'#dfe6ef',
@@ -319,6 +313,9 @@ const ICON_PATHS = {
   chevron:    'M9 6l6 6-6 6',
   insights:   'M4 20V14 M9 20V8 M14 20V11 M19 20V4',
   upload:     'M12 19V5 M5 12l7-7 7 7 M3 19h18',
+  viewList:   'M3 6h18 M3 12h18 M3 18h18',
+  viewCard:   'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
+  viewGrid:   'M3 3h4v4H3z M10 3h4v4h-4z M17 3h4v4h-4z M3 10h4v4H3z M10 10h4v4h-4z M17 10h4v4h-4z M3 17h4v4H3z M10 17h4v4h-4z M17 17h4v4h-4z',
 };
 
 function Ico({ name, size=18, sw=1.7, color='currentColor', style={} }) {
@@ -345,45 +342,90 @@ function MiniScore({ label, value, active }) {
   );
 }
 
-function RankRow({ anime, rank, onOpen, sortKey }) {
+function RankCard({ anime, rank, onOpen, sortKey, englishTitles, variant='grid' }) {
   const [hover, setHover] = useState(false);
   const ov = overall(anime.rating);
   const top = rank <= 3;
+  const base = {
+    cursor:'pointer', transition:'background .14s ease, box-shadow .14s ease, transform .14s ease',
+    background: hover ? 'var(--hover)' : 'var(--surface)',
+    boxShadow: hover ? '0 0 0 1px var(--line-2) inset, 0 14px 36px -14px rgba(0,0,0,0.85)' : '0 0 0 1px var(--line) inset',
+    transform: hover ? 'translateY(-2px)' : 'none',
+  };
+
+  if (variant === 'list') {
+    return (
+      <div onClick={onOpen} onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
+        className="fade-up"
+        style={{ ...base, display:'flex', alignItems:'center', gap:16,
+          padding:'12px 16px 12px 14px', borderRadius:13 }}>
+        <div style={{ width:32, textAlign:'center', fontFamily:'var(--mono)', fontWeight:700,
+          fontSize: top?20:16, color: top?'var(--accent-2)':'var(--text-3)',
+          textShadow: top?'0 0 14px rgba(52,168,240,0.5)':'none', flexShrink:0 }}>{rank}</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontWeight:700, fontSize:15, letterSpacing:'-0.01em',
+            whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+            {displayTitle(anime, englishTitles)}
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:4, color:'var(--text-3)', fontSize:12 }}>
+            <span className="mono">{anime.year}</span>
+            {anime.format && <><span style={{opacity:.4}}>&bull;</span><span>{anime.format}</span></>}
+            {anime.genres.length > 0 && <><span style={{opacity:.4}}>&bull;</span>
+              <span style={{color:'var(--text-2)'}}>{anime.genres.slice(0,3).join(' · ')}</span></>}
+          </div>
+        </div>
+        <div style={{ display:'flex', gap:3 }}>
+          {CRITERIA.map(c => <MiniScore key={c.key} label={c.label.slice(0,4)} value={anime.rating[c.key]} active={sortKey===c.key} />)}
+        </div>
+        <div style={{ width:1, height:38, background:'var(--line)', margin:'0 2px', flexShrink:0 }} />
+        <ScoreBadge value={ov} />
+      </div>
+    );
+  }
+
   return (
     <div onClick={onOpen} onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
       className="fade-up"
-      style={{
-        display:'flex', alignItems:'center', gap:18,
-        padding:'13px 18px 13px 14px', borderRadius:14,
-        background: hover ? 'var(--hover)' : 'var(--surface)',
-        boxShadow: hover
-          ? '0 0 0 1px var(--line-2) inset, 0 14px 36px -16px rgba(0,0,0,0.8)'
-          : '0 0 0 1px var(--line) inset',
-        cursor:'pointer', transition:'background .14s ease, box-shadow .14s ease, transform .14s ease',
-        transform: hover ? 'translateY(-1px)' : 'none',
-      }}>
-      <div style={{ width:34, textAlign:'center', fontFamily:'var(--mono)', fontWeight:700,
-        fontSize: top?22:18, color: top?'var(--accent-2)':'var(--text-3)',
-        textShadow: top?'0 0 18px rgba(52,168,240,0.5)':'none', flexShrink:0 }}>{rank}</div>
-      <Poster anime={anime} w={50} radius={7} />
-      <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ fontWeight:700, fontSize:16, letterSpacing:'-0.01em',
-          whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{anime.title}</div>
-        <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:5, color:'var(--text-3)', fontSize:12 }}>
-          <span className="mono">{anime.year}</span>
-          <span style={{opacity:.4}}>&bull;</span>
-          <span>{anime.format}{anime.episodes > 1 ? ` · ${anime.episodes} ep` : ''}</span>
-          <span style={{opacity:.4}}>&bull;</span>
-          <span style={{ whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:'var(--text-2)' }}>
-            {anime.genres.slice(0,3).join(' · ')}
-          </span>
-        </div>
+      style={{ ...base, borderRadius:16, overflow:'hidden' }}>
+      <div style={{ position:'relative' }}>
+        <Poster anime={anime} fluid radius={0} showBadge />
+        <div style={{
+          position:'absolute', top:10, left:10,
+          fontFamily:'var(--mono)', fontWeight:700,
+          fontSize: top ? 20 : 15,
+          color: top ? 'var(--accent-2)' : 'rgba(255,255,255,0.75)',
+          textShadow: top ? '0 0 14px rgba(52,168,240,0.7), 0 1px 4px rgba(0,0,0,0.8)' : '0 1px 4px rgba(0,0,0,0.8)',
+          lineHeight:1,
+        }}>#{rank}</div>
       </div>
-      <div style={{ display:'flex', gap:4 }}>
-        {CRITERIA.map(c => <MiniScore key={c.key} label={c.label.slice(0,4)} value={anime.rating[c.key]} active={sortKey===c.key} />)}
-      </div>
-      <div style={{ width:1, height:40, background:'var(--line)', margin:'0 2px' }} />
-      <ScoreBadge value={ov} />
+      {variant === 'card'
+        ? (
+          <div style={{ padding:'12px 13px 13px' }}>
+            <div style={{ fontWeight:700, fontSize:14, letterSpacing:'-0.01em', lineHeight:1.25,
+              display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
+              marginBottom:5 }}>{displayTitle(anime, englishTitles)}</div>
+            <div style={{ fontSize:11.5, color:'var(--text-3)', marginBottom:10,
+              whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              <span className="mono">{anime.year}</span>
+              {anime.format && <><span style={{opacity:.4}}> · </span><span>{anime.format}</span></>}
+              {anime.genres.length > 0 && <><span style={{opacity:.4}}> · </span>
+                <span style={{color:'var(--text-2)'}}>{anime.genres.slice(0,2).join(', ')}</span></>}
+            </div>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:4 }}>
+              <div style={{ display:'flex', gap:0 }}>
+                {CRITERIA.map(c => <MiniScore key={c.key} label={c.label.slice(0,3)} value={anime.rating[c.key]} active={sortKey===c.key} />)}
+              </div>
+              <ScoreBadge value={ov} size='sm' />
+            </div>
+          </div>
+        ) : (
+          <div style={{ padding:'8px 10px 10px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+            <div style={{ fontWeight:700, fontSize:12, letterSpacing:'-0.01em', lineHeight:1.2,
+              whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', flex:1, minWidth:0
+            }}>{displayTitle(anime, englishTitles)}</div>
+            <ScoreBadge value={ov} size='sm' />
+          </div>
+        )}
     </div>
   );
 }
@@ -409,7 +451,7 @@ function DropdownSelect({ label, value, onChange, options, render }) {
   );
 }
 
-function Rankings({ library, navigate }) {
+function Rankings({ library, navigate, englishTitles, rankView, setRankView }) {
   const [q, setQ]             = useState('');
   const [genre, setGenre]     = useState('All');
   const [fmtFilter, setFmt]   = useState('All');
@@ -498,7 +540,24 @@ function Rankings({ library, navigate }) {
             <span className="mono" style={{color:'var(--text-2)'}}>{rated.length}</span> titles ranked by anchored comparison
           </p>
         </div>
-        <div style={{ display:'flex', gap:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
+            background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
+            {[
+              { key:'list', icon:'viewList', title:'List' },
+              { key:'card', icon:'viewCard', title:'Cards' },
+              { key:'grid', icon:'viewGrid', title:'Grid' },
+            ].map(({ key, icon, title }) => (
+              <button key={key} title={title} onClick={()=>setRankView(key)}
+                style={{ padding:'5px 8px', borderRadius:7, border:'none', cursor:'pointer',
+                  background: rankView===key ? 'var(--raised)' : 'transparent',
+                  color: rankView===key ? 'var(--accent-2)' : 'var(--text-3)',
+                  boxShadow: rankView===key ? '0 0 0 1px var(--line) inset' : 'none',
+                  transition:'all .12s ease', display:'flex', alignItems:'center' }}>
+                <Ico name={icon} size={15} sw={1.6} />
+              </button>
+            ))}
+          </div>
           {rated.length > 0 && (
             <button className="btn btn-ghost" onClick={exportMAL} title="Export as MyAnimeList XML">
               <Ico name="back" size={16} sw={2.2} style={{transform:'rotate(90deg)'}} /> Export XML
@@ -537,13 +596,15 @@ function Rankings({ library, navigate }) {
         {genres.map(g => <GenreChip key={g} active={genre===g} onClick={()=>setGenre(g)}>{g}</GenreChip>)}
       </div>
 
-      <div style={{ display:'flex', flexDirection:'column', gap:9 }}>
+      <div style={{ display:'grid',
+        gridTemplateColumns: rankView==='list' ? '1fr' : rankView==='card' ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)',
+        gap: rankView==='list' ? 8 : 16 }}>
         {list.map((a,i) => (
-          <RankRow key={a.id} anime={a} rank={i+1} sortKey={sortKey}
-            onOpen={()=>navigate({name:'detail', animeId:a.id})} />
+          <RankCard key={a.id} anime={a} rank={i+1} sortKey={sortKey}
+            onOpen={()=>navigate({name:'detail', animeId:a.id})} englishTitles={englishTitles} variant={rankView} />
         ))}
         {list.length===0 && (
-          <div style={{ textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No titles match these filters.</div>
+          <div style={{ gridColumn:'1/-1', textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No titles match these filters.</div>
         )}
       </div>
     </div>
@@ -809,18 +870,47 @@ function AniListImport({ onClose, library, setLibrary }) {
   const [current, setCurrent]     = useState('');
   const [doneCount, setDoneCount] = useState(0);
   const [skipCount, setSkipCount] = useState(0);
+  const [fileErr, setFileErr]     = useState('');
   const have = new Set(library.map(a => a.title.toLowerCase()));
 
-  const onFile = (e) => {
+  const onFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const parsed = parseAniListCSV(ev.target.result);
-      setEntries(parsed.filter(en => !have.has(en.title.toLowerCase())));
-      setPhase('preview');
-    };
-    reader.readAsText(file);
+    setFileErr('');
+    const name = file.name.toLowerCase();
+
+    if (name.endsWith('.csv')) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const parsed = parseAniListCSV(ev.target.result);
+        setEntries(parsed.filter(en => !have.has(en.title.toLowerCase())));
+        setPhase('preview');
+      };
+      reader.readAsText(file);
+      return;
+    }
+
+    // ZIP, JSON, or XML: send to backend
+    if (name.endsWith('.zip') || name.endsWith('.json') || name.endsWith('.xml')) {
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const res = await fetch('/import/anilist-gdpr', { method: 'POST', body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setFileErr(err.detail || `Server error ${res.status}`);
+          return;
+        }
+        const { entries: parsed } = await res.json();
+        setEntries(parsed.filter(en => !have.has(en.title.toLowerCase())));
+        setPhase('preview');
+      } catch {
+        setFileErr('Failed to read file. Please try again.');
+      }
+      return;
+    }
+
+    setFileErr('Unsupported file type. Use .zip, .xml, .json (GDPR/MAL export) or .csv (list export).');
   };
 
   const runImport = async () => {
@@ -835,11 +925,11 @@ function AniListImport({ onClose, library, setLibrary }) {
         const match = r.results?.[0];
         if (!match) { skipped++; await new Promise(res => setTimeout(res, 400)); continue; }
         const v = Math.round(en.score * 10) / 10;
-        const scores = { story: v, characters: v, animation: v, audio: v, enjoyment: v };
+        const scores = en.criteria ?? { story: v, characters: v, animation: v, audio: v, enjoyment: v };
         const { id } = await fetch('/anime', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            api_id: match.api_id, title: match.title, cover_url: match.cover_url,
+            api_id: match.api_id, title: match.title, title_ro: match.title_ro, cover_url: match.cover_url,
             genres: match.genres, year: match.year, season: match.season,
             episodes: match.episodes, format: match.format, synopsis: match.synopsis,
             mal_score: match.mal_score,
@@ -874,22 +964,30 @@ function AniListImport({ onClose, library, setLibrary }) {
 
         {phase === 'pick' && (
           <div>
-            <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 20px', lineHeight:1.6 }}>
-              Export your list from AniList:{' '}
-              <span style={{color:'var(--text-2)'}}>Settings &rarr; Export &rarr; Anime List (CSV)</span>.
-              Upload the file below. Only scored entries are imported.
+            <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 8px', lineHeight:1.6 }}>
+              Three export formats are supported:
             </p>
+            <ul style={{ color:'var(--text-3)', fontSize:13, margin:'0 0 18px', paddingLeft:18, lineHeight:1.8 }}>
+              <li><span style={{color:'var(--text-2)'}}>GDPR data download</span> &mdash; anilist.co &rarr; Settings &rarr; Account &rarr; Download Data &rarr; <em>Upload the .zip file</em></li>
+              <li><span style={{color:'var(--text-2)'}}>CSV list export</span> &mdash; anilist.co &rarr; Settings &rarr; Import &amp; Export &rarr; Export Anime List &rarr; <em>Upload the .csv file</em></li>
+              <li><span style={{color:'var(--text-2)'}}>MAL / MyAnimeRank XML</span> &mdash; myanimelist.net &rarr; Export &rarr; Download XML, or use this app&rsquo;s own Export XML &rarr; <em>Upload the .xml file (per-criterion scores restored)</em></li>
+            </ul>
             <label style={{ display:'block', border:'2px dashed var(--line)', borderRadius:12,
               padding:'32px 24px', textAlign:'center', cursor:'pointer' }}>
               <Ico name="upload" size={28} color="var(--accent-2)" />
               <div style={{ marginTop:10, fontSize:14, color:'var(--text-2)', fontWeight:600 }}>
-                Choose AniList CSV export
+                Choose file (.zip, .json, .csv, or .xml)
               </div>
               <div style={{ fontSize:12, color:'var(--text-3)', marginTop:4 }}>
-                Entries already in your library are skipped
+                Only scored entries are imported &mdash; duplicates are skipped
               </div>
-              <input type="file" accept=".csv" style={{ display:'none' }} onChange={onFile} />
+              <input type="file" accept=".zip,.json,.csv,.xml" style={{ display:'none' }} onChange={onFile} />
             </label>
+            {fileErr && (
+              <div style={{ marginTop:12, fontSize:13, color:'#e07070', textAlign:'center' }}>
+                {fileErr}
+              </div>
+            )}
           </div>
         )}
 
@@ -973,7 +1071,7 @@ function AniListImport({ onClose, library, setLibrary }) {
 }
 
 /* ─── Search / import screen ───────────────────────────────────────────── */
-function ResultCard({ item, inLibrary, onImport }) {
+function ResultCard({ item, inLibrary, onImport, englishTitles }) {
   const [hover, setHover] = useState(false);
   return (
     <div onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
@@ -987,7 +1085,7 @@ function ResultCard({ item, inLibrary, onImport }) {
       <Poster anime={item} w={74} radius={9} showBadge />
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ display:'flex', alignItems:'baseline', gap:10 }}>
-          <h3 style={{ margin:0, fontSize:17, fontWeight:700, letterSpacing:'-0.01em' }}>{item.title}</h3>
+          <h3 style={{ margin:0, fontSize:17, fontWeight:700, letterSpacing:'-0.01em' }}>{displayTitle(item, englishTitles)}</h3>
           <span className="mono" style={{ color:'var(--text-3)', fontSize:12.5 }}>{item.year}</span>
         </div>
         <div style={{ display:'flex', gap:6, flexWrap:'wrap', margin:'9px 0' }}>
@@ -1059,7 +1157,7 @@ function ManualAdd({ onClose, onAdd }) {
   );
 }
 
-function Search({ library, navigate, importAnime, setLibrary }) {
+function Search({ library, navigate, importAnime, setLibrary, englishTitles }) {
   const [q, setQ]             = useState('');
   const [manual, setManual]   = useState(false);
   const [aniList, setAniList]   = useState(false);
@@ -1118,7 +1216,7 @@ function Search({ library, navigate, importAnime, setLibrary }) {
       <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
         {results.map(item => (
           <ResultCard key={item.api_id || item.title} item={item}
-            inLibrary={have.has(item.title.toLowerCase())} onImport={importAnime} />
+            inLibrary={have.has(item.title.toLowerCase())} onImport={importAnime} englishTitles={englishTitles} />
         ))}
         {!loading && q.trim() && results.length===0 && (
           <div style={{ textAlign:'center', padding:'40px 0', color:'var(--text-3)' }}>
@@ -1140,13 +1238,13 @@ function Search({ library, navigate, importAnime, setLibrary }) {
 }
 
 /* ─── Rating flow ──────────────────────────────────────────────────────── */
-function CompCard({ anime, critKey, setAnchorScore }) {
+function CompCard({ anime, critKey, setAnchorScore, englishTitles }) {
   const [editing, setEditing] = useState(false);
   const v = anime.rating[critKey];
   return (
-    <div className="fade-in" style={{ width:104, flexShrink:0 }}>
+    <div className="fade-in" style={{ width:130, flexShrink:0 }}>
       <div style={{ position:'relative' }}>
-        <Poster anime={anime} w={104} radius={9} />
+        <Poster anime={anime} w={130} radius={9} />
         <div style={{
           position:'absolute', top:7, right:7, fontFamily:'var(--mono)', fontWeight:700, fontSize:13,
           padding:'2px 7px', borderRadius:7, color:scoreColor(v),
@@ -1172,7 +1270,7 @@ function CompCard({ anime, critKey, setAnchorScore }) {
   );
 }
 
-function Bucket({ dir, label, items, critKey, setAnchorScore }) {
+function Bucket({ dir, label, items, critKey, setAnchorScore, englishTitles }) {
   if (items.length===0) return null;
   const up = dir==='higher';
   return (
@@ -1183,13 +1281,13 @@ function Bucket({ dir, label, items, critKey, setAnchorScore }) {
         <span className="mono" style={{ fontSize:11.5, color:'var(--text-4)' }}>{items.length}</span>
       </div>
       <div style={{ display:'flex', flexWrap:'wrap', gap:18 }}>
-        {items.map(({a}) => <CompCard key={a.id} anime={a} critKey={critKey} setAnchorScore={setAnchorScore} />)}
+        {items.map(({a}) => <CompCard key={a.id} anime={a} critKey={critKey} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />)}
       </div>
     </div>
   );
 }
 
-function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore }) {
+function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, englishTitles }) {
   const [step, setStep]   = useState(0);
   const [scores, setScores] = useState(() => {
     const init = {};
@@ -1234,7 +1332,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore }) {
         <button className="btn-quiet" onClick={()=>navigate({name:'search'})} style={{padding:7}}><Ico name="back" size={18} /></button>
         <Poster anime={anime} w={38} radius={7} />
         <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontWeight:700, fontSize:16.5, letterSpacing:'-0.01em' }}>{anime.title}</div>
+          <div style={{ fontWeight:700, fontSize:16.5, letterSpacing:'-0.01em' }}>{displayTitle(anime, englishTitles)}</div>
           <div style={{ fontSize:12, color:'var(--text-3)', marginTop:2 }}>
             {anime.genres.join(' · ')} &middot; <span className="mono">{anime.year}</span>
           </div>
@@ -1305,11 +1403,11 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore }) {
           <div style={{ marginTop:20, padding:'13px 15px', borderRadius:12, background:'var(--surface-2)',
             boxShadow:'0 0 0 1px var(--line) inset', fontSize:13, lineHeight:1.7 }}>
             {nearestAbove
-              ? <div style={{color:'var(--text-2)'}}>Just below <b style={{color:'var(--text)'}}>{nearestAbove.a.title}</b>{' '}
+              ? <div style={{color:'var(--text-2)'}}>Just below <b style={{color:'var(--text)'}}>{displayTitle(nearestAbove.a, englishTitles)}</b>{' '}
                   <span className="mono" style={{color:scoreColor(nearestAbove.v)}}>{nearestAbove.v.toFixed(1)}</span></div>
               : <div style={{color:'var(--text-2)'}}>Your new <b style={{color:'var(--accent-2)'}}>#{1}</b> for {crit.label.toLowerCase()}.</div>}
             {nearestBelow
-              ? <div style={{color:'var(--text-2)'}}>Just above <b style={{color:'var(--text)'}}>{nearestBelow.a.title}</b>{' '}
+              ? <div style={{color:'var(--text-2)'}}>Just above <b style={{color:'var(--text)'}}>{displayTitle(nearestBelow.a, englishTitles)}</b>{' '}
                   <span className="mono" style={{color:scoreColor(nearestBelow.v)}}>{nearestBelow.v.toFixed(1)}</span></div>
               : (nearestAbove && <div style={{color:'var(--text-2)'}}>Your lowest {crit.label.toLowerCase()} so far.</div>)}
           </div>
@@ -1348,9 +1446,9 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore }) {
             </div>
           </div>
           <div style={{ flex:1, overflowY:'auto', padding:'8px 30px 30px' }}>
-            <Bucket dir="higher" label="You rated higher" items={higher} critKey={crit.key} setAnchorScore={setAnchorScore} />
-            {same.length>0 && <Bucket dir="higher" label="Same score" items={same} critKey={crit.key} setAnchorScore={setAnchorScore} />}
-            <Bucket dir="lower"  label="You rated lower"  items={lower}  critKey={crit.key} setAnchorScore={setAnchorScore} />
+            <Bucket dir="higher" label="You rated higher" items={higher.slice(0, 6)} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
+            {same.length>0 && <Bucket dir="higher" label="Same score" items={same} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />}
+            <Bucket dir="lower"  label="You rated lower"  items={lower.slice(0, 6)}  critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
             {pool.length===0 && (
               <div style={{ color:'var(--text-3)', padding:'40px 0', textAlign:'center' }}>
                 No rated titles to compare against yet &mdash; this becomes your anchor.
@@ -1387,7 +1485,7 @@ function CriterionBar({ label, ckey, value, rank, total }) {
   );
 }
 
-function Detail({ anime, library, navigate, deleteAnime }) {
+function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
   const [confirm, setConfirm] = useState(false);
   const rated = library.filter(a => a.rating);
   const ov    = overall(anime.rating);
@@ -1418,7 +1516,7 @@ function Detail({ anime, library, navigate, deleteAnime }) {
           <div style={{ flex:1, minWidth:0, paddingTop:4 }}>
             <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:20 }}>
               <div>
-                <h1 style={{ margin:0, fontSize:32, fontWeight:800, letterSpacing:'-0.02em', lineHeight:1.1 }}>{anime.title}</h1>
+                <h1 style={{ margin:0, fontSize:32, fontWeight:800, letterSpacing:'-0.02em', lineHeight:1.1 }}>{displayTitle(anime, englishTitles)}</h1>
                 <div style={{ display:'flex', alignItems:'center', gap:9, marginTop:9, color:'var(--text-3)', fontSize:13.5 }}>
                   <span className="mono" style={{color:'var(--text-2)'}}>{anime.year}</span>
                   {anime.season && <><span style={{opacity:.4}}>&bull;</span><span>{anime.season}</span></>}
@@ -1484,7 +1582,7 @@ function Detail({ anime, library, navigate, deleteAnime }) {
             boxShadow:'0 0 0 1px var(--line-2) inset, var(--shadow)' }}>
             <h2 style={{ margin:'0 0 8px', fontSize:20, fontWeight:800 }}>Delete this title?</h2>
             <p style={{ margin:'0 0 22px', color:'var(--text-2)', fontSize:14, lineHeight:1.6 }}>
-              <b style={{color:'var(--text)'}}>{anime.title}</b> and its scores will be removed from your rankings.
+              <b style={{color:'var(--text)'}}>{displayTitle(anime, englishTitles)}</b> and its scores will be removed from your rankings.
               Other titles keep their anchors.
             </p>
             <div style={{ display:'flex', justifyContent:'flex-end', gap:10 }}>
@@ -1500,14 +1598,28 @@ function Detail({ anime, library, navigate, deleteAnime }) {
 }
 
 /* ─── Tweaks panel ─────────────────────────────────────────────────────── */
+const _TWEAKS_KEY = 'mar-tweaks';
+
 function useTweaks(defaults) {
-  const [values, setValues] = useState(defaults);
+  const [values, setValues] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(_TWEAKS_KEY) || '{}');
+      return { ...defaults, ...saved };
+    } catch { return defaults; }
+  });
   const setTweak = useCallback((keyOrEdits, val) => {
     const edits = typeof keyOrEdits==='object' && keyOrEdits!==null ? keyOrEdits : { [keyOrEdits]: val };
-    setValues(prev => ({ ...prev, ...edits }));
+    setValues(prev => {
+      const next = { ...prev, ...edits };
+      try { localStorage.setItem(_TWEAKS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
   }, []);
   return [values, setTweak];
 }
+
+const displayTitle = (anime, englishTitles) =>
+  englishTitles ? anime.title : (anime.title_ro || anime.title);
 
 const TWEAK_CSS = `
 .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:260px;
@@ -1683,7 +1795,7 @@ function App() {
   const [loadErr, setLoadErr]     = useState(null);
   const [appLoading, setAppLoading] = useState(true);
   const [view, setView]           = useState({ name:'rankings' });
-  const [t, setTweak]             = useTweaks({ accent:'Azure', ambient:true });
+  const [t, setTweak]             = useTweaks({ accent:'Azure', ambient:true, englishTitles:true, rankView:'grid' });
 
   useEffect(() => {
     fetch('/rankings')
@@ -1714,7 +1826,7 @@ function App() {
       const { id } = await fetch('/anime', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          api_id: anime.api_id, title: anime.title, cover_url: anime.cover_url,
+          api_id: anime.api_id, title: anime.title, title_ro: anime.title_ro, cover_url: anime.cover_url,
           genres: anime.genres, year: anime.year, season: anime.season,
           episodes: anime.episodes, format: anime.format, synopsis: anime.synopsis,
         }),
@@ -1751,20 +1863,21 @@ function App() {
   const resetDemo = () => window.location.reload();
   const animeFor  = (id) => library.find(a => a.id===id);
 
+  const et = t.englishTitles;
   let screen;
   if (view.name==='rankings') {
-    screen = <Rankings library={library} navigate={navigate} />;
+    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} />;
   } else if (view.name==='search') {
-    screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} />;
+    screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} englishTitles={et} />;
   } else if (view.name==='rate') {
     const anime = view.draft || animeFor(view.animeId);
     screen = anime ? <RatingFlow anime={anime} library={library} navigate={navigate}
-      saveRating={saveRating} setAnchorScore={setAnchorScore} /> : null;
+      saveRating={saveRating} setAnchorScore={setAnchorScore} englishTitles={et} /> : null;
   } else if (view.name==='detail') {
     const anime = animeFor(view.animeId);
     screen = anime
-      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} />
-      : <Rankings library={library} navigate={navigate} />;
+      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} englishTitles={et} />
+      : <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} />;
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;
   }
@@ -1824,6 +1937,8 @@ function App() {
           options={Object.values(ACCENTS).map(a=>a[0])}
           onChange={(hex) => setTweak('accent', Object.keys(ACCENTS).find(k=>ACCENTS[k][0]===hex)||'Azure')} />
         <TweakToggle label="Ambient glow" value={t.ambient} onChange={v=>setTweak('ambient',v)} />
+        <TweakSection label="Titles" />
+        <TweakToggle label="English names" value={t.englishTitles} onChange={v=>setTweak('englishTitles',v)} />
       </TweaksPanel>
     </div>
   );

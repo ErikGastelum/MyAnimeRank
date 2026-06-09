@@ -4,6 +4,7 @@ from typing import Optional
 
 class AnimeCreate(BaseModel):
     title: str
+    title_ro: Optional[str] = None
     api_id: Optional[str] = None
     cover_url: Optional[str] = None
     genres: list[str] = []
