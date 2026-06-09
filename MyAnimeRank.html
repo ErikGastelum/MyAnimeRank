@@ -30,14 +30,43 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; background: #060709; }
+html, body { height: 100%; margin: 0; background: #060709; -webkit-app-region: no-drag; }
 
 #stage {
   position: fixed; inset: 0;
   background: radial-gradient(1100px 700px at 50% -10%, #11141b, #060709 70%);
   overflow: hidden;
+  display: flex; flex-direction: column;
 }
-#scaler { width: 100%; height: 100%; }
+#scaler { width: 100%; flex: 1; min-height: 0; }
+
+#titlebar {
+  height: 32px; background: #0c0d10; flex-shrink: 0;
+  border-bottom: 1px solid rgba(255,255,255,0.075);
+  display: flex; align-items: center;
+  position: relative; z-index: 9999;
+  cursor: default; user-select: none;
+}
+.tb-title {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  font-family: 'Overpass', system-ui, sans-serif; font-size: 12px;
+  font-weight: 700; letter-spacing: -0.01em;
+  color: rgba(255,255,255,0.25); pointer-events: none;
+  -webkit-app-region: no-drag; user-select: none;
+}
+.tb-controls {
+  margin-left: auto; display: flex; align-items: center;
+  gap: 2px; padding-right: 8px;
+  -webkit-app-region: no-drag; app-region: no-drag;
+}
+.tb-btn {
+  width: 28px; height: 28px; border-radius: 6px; border: none;
+  background: transparent; color: rgba(255,255,255,0.3);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s;
+}
+.tb-btn:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.75); }
+.tb-close:hover { background: rgba(248,113,113,0.18) !important; color: #f87171 !important; }
 
 .mar-root {
   font-family: var(--sans);
@@ -148,7 +177,22 @@ input  { font-family: inherit; }
 </style>
 </head>
 <body>
-<div id="stage"><div id="scaler"></div></div>
+<div id="stage">
+<div id="titlebar">
+  <span class="tb-title">MyAnimeRank</span>
+  <div class="tb-controls">
+    <button class="tb-btn" onclick="window.pywebview?.api?.minimize()" title="Minimize">
+      <svg width="10" height="2" viewBox="0 0 10 2"><rect width="10" height="2" rx="1" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" onclick="window._toggleMaximize?.()" title="Maximize">
+      <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+    </button>
+    <button class="tb-btn tb-close" onclick="window.pywebview?.api?.close()" title="Close">
+      <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+</div>
+<div id="scaler"></div></div>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"    integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -236,7 +280,7 @@ function Poster({ anime, w=64, radius=9, showBadge=false, fluid=false, style={} 
             objectFit:'cover', objectPosition:'top center' }} />
       )}
       {showBadge && (
-        <div style={{ position:'absolute', top:7, left:7, fontFamily:'var(--mono)', fontSize:9, fontWeight:700,
+        <div style={{ position:'absolute', top:7, right:7, fontFamily:'var(--mono)', fontSize:9, fontWeight:700,
           padding:'2px 6px', borderRadius:5, background:'rgba(0,0,0,0.55)', color:'#dfe6ef',
           letterSpacing:'0.04em', backdropFilter:'blur(2px)' }}>{anime.format}</div>
       )}
@@ -316,6 +360,10 @@ const ICON_PATHS = {
   viewList:   'M3 6h18 M3 12h18 M3 18h18',
   viewCard:   'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
   viewGrid:   'M3 3h4v4H3z M10 3h4v4h-4z M17 3h4v4h-4z M3 10h4v4H3z M10 10h4v4h-4z M17 10h4v4h-4z M3 17h4v4H3z M10 17h4v4h-4z M17 17h4v4h-4z',
+  edit:       'M4 20h4L18.5 9.5l-4-4L4 20z M14.5 5.5l4 4',
+  seasonal:   'M12 3v2 M12 19v2 M3 12H1 M23 12h-2 M5.6 5.6l1.4 1.4 M17 17l1.4 1.4 M5.6 18.4l1.4-1.4 M17 7l1.4-1.4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
+  compare:    'M3 6h8 M3 10h8 M3 14h8 M13 6h8 M13 10h8 M13 14h8',
+  discover:   'M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7z M12 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
 };
 
 function Ico({ name, size=18, sw=1.7, color='currentColor', style={} }) {
@@ -451,12 +499,56 @@ function DropdownSelect({ label, value, onChange, options, render }) {
   );
 }
 
-function Rankings({ library, navigate, englishTitles, rankView, setRankView }) {
+function DiscoverPanelCard({ item, inLibrary, onImport }) {
+  const [hov, setHov] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  return (
+    <>
+      <div onClick={() => setShowPreview(true)}
+        onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+        style={{ display:'flex', gap:10, padding:'10px', borderRadius:12, cursor:'pointer',
+          background: hov ? 'var(--hover)' : 'var(--surface)',
+          boxShadow: hov ? '0 0 0 1px var(--line-2) inset' : '0 0 0 1px var(--line) inset',
+          transition:'all .13s ease' }}>
+        <Poster anime={item} w={48} radius={7} />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontWeight:700, fontSize:12.5, letterSpacing:'-0.01em', lineHeight:1.3,
+            display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
+            marginBottom:5 }}>{item.title}</div>
+          <div style={{ fontSize:11, color:'var(--text-3)' }}>
+            {item.year}{item.format ? ` · ${item.format}` : ''}
+          </div>
+        </div>
+        {inLibrary && (
+          <span style={{ fontFamily:'var(--mono)', fontSize:10, fontWeight:700, alignSelf:'center',
+            padding:'2px 6px', borderRadius:5, background:'rgba(92,192,255,0.12)',
+            color:'var(--accent-2)', flexShrink:0 }}>✓</span>
+        )}
+      </div>
+      {showPreview && (
+        <SeasonalPreviewModal item={item} inLibrary={inLibrary}
+          onImport={onImport} onClose={() => setShowPreview(false)} />
+      )}
+    </>
+  );
+}
+
+function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime }) {
   const [q, setQ]             = useState('');
   const [genre, setGenre]     = useState('All');
   const [fmtFilter, setFmt]   = useState('All');
   const [season, setSeason]   = useState('All');
-  const [sortKey, setSortKey] = useState('overall');
+  const [sortKey, setSortKey]           = useState('overall');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [seasonal, setSeasonal]         = useState(null);
+
+  useEffect(() => {
+    if (seasonal !== null) return;
+    const rated = library.filter(a => a.rating);
+    if (rated.length < 5) return;
+    fetch('/seasonal').then(r => r.ok ? r.json() : { results:[] })
+      .then(d => setSeasonal(d.results || []));
+  }, [library.filter(a=>a.rating).length]);
 
   const rated  = library.filter(a => a.rating);
   const genres = useMemo(() => {
@@ -480,133 +572,181 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView }) {
 
   const list = useMemo(() => {
     const l = rated.filter(a =>
+      (statusFilter==='all' || (a.status||'completed')===statusFilter) &&
       (genre==='All' || a.genres.includes(genre)) &&
       (fmtFilter==='All' || a.format===fmtFilter) &&
       (season==='All' || a.season===season) &&
       (q==='' || a.title.toLowerCase().includes(q.toLowerCase())));
     const val = (a) => sortKey==='overall' ? overall(a.rating) : a.rating[sortKey];
     return l.sort((a,b) => val(b) - val(a));
-  }, [library, q, genre, fmtFilter, season, sortKey]);
+  }, [library, q, genre, fmtFilter, season, sortKey, statusFilter]);
 
   const sortOpts = [{ key:'overall', label:'Overall' }, ...CRITERIA];
 
-  const exportMAL = () => {
-    const cd = (s) => `<![CDATA[${s ?? ''}]]>`;
-    const entries = rated.map(a => [
-      '  <anime>',
-      `    <series_animedb_id>${a.api_id || 0}</series_animedb_id>`,
-      `    <series_title>${cd(a.title)}</series_title>`,
-      `    <series_type>${a.format || ''}</series_type>`,
-      `    <series_episodes>${a.episodes || 0}</series_episodes>`,
-      `    <my_id>0</my_id>`,
-      `    <my_watched_episodes>${a.episodes || 0}</my_watched_episodes>`,
-      `    <my_start_date>0000-00-00</my_start_date>`,
-      `    <my_finish_date>${a.rating.updated_at || '0000-00-00'}</my_finish_date>`,
-      `    <my_score>${Math.round(a.rating.overall)}</my_score>`,
-      `    <my_status>Completed</my_status>`,
-      `    <my_tags>${cd(a.genres.join(', '))}</my_tags>`,
-      `    <my_comments>${cd(`Story:${a.rating.story} Characters:${a.rating.characters} Animation:${a.rating.animation} Audio:${a.rating.audio} Enjoyment:${a.rating.enjoyment}`)}</my_comments>`,
-      `    <update_on_import>1</update_on_import>`,
-      '  </anime>',
-    ].join('\n')).join('\n');
+  const exportMAL = () => { window.location.href = '/export/mal-xml'; };
 
-    const xml = [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      '<myanimelist>',
-      '  <myinfo>',
-      `    <user_export_type>1</user_export_type>`,
-      `    <user_total_anime>${rated.length}</user_total_anime>`,
-      `    <user_total_completed>${rated.length}</user_total_completed>`,
-      `    <user_total_watching>0</user_total_watching>`,
-      `    <user_total_onhold>0</user_total_onhold>`,
-      `    <user_total_dropped>0</user_total_dropped>`,
-      `    <user_total_plantowatch>0</user_total_plantowatch>`,
-      '  </myinfo>',
-      entries,
-      '</myanimelist>',
-    ].join('\n');
+  const discoverRecs = useMemo(() => {
+    if (!seasonal || seasonal.length === 0) return { recs: [], topGenres: [] };
+    const libraryTitles = new Set(library.map(a => a.title.toLowerCase()));
+    const genreScore = {}, genreCount = {};
+    rated.forEach(a => {
+      a.genres.forEach(g => {
+        genreScore[g] = (genreScore[g] || 0) + overall(a.rating);
+        genreCount[g] = (genreCount[g] || 0) + 1;
+      });
+    });
+    const topGenres = Object.entries(genreScore)
+      .map(([g, s]) => ({ g, avg: s / genreCount[g] }))
+      .sort((a, b) => b.avg - a.avg)
+      .slice(0, 3)
+      .map(x => x.g);
+    const recs = seasonal.filter(item =>
+      !libraryTitles.has((item.title || '').toLowerCase()) &&
+      (item.genres || []).some(g => topGenres.includes(g))
+    ).slice(0, 10);
+    return { recs, topGenres };
+  }, [seasonal, library, rated]);
 
-    const url = URL.createObjectURL(new Blob([xml], { type:'text/xml' }));
-    Object.assign(document.createElement('a'), { href:url, download:'myanimelist.xml' }).click();
-    URL.revokeObjectURL(url);
-  };
+  const showPanel = seasonal !== null && discoverRecs.recs.length > 0;
 
   return (
-    <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
-      <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:20, marginBottom:22 }}>
-        <div>
-          <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Your Rankings</h1>
-          <p style={{ margin:'6px 0 0', color:'var(--text-3)', fontSize:13.5 }}>
-            <span className="mono" style={{color:'var(--text-2)'}}>{rated.length}</span> titles ranked by anchored comparison
-          </p>
-        </div>
-        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-          <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
-            background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
-            {[
-              { key:'list', icon:'viewList', title:'List' },
-              { key:'card', icon:'viewCard', title:'Cards' },
-              { key:'grid', icon:'viewGrid', title:'Grid' },
-            ].map(({ key, icon, title }) => (
-              <button key={key} title={title} onClick={()=>setRankView(key)}
-                style={{ padding:'5px 8px', borderRadius:7, border:'none', cursor:'pointer',
-                  background: rankView===key ? 'var(--raised)' : 'transparent',
-                  color: rankView===key ? 'var(--accent-2)' : 'var(--text-3)',
-                  boxShadow: rankView===key ? '0 0 0 1px var(--line) inset' : 'none',
-                  transition:'all .12s ease', display:'flex', alignItems:'center' }}>
-                <Ico name={icon} size={15} sw={1.6} />
+    <div style={{ display:'flex', alignItems:'flex-start', position:'relative', zIndex:1, minHeight:'100%' }}>
+      <div style={{ flex:1, minWidth:0, padding:'30px 38px 60px' }}>
+        <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:20, marginBottom:22 }}>
+          <div>
+            <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Your Rankings</h1>
+            <p style={{ margin:'6px 0 0', color:'var(--text-3)', fontSize:13.5 }}>
+              <span className="mono" style={{color:'var(--text-2)'}}>{rated.length}</span> titles ranked by anchored comparison
+            </p>
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
+              background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
+              {[
+                { key:'list', icon:'viewList', title:'List' },
+                { key:'card', icon:'viewCard', title:'Cards' },
+                { key:'grid', icon:'viewGrid', title:'Grid' },
+              ].map(({ key, icon, title }) => (
+                <button key={key} title={title} onClick={()=>setRankView(key)}
+                  style={{ padding:'5px 8px', borderRadius:7, border:'none', cursor:'pointer',
+                    background: rankView===key ? 'var(--raised)' : 'transparent',
+                    color: rankView===key ? 'var(--accent-2)' : 'var(--text-3)',
+                    boxShadow: rankView===key ? '0 0 0 1px var(--line) inset' : 'none',
+                    transition:'all .12s ease', display:'flex', alignItems:'center' }}>
+                  <Ico name={icon} size={15} sw={1.6} />
+                </button>
+              ))}
+            </div>
+            {rated.length > 0 && (
+              <button className="btn btn-ghost" onClick={exportMAL} title="Export as MyAnimeList XML">
+                <Ico name="back" size={16} sw={2.2} style={{transform:'rotate(90deg)'}} /> Export XML
               </button>
+            )}
+            <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
+              <Ico name="add" size={17} sw={2.2} /> Add anime
+            </button>
+          </div>
+        </div>
+
+        {(() => {
+          const STATUS_TABS = [
+            ['all','All'], ['watching','Watching'], ['completed','Completed'],
+            ['plan_to_watch','Plan to Watch'], ['on_hold','On Hold'], ['dropped','Dropped'],
+          ];
+          const statusCounts = { all: rated.length };
+          rated.forEach(a => {
+            const s = a.status || 'completed';
+            statusCounts[s] = (statusCounts[s] || 0) + 1;
+          });
+          const activeTabs = STATUS_TABS.filter(([k]) => k==='all' || statusCounts[k]);
+          if (activeTabs.length <= 2) return null;
+          return (
+            <div style={{ display:'flex', gap:2, marginBottom:8, overflowX:'auto' }}>
+              {activeTabs.map(([key, label]) => (
+                <button key={key} onClick={() => setStatusFilter(key)}
+                  style={{ padding:'6px 14px', borderRadius:8, border:'none', cursor:'pointer',
+                    fontFamily:'inherit', fontWeight:600, fontSize:12.5,
+                    background: statusFilter===key ? 'var(--accent)' : 'var(--surface)',
+                    color: statusFilter===key ? '#fff' : 'var(--text-3)',
+                    boxShadow: statusFilter===key ? 'none' : '0 0 0 1px var(--line) inset',
+                    transition:'all .12s', whiteSpace:'nowrap', flexShrink:0 }}>
+                  {label}
+                  <span style={{ marginLeft:6, fontFamily:'var(--mono)', fontSize:11,
+                    opacity: statusFilter===key ? 0.75 : 0.5 }}>
+                    {statusCounts[key] || 0}
+                  </span>
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
+        <div style={{ display:'flex', gap:2, marginBottom:4, overflowX:'auto',
+          borderBottom:'1px solid var(--line)', paddingBottom:2 }}>
+          {formats.map(f => (
+            <FormatTab key={f} active={fmtFilter===f} onClick={()=>setFmt(f)} count={fmtCounts[f]}>
+              {f}
+            </FormatTab>
+          ))}
+        </div>
+
+        <div style={{ display:'flex', alignItems:'center', gap:14, flexWrap:'wrap',
+          padding:'14px 16px', borderRadius:14, background:'var(--surface)',
+          boxShadow:'0 0 0 1px var(--line) inset', marginBottom:20 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:9, flex:1, minWidth:200 }}>
+            <Ico name="search" size={16} color="var(--text-3)" />
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Filter your library…"
+              style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontSize:14 }} />
+          </div>
+          <div style={{ width:1, height:22, background:'var(--line)' }} />
+          {seasons.length > 2 && <DropdownSelect label="Season" value={season} onChange={setSeason} options={seasons} />}
+          <DropdownSelect label="Sort" value={sortKey} onChange={setSortKey}
+            options={sortOpts.map(o=>o.key)} render={k => sortOpts.find(o=>o.key===k).label} />
+        </div>
+
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:22 }}>
+          {genres.map(g => <GenreChip key={g} active={genre===g} onClick={()=>setGenre(g)}>{g}</GenreChip>)}
+        </div>
+
+        <div style={{ display:'grid',
+          gridTemplateColumns: rankView==='list' ? '1fr' : rankView==='card' ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)',
+          gap: rankView==='list' ? 8 : 16 }}>
+          {list.map((a,i) => (
+            <RankCard key={a.id} anime={a} rank={i+1} sortKey={sortKey}
+              onOpen={()=>navigate({name:'detail', animeId:a.id})} englishTitles={englishTitles} variant={rankView} />
+          ))}
+          {list.length===0 && (
+            <div style={{ gridColumn:'1/-1', textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No titles match these filters.</div>
+          )}
+        </div>
+      </div>
+
+      {showPanel && (
+        <div style={{ width:292, flexShrink:0, borderLeft:'1px solid var(--line)',
+          position:'sticky', top:0, height:'100vh', overflowY:'auto',
+          padding:'28px 18px 40px',
+          background:'linear-gradient(180deg, rgba(255,255,255,0.012), transparent 40%)' }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+            <h2 style={{ margin:0, fontSize:16, fontWeight:800, letterSpacing:'-0.01em',
+              display:'flex', alignItems:'center', gap:7 }}>
+              <Ico name="discover" size={15} color="var(--accent-2)" /> Discover
+            </h2>
+            <button className="btn-quiet" onClick={()=>navigate({name:'seasonal'})}
+              style={{ fontSize:12, color:'var(--text-3)', padding:'4px 8px' }}>
+              All <Ico name="chevron" size={12} style={{transform:'rotate(-90deg)'}} />
+            </button>
+          </div>
+          <p style={{ margin:'0 0 16px', color:'var(--text-3)', fontSize:12, lineHeight:1.5 }}>
+            This season · {discoverRecs.topGenres.join(', ')}
+          </p>
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {discoverRecs.recs.map(item => (
+              <DiscoverPanelCard key={item.api_id || item.title} item={item} onImport={importAnime}
+                inLibrary={new Set(library.map(a=>a.title.toLowerCase())).has((item.title||'').toLowerCase())} />
             ))}
           </div>
-          {rated.length > 0 && (
-            <button className="btn btn-ghost" onClick={exportMAL} title="Export as MyAnimeList XML">
-              <Ico name="back" size={16} sw={2.2} style={{transform:'rotate(90deg)'}} /> Export XML
-            </button>
-          )}
-          <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
-            <Ico name="add" size={17} sw={2.2} /> Add anime
-          </button>
         </div>
-      </div>
-
-      <div style={{ display:'flex', gap:2, marginBottom:4, overflowX:'auto',
-        borderBottom:'1px solid var(--line)', paddingBottom:2 }}>
-        {formats.map(f => (
-          <FormatTab key={f} active={fmtFilter===f} onClick={()=>setFmt(f)} count={fmtCounts[f]}>
-            {f}
-          </FormatTab>
-        ))}
-      </div>
-
-      <div style={{ display:'flex', alignItems:'center', gap:14, flexWrap:'wrap',
-        padding:'14px 16px', borderRadius:14, background:'var(--surface)',
-        boxShadow:'0 0 0 1px var(--line) inset', marginBottom:20 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:9, flex:1, minWidth:200 }}>
-          <Ico name="search" size={16} color="var(--text-3)" />
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Filter your library…"
-            style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontSize:14 }} />
-        </div>
-        <div style={{ width:1, height:22, background:'var(--line)' }} />
-        {seasons.length > 2 && <DropdownSelect label="Season" value={season} onChange={setSeason} options={seasons} />}
-        <DropdownSelect label="Sort" value={sortKey} onChange={setSortKey}
-          options={sortOpts.map(o=>o.key)} render={k => sortOpts.find(o=>o.key===k).label} />
-      </div>
-
-      <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:22 }}>
-        {genres.map(g => <GenreChip key={g} active={genre===g} onClick={()=>setGenre(g)}>{g}</GenreChip>)}
-      </div>
-
-      <div style={{ display:'grid',
-        gridTemplateColumns: rankView==='list' ? '1fr' : rankView==='card' ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)',
-        gap: rankView==='list' ? 8 : 16 }}>
-        {list.map((a,i) => (
-          <RankCard key={a.id} anime={a} rank={i+1} sortKey={sortKey}
-            onOpen={()=>navigate({name:'detail', animeId:a.id})} englishTitles={englishTitles} variant={rankView} />
-        ))}
-        {list.length===0 && (
-          <div style={{ gridColumn:'1/-1', textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No titles match these filters.</div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
@@ -870,8 +1010,104 @@ function AniListImport({ onClose, library, setLibrary }) {
   const [current, setCurrent]     = useState('');
   const [doneCount, setDoneCount] = useState(0);
   const [skipCount, setSkipCount] = useState(0);
-  const [fileErr, setFileErr]     = useState('');
-  const have = new Set(library.map(a => a.title.toLowerCase()));
+  const [fileErr, setFileErr]         = useState('');
+  const [pickTab, setPickTab]         = useState('anilist');
+  const [username, setUsername]       = useState('');
+  const [fetching, setFetching]       = useState(false);
+  const [malUsername, setMalUsername] = useState('');
+  const [malFetching, setMalFetching] = useState(false);
+  const [overwrite, setOverwrite]     = useState(false);
+  const haveMap = new Map([
+    ...library.map(a => [a.title.toLowerCase(), a.id]),
+    ...library.filter(a => a.title_ro).map(a => [a.title_ro.toLowerCase(), a.id]),
+  ]);
+  const haveMapByApiId = new Map(library.filter(a => a.api_id).map(a => [String(a.api_id), a.id]));
+
+  const fetchByUsername = async () => {
+    if (!username.trim()) return;
+    setFetching(true);
+    setFileErr('');
+    try {
+      const query = `query ($u: String) {
+        MediaListCollection(userName: $u, type: ANIME) {
+          lists { entries { score status repeat media {
+            idMal title { english romaji native }
+            coverImage { large } episodes format averageScore
+            startDate { year } genres description(asHtml: false)
+          } } }
+        }
+      }`;
+      const res = await fetch('https://graphql.anilist.co', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query, variables: { u: username.trim() } }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json.errors) {
+        setFileErr(json.errors[0]?.message || 'AniList returned an error.');
+        setFetching(false);
+        return;
+      }
+      const rawEntries = (json.data?.MediaListCollection?.lists ?? []).flatMap(l => l.entries);
+      const scores = rawEntries.map(e => e.score).filter(s => s > 0);
+      const use100 = scores.some(s => s > 10);
+      const parsed = rawEntries
+        .map(e => {
+          const t = e.media?.title ?? {};
+          const title = t.english || t.romaji || t.native || '';
+          const rawScore = e.score || 0;
+          const score = rawScore > 0
+            ? Math.round(Math.min(10, Math.max(1, use100 ? rawScore / 10 : rawScore)) * 10) / 10
+            : 0;
+          const m = e.media ?? {};
+          return {
+            title, score, status: e.status || '', rewatch_count: e.repeat || 0,
+            mal_id: m.idMal || null,
+            anilist_cover: m.coverImage?.large || null,
+            anilist_episodes: m.episodes || null,
+            anilist_format: m.format || null,
+            anilist_score: m.averageScore ? m.averageScore / 10 : null,
+            anilist_year: m.startDate?.year || null,
+            anilist_genres: m.genres || [],
+            anilist_synopsis: m.description || null,
+          };
+        })
+        .filter(e => e.title);
+      setEntries(parsed.map(en => {
+        const existingId = haveMap.get(en.title.toLowerCase());
+        return existingId != null ? { ...en, existingId } : en;
+      }));
+      setPhase('preview');
+    } catch (err) {
+      setFileErr(`Could not fetch list — check the username is correct and the list is public. (${err.message})`);
+    }
+    setFetching(false);
+  };
+
+  const fetchByMal = async () => {
+    if (!malUsername.trim()) return;
+    setMalFetching(true);
+    setFileErr('');
+    try {
+      const res = await fetch(`/jikan/user/${encodeURIComponent(malUsername.trim())}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setFileErr(err.detail || `Could not fetch list (${res.status})`);
+        setMalFetching(false);
+        return;
+      }
+      const { entries: raw } = await res.json();
+      setEntries(raw.map(en => {
+        const existingId = haveMap.get(en.title.toLowerCase());
+        return existingId != null ? { ...en, existingId } : en;
+      }));
+      setPhase('preview');
+    } catch (err) {
+      setFileErr(`Could not fetch list — check the username is correct and the list is public. (${err.message})`);
+    }
+    setMalFetching(false);
+  };
 
   const onFile = async (e) => {
     const file = e.target.files[0];
@@ -883,7 +1119,10 @@ function AniListImport({ onClose, library, setLibrary }) {
       const reader = new FileReader();
       reader.onload = (ev) => {
         const parsed = parseAniListCSV(ev.target.result);
-        setEntries(parsed.filter(en => !have.has(en.title.toLowerCase())));
+        setEntries(parsed.map(en => {
+          const existingId = haveMap.get(en.title.toLowerCase());
+          return existingId != null ? { ...en, existingId } : en;
+        }));
         setPhase('preview');
       };
       reader.readAsText(file);
@@ -902,7 +1141,10 @@ function AniListImport({ onClose, library, setLibrary }) {
           return;
         }
         const { entries: parsed } = await res.json();
-        setEntries(parsed.filter(en => !have.has(en.title.toLowerCase())));
+        setEntries(parsed.map(en => {
+          const existingId = haveMap.get(en.title.toLowerCase());
+          return existingId != null ? { ...en, existingId } : en;
+        }));
         setPhase('preview');
       } catch {
         setFileErr('Failed to read file. Please try again.');
@@ -913,34 +1155,111 @@ function AniListImport({ onClose, library, setLibrary }) {
     setFileErr('Unsupported file type. Use .zip, .xml, .json (GDPR/MAL export) or .csv (list export).');
   };
 
-  const runImport = async () => {
+  const runImport = async (rawImport) => {
+    const toImport = [...new Map(rawImport.map(e => [e.title.toLowerCase(), e])).values()];
     setPhase('importing');
     let done = 0, skipped = 0;
-    for (let i = 0; i < entries.length; i++) {
-      const en = entries[i];
+    for (let i = 0; i < toImport.length; i++) {
+      const en = toImport[i];
       setProgress(i);
       setCurrent(en.title);
       try {
-        const r = await fetch(`/search?q=${encodeURIComponent(en.title)}`).then(r => r.json());
-        const match = r.results?.[0];
-        if (!match) { skipped++; await new Promise(res => setTimeout(res, 400)); continue; }
         const v = Math.round(en.score * 10) / 10;
         const scores = en.criteria ?? { story: v, characters: v, animation: v, audio: v, enjoyment: v };
-        const { id } = await fetch('/anime', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            api_id: match.api_id, title: match.title, title_ro: match.title_ro, cover_url: match.cover_url,
-            genres: match.genres, year: match.year, season: match.season,
-            episodes: match.episodes, format: match.format, synopsis: match.synopsis,
-            mal_score: match.mal_score,
-          }),
-        }).then(r => r.json());
-        await fetch(`/anime/${id}/rating`, {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(scores),
-        });
         const rating = { ...scores, overall: v, updated_at: new Date().toISOString().slice(0, 10) };
-        setLibrary(lib => [...lib, { ...match, id, rating }]);
+        if (en.existingId) {
+          await fetch(`/anime/${en.existingId}/rating`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(scores),
+          });
+          if (en.rewatch_count > 0) {
+            await fetch(`/anime/${en.existingId}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ rewatch_count: en.rewatch_count }),
+            });
+          }
+          setLibrary(lib => lib.map(a => a.id === en.existingId ? { ...a, rating, rewatch_count: en.rewatch_count || a.rewatch_count } : a));
+        } else {
+          // prefer direct MAL ID lookup, fall back to title search
+          let match = null;
+          if (en.mal_id) {
+            const direct = await fetch(`/jikan/anime/${en.mal_id}`).catch(() => null);
+            if (direct && direct.ok) match = await direct.json();
+          }
+          if (!match) {
+            const r = await fetch(`/search?q=${encodeURIComponent(en.title)}`).then(r => r.json());
+            match = r.results?.[0] || null;
+          }
+          if (!match) {
+            // Fall back to AniList metadata so AniList-exclusive anime aren't silently dropped
+            if (en.title) {
+              match = {
+                api_id: en.mal_id ? String(en.mal_id) : null,
+                title: en.title,
+                title_ro: en.title,
+                cover_url: en.anilist_cover || null,
+                genres: en.anilist_genres || [],
+                year: en.anilist_year || null,
+                season: null,
+                episodes: en.anilist_episodes || null,
+                format: en.anilist_format || null,
+                synopsis: en.anilist_synopsis || null,
+                mal_score: en.anilist_score || null,
+              };
+            } else {
+              skipped++; await new Promise(res => setTimeout(res, 400)); continue;
+            }
+          }
+          const apiIdHit = match.api_id ? haveMapByApiId.get(String(match.api_id)) : null;
+          if (apiIdHit) {
+            if (en.score > 0) {
+              await fetch(`/anime/${apiIdHit}/rating`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(scores),
+              });
+            }
+            const patch = {};
+            if (en.rewatch_count > 0) patch.rewatch_count = en.rewatch_count;
+            if (en.status) patch.status = en.status.toLowerCase();
+            if (Object.keys(patch).length) {
+              await fetch(`/anime/${apiIdHit}`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch),
+              });
+            }
+            setLibrary(lib => lib.map(a => a.id === apiIdHit
+              ? { ...a, ...(en.score > 0 ? { rating } : {}), rewatch_count: en.rewatch_count || a.rewatch_count }
+              : a));
+            done++;
+            await new Promise(res => setTimeout(res, 400));
+            continue;
+          }
+          const { id } = await fetch('/anime', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              api_id: match.api_id, title: match.title, title_ro: match.title_ro, cover_url: match.cover_url,
+              genres: match.genres, year: match.year, season: match.season,
+              episodes: match.episodes, format: match.format, synopsis: match.synopsis,
+              mal_score: match.mal_score,
+            }),
+          }).then(r => r.json());
+          if (en.score > 0) {
+            await fetch(`/anime/${id}/rating`, {
+              method: 'PUT', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(scores),
+            });
+          }
+          const patch = {};
+          if (en.rewatch_count > 0) patch.rewatch_count = en.rewatch_count;
+          if (en.status) patch.status = en.status.toLowerCase();
+          if (Object.keys(patch).length) {
+            await fetch(`/anime/${id}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(patch),
+            });
+          }
+          setLibrary(lib => [...lib, { ...match, id, ...(en.score > 0 ? { rating } : {}), rewatch_count: en.rewatch_count || 0 }]);
+        }
         done++;
       } catch { skipped++; }
       await new Promise(res => setTimeout(res, 400));
@@ -958,60 +1277,150 @@ function AniListImport({ onClose, library, setLibrary }) {
         maxHeight:'80vh', overflow:'auto',
         boxShadow:'0 24px 80px rgba(0,0,0,0.4)', border:'1px solid var(--line)' }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
-          <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>Import from AniList</h2>
+          <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>Import Anime List</h2>
           <button className="btn-quiet" onClick={onClose} style={{padding:6}}><Ico name="close" size={18} /></button>
         </div>
 
         {phase === 'pick' && (
           <div>
-            <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 8px', lineHeight:1.6 }}>
-              Three export formats are supported:
-            </p>
-            <ul style={{ color:'var(--text-3)', fontSize:13, margin:'0 0 18px', paddingLeft:18, lineHeight:1.8 }}>
-              <li><span style={{color:'var(--text-2)'}}>GDPR data download</span> &mdash; anilist.co &rarr; Settings &rarr; Account &rarr; Download Data &rarr; <em>Upload the .zip file</em></li>
-              <li><span style={{color:'var(--text-2)'}}>CSV list export</span> &mdash; anilist.co &rarr; Settings &rarr; Import &amp; Export &rarr; Export Anime List &rarr; <em>Upload the .csv file</em></li>
-              <li><span style={{color:'var(--text-2)'}}>MAL / MyAnimeRank XML</span> &mdash; myanimelist.net &rarr; Export &rarr; Download XML, or use this app&rsquo;s own Export XML &rarr; <em>Upload the .xml file (per-criterion scores restored)</em></li>
-            </ul>
-            <label style={{ display:'block', border:'2px dashed var(--line)', borderRadius:12,
-              padding:'32px 24px', textAlign:'center', cursor:'pointer' }}>
-              <Ico name="upload" size={28} color="var(--accent-2)" />
-              <div style={{ marginTop:10, fontSize:14, color:'var(--text-2)', fontWeight:600 }}>
-                Choose file (.zip, .json, .csv, or .xml)
+            <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
+              background:'var(--surface-2)', boxShadow:'0 0 0 1px var(--line) inset', marginBottom:20 }}>
+              {[['anilist','AniList'],['mal','MAL'],['file','Upload file']].map(([key,label]) => (
+                <button key={key} onClick={() => { setPickTab(key); setFileErr(''); }}
+                  style={{ flex:1, padding:'7px 12px', borderRadius:8, border:'none', cursor:'pointer',
+                    fontWeight:600, fontSize:13, fontFamily:'inherit',
+                    background: pickTab===key ? 'var(--raised)' : 'transparent',
+                    color: pickTab===key ? 'var(--text)' : 'var(--text-3)',
+                    boxShadow: pickTab===key ? '0 0 0 1px var(--line) inset' : 'none',
+                    transition:'all .12s ease' }}>{label}</button>
+              ))}
+            </div>
+
+            {pickTab === 'anilist' && (
+              <div>
+                <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 16px', lineHeight:1.6 }}>
+                  Enter your AniList username to fetch your anime list directly.
+                  Your list must be <span style={{color:'var(--text-2)'}}>public</span>.
+                </p>
+                <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                  <input value={username} onChange={e => setUsername(e.target.value)}
+                    onKeyDown={e => e.key==='Enter' && fetchByUsername()}
+                    placeholder="AniList username" autoFocus
+                    style={{ flex:1, background:'var(--raised)', border:'none',
+                      boxShadow:'0 0 0 1px var(--line) inset', borderRadius:9,
+                      padding:'11px 13px', color:'var(--text)', fontSize:14,
+                      outline:'none', fontWeight:500, fontFamily:'inherit' }} />
+                  <button className="btn btn-primary" onClick={fetchByUsername}
+                    disabled={fetching || !username.trim()}
+                    style={{ opacity:(fetching||!username.trim())?0.5:1,
+                      pointerEvents:(fetching||!username.trim())?'none':'auto' }}>
+                    {fetching ? 'Fetching…' : 'Fetch list'}
+                  </button>
+                </div>
+                {fileErr && <div style={{ marginTop:10, fontSize:13, color:'#e07070' }}>{fileErr}</div>}
               </div>
-              <div style={{ fontSize:12, color:'var(--text-3)', marginTop:4 }}>
-                Only scored entries are imported &mdash; duplicates are skipped
+            )}
+
+            {pickTab === 'mal' && (
+              <div>
+                <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 16px', lineHeight:1.6 }}>
+                  Enter your MyAnimeList username to fetch your completed anime list.
+                  Your list must be <span style={{color:'var(--text-2)'}}>public</span>.
+                  Scores are applied equally across all 5 criteria.
+                </p>
+                <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                  <input value={malUsername} onChange={e => setMalUsername(e.target.value)}
+                    onKeyDown={e => e.key==='Enter' && fetchByMal()}
+                    placeholder="MAL username" autoFocus
+                    style={{ flex:1, background:'var(--raised)', border:'none',
+                      boxShadow:'0 0 0 1px var(--line) inset', borderRadius:9,
+                      padding:'11px 13px', color:'var(--text)', fontSize:14,
+                      outline:'none', fontWeight:500, fontFamily:'inherit' }} />
+                  <button className="btn btn-primary" onClick={fetchByMal}
+                    disabled={malFetching || !malUsername.trim()}
+                    style={{ opacity:(malFetching||!malUsername.trim())?0.5:1,
+                      pointerEvents:(malFetching||!malUsername.trim())?'none':'auto' }}>
+                    {malFetching ? 'Fetching…' : 'Fetch list'}
+                  </button>
+                </div>
+                {fileErr && <div style={{ marginTop:10, fontSize:13, color:'#e07070' }}>{fileErr}</div>}
               </div>
-              <input type="file" accept=".zip,.json,.csv,.xml" style={{ display:'none' }} onChange={onFile} />
-            </label>
-            {fileErr && (
-              <div style={{ marginTop:12, fontSize:13, color:'#e07070', textAlign:'center' }}>
-                {fileErr}
+            )}
+
+            {pickTab === 'file' && (
+              <div>
+                <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 8px', lineHeight:1.6 }}>
+                  Three export formats are supported:
+                </p>
+                <ul style={{ color:'var(--text-3)', fontSize:13, margin:'0 0 18px', paddingLeft:18, lineHeight:1.8 }}>
+                  <li><span style={{color:'var(--text-2)'}}>GDPR data download</span> &mdash; anilist.co &rarr; Settings &rarr; Account &rarr; Download Data &rarr; <em>Upload the .zip file</em></li>
+                  <li><span style={{color:'var(--text-2)'}}>CSV list export</span> &mdash; anilist.co &rarr; Settings &rarr; Import &amp; Export &rarr; Export Anime List &rarr; <em>Upload the .csv file</em></li>
+                  <li><span style={{color:'var(--text-2)'}}>MAL / MyAnimeRank XML</span> &mdash; myanimelist.net &rarr; Export &rarr; Download XML, or use this app&rsquo;s own Export XML &rarr; <em>Upload the .xml file (per-criterion scores restored)</em></li>
+                </ul>
+                <label style={{ display:'block', border:'2px dashed var(--line)', borderRadius:12,
+                  padding:'32px 24px', textAlign:'center', cursor:'pointer' }}>
+                  <Ico name="upload" size={28} color="var(--accent-2)" />
+                  <div style={{ marginTop:10, fontSize:14, color:'var(--text-2)', fontWeight:600 }}>
+                    Choose file (.zip, .json, .csv, or .xml)
+                  </div>
+                  <div style={{ fontSize:12, color:'var(--text-3)', marginTop:4 }}>
+                    Only scored entries are imported &mdash; duplicates are skipped
+                  </div>
+                  <input type="file" accept=".zip,.json,.csv,.xml" style={{ display:'none' }} onChange={onFile} />
+                </label>
+                {fileErr && (
+                  <div style={{ marginTop:12, fontSize:13, color:'#e07070', textAlign:'center' }}>
+                    {fileErr}
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
 
-        {phase === 'preview' && (
+        {phase === 'preview' && (() => {
+          const existingCount = entries.filter(en => en.existingId).length;
+          const activeEntries = entries.filter(en => overwrite || !en.existingId);
+          return (
           <div>
-            <p style={{ color:'var(--text-3)', fontSize:13.5, margin:'0 0 16px' }}>
-              Found{' '}
-              <span style={{color:'var(--text)', fontWeight:700}}>{entries.length}</span>{' '}
-              scored {entries.length === 1 ? 'entry' : 'entries'} not yet in your library.
-              Each score is applied equally across all 5 criteria.
-            </p>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
+              <p style={{ color:'var(--text-3)', fontSize:13.5, margin:0 }}>
+                <span style={{color:'var(--text)', fontWeight:700}}>{activeEntries.length}</span>{' '}
+                {activeEntries.length === 1 ? 'entry' : 'entries'} to import.
+                Each score is applied equally across all 5 criteria.
+              </p>
+              {existingCount > 0 && (
+                <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer',
+                  fontSize:12.5, color:'var(--text-2)', fontWeight:600, flexShrink:0, marginLeft:16 }}>
+                  <div onClick={() => setOverwrite(v => !v)}
+                    style={{ width:32, height:18, borderRadius:999, position:'relative', cursor:'pointer',
+                      background: overwrite ? 'var(--accent)' : 'rgba(255,255,255,0.15)',
+                      transition:'background .15s', flexShrink:0 }}>
+                    <div style={{ position:'absolute', top:2, left: overwrite ? 14 : 2,
+                      width:14, height:14, borderRadius:'50%', background:'#fff',
+                      transition:'left .15s', boxShadow:'0 1px 3px rgba(0,0,0,0.4)' }} />
+                  </div>
+                  Update {existingCount} existing
+                </label>
+              )}
+            </div>
             <div style={{ maxHeight:260, overflowY:'auto', marginBottom:20,
               border:'1px solid var(--line)', borderRadius:10 }}>
-              {entries.length === 0
+              {activeEntries.length === 0
                 ? <div style={{ padding:'32px 16px', textAlign:'center', color:'var(--text-3)' }}>
                     No new scored entries to import.
                   </div>
-                : entries.map((en, i) => (
+                : activeEntries.map((en, i) => (
                   <div key={i} style={{ display:'flex', justifyContent:'space-between',
                     alignItems:'center', padding:'10px 16px',
-                    borderBottom: i < entries.length - 1 ? '1px solid var(--line)' : 'none',
+                    borderBottom: i < activeEntries.length - 1 ? '1px solid var(--line)' : 'none',
                     fontSize:13.5 }}>
                     <span style={{ flex:1, whiteSpace:'nowrap', overflow:'hidden',
                       textOverflow:'ellipsis', marginRight:12 }}>{en.title}</span>
+                    {en.existingId && (
+                      <span style={{ fontSize:10.5, fontWeight:700, letterSpacing:'0.05em',
+                        color:'var(--accent-2)', marginRight:10, flexShrink:0 }}>UPDATE</span>
+                    )}
                     <span style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:13,
                       color:'var(--accent)', flexShrink:0 }}>{en.score.toFixed(1)}</span>
                   </div>
@@ -1019,12 +1428,15 @@ function AniListImport({ onClose, library, setLibrary }) {
             </div>
             <div style={{ display:'flex', gap:10 }}>
               <button className="btn btn-ghost" onClick={onClose} style={{ flex:1 }}>Cancel</button>
-              <button className="btn" onClick={runImport} disabled={entries.length === 0} style={{ flex:2 }}>
-                Import {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+              <button className="btn btn-primary" onClick={() => runImport(activeEntries)}
+                disabled={activeEntries.length === 0} style={{ flex:2, justifyContent:'center',
+                  opacity: activeEntries.length === 0 ? 0.5 : 1 }}>
+                Import {activeEntries.length} {activeEntries.length === 1 ? 'entry' : 'entries'}
               </button>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {phase === 'importing' && (
           <div>
@@ -1070,38 +1482,152 @@ function AniListImport({ onClose, library, setLibrary }) {
   );
 }
 
-/* ─── Search / import screen ───────────────────────────────────────────── */
-function ResultCard({ item, inLibrary, onImport, englishTitles }) {
-  const [hover, setHover] = useState(false);
+/* ─── Seasonal browser ─────────────────────────────────────────────────── */
+function Seasonal({ navigate, importAnime, library, englishTitles }) {
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr]         = useState(null);
+  const have = new Set(library.map(a => a.title.toLowerCase()));
+
+  useEffect(() => {
+    fetch('/seasonal')
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(d => { setResults(d.results || []); setLoading(false); })
+      .catch(() => { setErr('Could not load seasonal data.'); setLoading(false); });
+  }, []);
+
   return (
-    <div onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
-      className="fade-up"
-      style={{
-        display:'flex', gap:16, padding:16, borderRadius:14,
-        background: hover ? 'var(--hover)' : 'var(--surface)',
-        boxShadow: hover ? '0 0 0 1px var(--line-2) inset' : '0 0 0 1px var(--line) inset',
-        transition:'all .14s ease',
-      }}>
-      <Poster anime={item} w={74} radius={9} showBadge />
-      <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ display:'flex', alignItems:'baseline', gap:10 }}>
-          <h3 style={{ margin:0, fontSize:17, fontWeight:700, letterSpacing:'-0.01em' }}>{displayTitle(item, englishTitles)}</h3>
-          <span className="mono" style={{ color:'var(--text-3)', fontSize:12.5 }}>{item.year}</span>
-        </div>
-        <div style={{ display:'flex', gap:6, flexWrap:'wrap', margin:'9px 0' }}>
-          {item.genres.map(g => <GenreChip key={g} small>{g}</GenreChip>)}
-        </div>
-        <p style={{ margin:0, color:'var(--text-2)', fontSize:13, lineHeight:1.55, maxWidth:560,
-          display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
-          {item.synopsis}
+    <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
+      <div style={{ marginBottom:24 }}>
+        <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>This Season</h1>
+        <p style={{ margin:'6px 0 0', color:'var(--text-3)', fontSize:13.5 }}>
+          Currently airing — click any title to import and rate it
         </p>
       </div>
-      <div style={{ display:'flex', alignItems:'center' }}>
-        {inLibrary
-          ? <span className="btn btn-ghost" style={{opacity:.6,cursor:'default'}}><Ico name="check" size={16} sw={2.2} color="var(--accent-2)" /> In library</span>
-          : <button className="btn btn-primary" onClick={()=>onImport(item)}>Import &amp; rate</button>}
+      {loading && (
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:16 }}>
+          {Array.from({length:12}).map((_,i) => (
+            <div key={i} style={{ borderRadius:12, background:'var(--surface)',
+              boxShadow:'0 0 0 1px var(--line) inset', overflow:'hidden' }}>
+              <div style={{ width:'100%', paddingTop:'140%', background:'var(--raised)' }} />
+              <div style={{ padding:'10px 10px 12px' }}>
+                <div style={{ height:12, borderRadius:6, background:'var(--raised)', marginBottom:6 }} />
+                <div style={{ height:10, borderRadius:5, background:'var(--raised)', width:'60%' }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {err && (
+        <div style={{ padding:'16px 20px', borderRadius:12, background:'rgba(248,113,113,0.08)',
+          border:'1px solid rgba(248,113,113,0.25)', color:'#f87171', fontSize:14 }}>{err}</div>
+      )}
+      {!loading && !err && results.length === 0 && (
+        <div style={{ textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No seasonal data available.</div>
+      )}
+      {!loading && !err && results.length > 0 && (
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:16 }}>
+          {results.map(item => (
+            <ResultCard key={item.api_id || item.title} item={item}
+              inLibrary={have.has(item.title.toLowerCase())}
+              onImport={importAnime} englishTitles={englishTitles} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Search / import screen ───────────────────────────────────────────── */
+function SeasonalPreviewModal({ item, inLibrary, onImport, onClose }) {
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
+      style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.78)', backdropFilter:'blur(5px)',
+        display:'grid', placeItems:'center', zIndex:200 }}>
+      <div onClick={e => e.stopPropagation()} className="fade-up"
+        style={{ width:540, maxWidth:'92vw', background:'var(--surface-2)', borderRadius:20, padding:28,
+          boxShadow:'0 0 0 1px var(--line-2) inset, 0 28px 90px rgba(0,0,0,0.55)' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+          <div style={{ display:'flex', gap:16, flex:1, minWidth:0 }}>
+            <Poster anime={item} w={100} radius={11} showBadge />
+            <div style={{ flex:1, minWidth:0 }}>
+              <h2 style={{ margin:'0 0 4px', fontSize:20, fontWeight:800, letterSpacing:'-0.02em',
+                lineHeight:1.2 }}>{item.title}</h2>
+              <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:10 }}>
+                <span className="mono" style={{ color:'var(--text-3)', fontSize:12.5 }}>{item.year}</span>
+                {item.episodes && <><span style={{color:'var(--text-4)'}}>·</span>
+                  <span style={{ color:'var(--text-3)', fontSize:12.5 }}>{item.episodes} eps</span></>}
+                {item.mal_score && <><span style={{color:'var(--text-4)'}}>·</span>
+                  <span style={{ fontFamily:'var(--mono)', fontSize:12.5, color:'var(--accent-2)' }}>
+                    ★ {item.mal_score.toFixed(2)}
+                  </span></>}
+              </div>
+              <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                {(item.genres || []).map(g => <GenreChip key={g} small>{g}</GenreChip>)}
+              </div>
+            </div>
+          </div>
+          <button className="btn-quiet" onClick={onClose} style={{padding:6, marginLeft:8, flexShrink:0}}>
+            <Ico name="close" size={18} />
+          </button>
+        </div>
+        {item.synopsis && (
+          <p style={{ margin:'0 0 24px', color:'var(--text-2)', fontSize:13.5, lineHeight:1.65 }}>
+            {item.synopsis}
+          </p>
+        )}
+        <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+          {inLibrary
+            ? <span className="btn btn-ghost" style={{opacity:.6, cursor:'default'}}>
+                <Ico name="check" size={16} sw={2.2} color="var(--accent-2)" /> In library
+              </span>
+            : <button className="btn btn-primary" onClick={() => { onImport(item); onClose(); }}>
+                Import &amp; rate
+              </button>}
+        </div>
       </div>
     </div>
+  );
+}
+
+function ResultCard({ item, inLibrary, onImport, englishTitles }) {
+  const [hover, setHover] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  return (
+    <>
+      <div onClick={() => setShowPreview(true)}
+        onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
+        className="fade-up"
+        style={{
+          display:'flex', gap:16, padding:16, borderRadius:14, cursor:'pointer',
+          background: hover ? 'var(--hover)' : 'var(--surface)',
+          boxShadow: hover ? '0 0 0 1px var(--line-2) inset' : '0 0 0 1px var(--line) inset',
+          transition:'all .14s ease',
+        }}>
+        <Poster anime={item} w={74} radius={9} showBadge />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ display:'flex', alignItems:'baseline', gap:10 }}>
+            <h3 style={{ margin:0, fontSize:17, fontWeight:700, letterSpacing:'-0.01em' }}>{displayTitle(item, englishTitles)}</h3>
+            <span className="mono" style={{ color:'var(--text-3)', fontSize:12.5 }}>{item.year}</span>
+          </div>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', margin:'9px 0 0' }}>
+            {item.genres.map(g => <GenreChip key={g} small>{g}</GenreChip>)}
+          </div>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', flexShrink:0 }}>
+          {inLibrary && (
+            <span style={{ fontFamily:'var(--mono)', fontSize:11, fontWeight:700,
+              padding:'3px 8px', borderRadius:6, background:'rgba(92,192,255,0.12)',
+              color:'var(--accent-2)', letterSpacing:'0.03em' }}>✓ owned</span>
+          )}
+        </div>
+      </div>
+      {showPreview && (
+        <SeasonalPreviewModal item={item} inLibrary={inLibrary}
+          onImport={onImport} onClose={() => setShowPreview(false)} />
+      )}
+    </>
   );
 }
 
@@ -1461,6 +1987,209 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
   );
 }
 
+/* ─── Compare modal ────────────────────────────────────────────────────── */
+function CompareModal({ anime, library, onClose, englishTitles }) {
+  const [right, setRight] = useState(null);
+  const [q, setQ]         = useState('');
+  const rated = library.filter(a => a.rating && a.id !== anime.id);
+  const filtered = q ? rated.filter(a => displayTitle(a, true).toLowerCase().includes(q.toLowerCase())) : rated;
+
+  const Panel = ({ a, other }) => {
+    const ov = overall(a.rating);
+    const ovOther = other ? overall(other.rating) : null;
+    return (
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ display:'flex', gap:14, alignItems:'flex-start', marginBottom:20 }}>
+          <Poster anime={a} w={68} radius={10} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontWeight:800, fontSize:15, lineHeight:1.25,
+              display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
+              {displayTitle(a, englishTitles)}
+            </div>
+            <div style={{ fontSize:12, color:'var(--text-3)', marginTop:4 }}>{a.year}{a.format ? ` · ${a.format}` : ''}</div>
+            <div style={{ marginTop:10, display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontFamily:'var(--mono)', fontWeight:800, fontSize:24,
+                color: ovOther===null ? 'var(--accent-2)' : ov>ovOther ? 'var(--accent-2)' : ov<ovOther ? 'var(--text-3)' : 'var(--text-2)' }}>
+                {ov.toFixed(2)}
+              </span>
+              {ovOther!==null && ov!==ovOther && (
+                <span style={{ fontSize:11, fontWeight:700, color: ov>ovOther?'oklch(0.78 0.16 150)':'#f87171' }}>
+                  {ov>ovOther?'▲':'▼'} {Math.abs(ov-ovOther).toFixed(2)}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        {CRITERIA.map(c => {
+          const val = a.rating[c.key];
+          const otherVal = other ? other.rating[c.key] : null;
+          const wins = otherVal !== null && val > otherVal;
+          const ties = otherVal !== null && val === otherVal;
+          return (
+            <div key={c.key} style={{ marginBottom:9 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
+                <span style={{ fontSize:12, fontWeight:600, color:'var(--text-3)' }}>{c.label}</span>
+                <span style={{ fontSize:13, fontFamily:'var(--mono)', fontWeight:700,
+                  color: wins ? 'var(--accent-2)' : ties ? 'var(--text-2)' : 'var(--text-3)' }}>
+                  {val.toFixed(1)}
+                </span>
+              </div>
+              <div style={{ height:5, borderRadius:99, background:'var(--raised)', overflow:'hidden' }}>
+                <div style={{ width:`${((val-1)/9)*100}%`, height:'100%', borderRadius:99,
+                  background: wins ? 'var(--accent)' : ties ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.12)',
+                  transition:'width .4s' }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:100,
+      display:'flex', alignItems:'center', justifyContent:'center' }}
+      onClick={e => { if (e.target===e.currentTarget) onClose(); }}>
+      <div style={{ background:'var(--surface)', borderRadius:18, padding:28, width:680, maxWidth:'96vw',
+        maxHeight:'88vh', overflowY:'auto',
+        boxShadow:'0 24px 80px rgba(0,0,0,0.5)', border:'1px solid var(--line)' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:22 }}>
+          <h2 style={{ margin:0, fontSize:19, fontWeight:800 }}>Compare</h2>
+          <button className="btn-quiet" onClick={onClose} style={{padding:6}}><Ico name="close" size={18}/></button>
+        </div>
+        <div style={{ display:'flex', gap:20 }}>
+          <Panel a={anime} other={right} />
+          <div style={{ width:1, background:'var(--line)', flexShrink:0, alignSelf:'stretch' }} />
+          {right ? (
+            <Panel a={right} other={anime} />
+          ) : (
+            <div style={{ flex:1, minWidth:0 }}>
+              <p style={{ margin:'0 0 10px', fontSize:13, color:'var(--text-3)', fontWeight:600 }}>
+                Pick an anime to compare
+              </p>
+              <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search library…" autoFocus
+                style={{ width:'100%', background:'var(--raised)', border:'none',
+                  boxShadow:'0 0 0 1px var(--line) inset', borderRadius:8,
+                  padding:'9px 12px', color:'var(--text)', fontSize:13.5,
+                  outline:'none', fontFamily:'inherit', marginBottom:8 }} />
+              <div style={{ maxHeight:300, overflowY:'auto' }}>
+                {filtered.slice(0,40).map(a => (
+                  <div key={a.id} onClick={()=>setRight(a)}
+                    style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 8px',
+                      borderRadius:8, cursor:'pointer', transition:'background .1s' }}
+                    onMouseEnter={e=>e.currentTarget.style.background='var(--raised)'}
+                    onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                    <Poster anime={a} w={32} radius={5} />
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontWeight:600, fontSize:13, whiteSpace:'nowrap',
+                        overflow:'hidden', textOverflow:'ellipsis' }}>
+                        {displayTitle(a, englishTitles)}
+                      </div>
+                      <div style={{ fontSize:11, color:'var(--text-3)' }}>{a.year}{a.format?` · ${a.format}`:''}</div>
+                    </div>
+                    <span style={{ fontFamily:'var(--mono)', fontSize:13, fontWeight:700, color:'var(--accent)', flexShrink:0 }}>
+                      {overall(a.rating).toFixed(1)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        {right && (
+          <button className="btn-quiet" onClick={()=>{ setRight(null); setQ(''); }}
+            style={{ marginTop:16, fontSize:12, color:'var(--text-3)' }}>
+            ← Change comparison
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Edit metadata modal ──────────────────────────────────────────────── */
+function EditModal({ anime, onClose, onSave }) {
+  const [form, setForm] = useState({
+    status:        anime.status        || 'completed',
+    rewatch_count: anime.rewatch_count != null ? String(anime.rewatch_count) : '0',
+    notes:         anime.notes         || '',
+  });
+  const [saving, setSaving] = useState(false);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    const payload = {
+      status:        form.status || 'completed',
+      rewatch_count: parseInt(form.rewatch_count) || 0,
+      notes:         form.notes || undefined,
+    };
+    await fetch(`/anime/${anime.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    onSave(payload);
+    setSaving(false);
+    onClose();
+  };
+
+  const inputStyle = { width:'100%', background:'var(--raised)', border:'none',
+    boxShadow:'0 0 0 1px var(--line) inset', borderRadius:8,
+    padding:'9px 11px', color:'var(--text)', fontSize:13.5,
+    outline:'none', fontFamily:'inherit' };
+
+  const fieldLabel = (label) => (
+    <label style={{ display:'block', fontSize:11.5, fontWeight:700, color:'var(--text-3)',
+      letterSpacing:'0.05em', textTransform:'uppercase', marginBottom:5 }}>{label}</label>
+  );
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', zIndex:100,
+      display:'flex', alignItems:'center', justifyContent:'center' }}
+      onClick={e => { if (e.target===e.currentTarget) onClose(); }}>
+      <div style={{ background:'var(--surface)', borderRadius:18, padding:28, width:400,
+        boxShadow:'0 24px 80px rgba(0,0,0,0.4)', border:'1px solid var(--line)' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:22 }}>
+          <h2 style={{ margin:0, fontSize:19, fontWeight:800 }}>Edit</h2>
+          <button className="btn-quiet" onClick={onClose} style={{padding:6}}><Ico name="close" size={18}/></button>
+        </div>
+
+        <div style={{ marginBottom:14 }}>
+          {fieldLabel('Status')}
+          <select value={form.status} onChange={e => set('status', e.target.value)}
+            style={{ ...inputStyle, cursor:'pointer' }}>
+            {[['completed','Completed'],['watching','Watching'],['plan_to_watch','Plan to Watch'],['on_hold','On Hold'],['dropped','Dropped']].map(([v,l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ marginBottom:14 }}>
+          {fieldLabel('Rewatch count')}
+          <input type="number" min="0" value={form.rewatch_count}
+            onChange={e => set('rewatch_count', e.target.value)}
+            style={inputStyle} />
+        </div>
+
+        <div style={{ marginBottom:22 }}>
+          {fieldLabel('Notes')}
+          <textarea rows={4} value={form.notes} onChange={e => set('notes', e.target.value)}
+            style={{ ...inputStyle, resize:'vertical' }} />
+        </div>
+
+        <div style={{ display:'flex', gap:10 }}>
+          <button className="btn btn-ghost" onClick={onClose} style={{ flex:1 }}>Cancel</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving}
+            style={{ flex:2, justifyContent:'center', opacity:saving?0.6:1 }}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Detail screen ────────────────────────────────────────────────────── */
 function CriterionBar({ label, ckey, value, rank, total }) {
   const pct = ((value-1)/9)*100;
@@ -1485,10 +2214,38 @@ function CriterionBar({ label, ckey, value, rank, total }) {
   );
 }
 
-function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
-  const [confirm, setConfirm] = useState(false);
+function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTitles }) {
+  const [confirm, setConfirm]       = useState(false);
+  const [showEdit, setShowEdit]     = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
+  const [rewatching, setRewatching] = useState(false);
+  const [notesText, setNotesText]   = useState(anime.notes || '');
+  const [notesEdit, setNotesEdit]   = useState(false);
+  const [notesSaving, setNotesSaving] = useState(false);
   const rated = library.filter(a => a.rating);
   const ov    = overall(anime.rating);
+
+  const onRewatch = async () => {
+    setRewatching(true);
+    const newCount = (anime.rewatch_count || 0) + 1;
+    await fetch(`/anime/${anime.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rewatch_count: newCount }),
+    });
+    updateAnime(anime.id, { rewatch_count: newCount });
+    setRewatching(false);
+  };
+
+  const saveNotes = async () => {
+    setNotesSaving(true);
+    await fetch(`/anime/${anime.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes: notesText }),
+    });
+    updateAnime(anime.id, { notes: notesText });
+    setNotesSaving(false);
+    setNotesEdit(false);
+  };
 
   const rankOf = (key) => {
     const val = (a) => key==='overall' ? overall(a.rating) : a.rating[key];
@@ -1535,6 +2292,21 @@ function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
                       }}>{pos?'+':''}{delta.toFixed(1)} vs MAL</span>
                     </>;
                   })()}
+                  {(anime.rewatch_count||0) > 0 && <>
+                    <span style={{opacity:.4}}>&bull;</span>
+                    <span style={{color:'var(--text-2)'}}>Rewatched {anime.rewatch_count}×</span>
+                  </>}
+                  {(() => {
+                    const s = anime.status;
+                    if (!s || s === 'completed') return null;
+                    const MAP = { watching:['Watching','var(--accent)'], plan_to_watch:['Plan to Watch','var(--text-3)'], on_hold:['On Hold','#f0b429'], dropped:['Dropped','#f87171'] };
+                    const [label, color] = MAP[s] || [];
+                    if (!label) return null;
+                    return <span style={{ fontSize:11, fontWeight:700, letterSpacing:'0.04em',
+                      padding:'2px 9px', borderRadius:999,
+                      background:`color-mix(in srgb, ${color} 14%, transparent)`,
+                      color, border:`1px solid color-mix(in srgb, ${color} 35%, transparent)` }}>{label}</span>;
+                  })()}
                 </div>
                 <div style={{ display:'flex', gap:7, flexWrap:'wrap', marginTop:14 }}>
                   {anime.genres.map(g => <GenreChip key={g} small>{g}</GenreChip>)}
@@ -1547,9 +2319,18 @@ function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
               </div>
             </div>
             {anime.synopsis && <p style={{ margin:'18px 0 0', color:'var(--text-2)', fontSize:14, lineHeight:1.65, maxWidth:620 }}>{anime.synopsis}</p>}
-            <div style={{ display:'flex', gap:10, marginTop:22 }}>
+            <div style={{ display:'flex', gap:10, marginTop:22, flexWrap:'wrap' }}>
               <button className="btn btn-primary" onClick={()=>navigate({name:'rate',animeId:anime.id})}>
                 <Ico name="star" size={16} sw={1.9} /> Re-rate
+              </button>
+              <button className="btn btn-ghost" onClick={onRewatch} disabled={rewatching}>
+                <Ico name="check" size={15} /> {rewatching ? '…' : '+ Rewatch'}
+              </button>
+              <button className="btn btn-ghost" onClick={()=>setShowCompare(true)}>
+                <Ico name="compare" size={16} /> Compare
+              </button>
+              <button className="btn btn-ghost" onClick={()=>setShowEdit(true)}>
+                <Ico name="edit" size={16} /> Edit
               </button>
               <button className="btn btn-ghost" onClick={()=>setConfirm(true)}>
                 <Ico name="trash" size={16} /> Delete
@@ -1572,6 +2353,51 @@ function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
         <p style={{ margin:'14px 2px 0', color:'var(--text-4)', fontSize:12 }}>
           Last rated <span className="mono">{anime.rating.updated_at}</span> &middot; Overall is the unweighted average of the five.
         </p>
+
+        <div style={{ marginTop:32 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+            <h2 style={{ margin:0, fontSize:14, fontWeight:800, letterSpacing:'0.06em',
+              textTransform:'uppercase', color:'var(--text-3)' }}>Notes</h2>
+            {!notesEdit && (
+              <button className="btn-quiet" onClick={()=>setNotesEdit(true)}
+                style={{ padding:'3px 8px', fontSize:12, display:'flex', alignItems:'center', gap:4 }}>
+                <Ico name="edit" size={12} /> {notesText ? 'Edit' : 'Add'}
+              </button>
+            )}
+          </div>
+          {notesEdit ? (
+            <div>
+              <textarea value={notesText} onChange={e=>setNotesText(e.target.value)}
+                rows={4} autoFocus
+                style={{ width:'100%', background:'var(--surface)', border:'none',
+                  boxShadow:'0 0 0 1px var(--line-2) inset', borderRadius:10,
+                  padding:'12px 14px', color:'var(--text)', fontSize:14, lineHeight:1.6,
+                  outline:'none', fontFamily:'inherit', resize:'vertical', display:'block' }} />
+              <div style={{ display:'flex', gap:8, marginTop:8 }}>
+                <button className="btn btn-ghost" onClick={()=>{ setNotesText(anime.notes||''); setNotesEdit(false); }}>Cancel</button>
+                <button className="btn btn-primary" onClick={saveNotes} disabled={notesSaving}
+                  style={{ opacity:notesSaving?0.6:1 }}>
+                  {notesSaving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          ) : notesText ? (
+            <p onClick={()=>setNotesEdit(true)}
+              style={{ margin:0, color:'var(--text-2)', fontSize:14, lineHeight:1.65,
+                whiteSpace:'pre-wrap', padding:'14px 16px', borderRadius:10,
+                background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset',
+                cursor:'pointer' }}>
+              {notesText}
+            </p>
+          ) : (
+            <button onClick={()=>setNotesEdit(true)}
+              style={{ fontSize:13.5, color:'var(--text-4)', padding:'12px 16px', borderRadius:10,
+                width:'100%', textAlign:'left', background:'transparent', border:'none',
+                boxShadow:'0 0 0 1px var(--line) inset', cursor:'pointer', fontFamily:'inherit' }}>
+              Add a note about this anime…
+            </button>
+          )}
+        </div>
       </div>
 
       {confirm && (
@@ -1592,6 +2418,14 @@ function Detail({ anime, library, navigate, deleteAnime, englishTitles }) {
             </div>
           </div>
         </div>
+      )}
+      {showEdit && (
+        <EditModal anime={anime} onClose={() => setShowEdit(false)}
+          onSave={(fields) => { updateAnime(anime.id, fields); }} />
+      )}
+      {showCompare && (
+        <CompareModal anime={anime} library={library} englishTitles={englishTitles}
+          onClose={() => setShowCompare(false)} />
       )}
     </div>
   );
@@ -1737,6 +2571,56 @@ function TweakColor({ label, value, options, onChange }) {
   );
 }
 
+/* ─── Delete library modal ─────────────────────────────────────────────── */
+function DeleteLibraryModal({ count, onClose, onConfirm }) {
+  const [input, setInput] = useState('');
+  const ready = input === 'DELETE LIST';
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
+      style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.75)', backdropFilter:'blur(4px)',
+        display:'grid', placeItems:'center', zIndex:50 }}>
+      <div onClick={e => e.stopPropagation()} className="fade-up"
+        style={{ width:420, maxWidth:'90vw', background:'var(--surface-2)', borderRadius:18, padding:28,
+          boxShadow:'0 0 0 1px var(--line-2) inset, 0 24px 80px rgba(0,0,0,0.5)' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+          <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>Delete entire library?</h2>
+          <button className="btn-quiet" onClick={onClose} style={{padding:6}}><Ico name="close" size={18} /></button>
+        </div>
+        <p style={{ margin:'0 0 20px', color:'var(--text-2)', fontSize:14, lineHeight:1.65 }}>
+          This will permanently remove all{' '}
+          <span style={{color:'var(--text)', fontWeight:700}}>{count} title{count !== 1 ? 's' : ''}</span>{' '}
+          and their ratings. This cannot be undone.
+        </p>
+        <div style={{ marginBottom:20 }}>
+          <div style={{ fontSize:12, fontWeight:700, color:'var(--text-3)', letterSpacing:'0.04em',
+            textTransform:'uppercase', marginBottom:8 }}>
+            Type <span style={{color:'#f87171', fontFamily:'var(--mono)'}}>DELETE LIST</span> to confirm
+          </div>
+          <input value={input} onChange={e => setInput(e.target.value)} autoFocus
+            placeholder="DELETE LIST"
+            style={{ width:'100%', background:'var(--raised)', border:'none',
+              boxShadow:`0 0 0 1px ${ready ? 'rgba(248,113,113,0.5)' : 'var(--line)'} inset`,
+              borderRadius:9, padding:'11px 13px', color: ready ? '#f87171' : 'var(--text)',
+              fontSize:14, outline:'none', fontWeight:700, fontFamily:'var(--mono)',
+              boxSizing:'border-box', transition:'box-shadow .15s, color .15s' }} />
+        </div>
+        <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button onClick={onConfirm} disabled={!ready}
+            style={{ padding:'10px 20px', borderRadius:10, border:'none', cursor: ready ? 'pointer' : 'default',
+              fontWeight:700, fontSize:13.5, fontFamily:'inherit',
+              background: ready ? 'oklch(0.55 0.22 25)' : 'var(--raised)',
+              color: ready ? '#fff' : 'var(--text-4)',
+              boxShadow: ready ? '0 6px 20px -6px rgba(220,60,60,0.6)' : 'none',
+              transition:'all .15s' }}>
+            Delete {count} title{count !== 1 ? 's' : ''}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── App shell ────────────────────────────────────────────────────────── */
 
 const ACCENTS = {
@@ -1846,6 +2730,54 @@ function App() {
     navigate({ name:'rankings' });
   };
 
+  const updateAnime = async (id, fields) => {
+    setLibrary(lib => lib.map(a => {
+      if (a.id !== id) return a;
+      const genres = Array.isArray(fields.genres) ? fields.genres : a.genres;
+      return { ...a, ...fields, genres };
+    }));
+  };
+
+  const [showDeleteLib, setShowDeleteLib] = useState(false);
+
+  const exportBackup = async () => {
+    const data = await fetch('/backup').then(r => r.json());
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `myanimrank-backup-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const restoreInput = React.useRef(null);
+  const restoreBackup = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const res = await fetch('/restore', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error(res.status);
+      const d = await fetch('/rankings').then(r => r.json());
+      setLibrary((d.results || []).map(normaliseRanked));
+    } catch (err) {
+      alert(`Restore failed: ${err.message}`);
+    }
+    e.target.value = '';
+  };
+
+  const deleteLibrary = async () => {
+    const res = await fetch('/library', { method: 'DELETE' });
+    if (!res.ok) { alert(`Delete failed (${res.status})`); return; }
+    setLibrary([]);
+    setShowDeleteLib(false);
+    navigate({ name: 'rankings' });
+  };
+
   const setAnchorScore = (id, key, v) => {
     const target = library.find(a => a.id === id);
     if (!target?.rating) return;
@@ -1860,13 +2792,12 @@ function App() {
     }));
   };
 
-  const resetDemo = () => window.location.reload();
-  const animeFor  = (id) => library.find(a => a.id===id);
+const animeFor  = (id) => library.find(a => a.id===id);
 
   const et = t.englishTitles;
   let screen;
   if (view.name==='rankings') {
-    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} />;
+    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} />;
   } else if (view.name==='search') {
     screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} englishTitles={et} />;
   } else if (view.name==='rate') {
@@ -1876,10 +2807,12 @@ function App() {
   } else if (view.name==='detail') {
     const anime = animeFor(view.animeId);
     screen = anime
-      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} englishTitles={et} />
+      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} updateAnime={updateAnime} englishTitles={et} />
       : <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} />;
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;
+  } else if (view.name==='seasonal') {
+    screen = <Seasonal navigate={navigate} importAnime={importAnime} library={library} englishTitles={et} />;
   }
 
   const ratedCount = library.filter(a=>a.rating).length;
@@ -1904,6 +2837,11 @@ function App() {
             onClick={()=>navigate({name:'search'})}>
             <Ico name="add" size={18} sw={2.2} /> Add anime <span className="nav-dot" />
           </button>
+          <button
+            className={'nav-item' + (view.name==='seasonal' ? ' active' : '')}
+            onClick={()=>navigate({name:'seasonal'})}>
+            <Ico name="seasonal" size={18} /> This Season <span className="nav-dot" />
+          </button>
         </div>
         <div style={{ marginTop:'auto', display:'flex', flexDirection:'column', gap:14 }}>
           <div style={{ padding:'12px 13px', borderRadius:11, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
@@ -1912,12 +2850,38 @@ function App() {
               {ratedCount}<span style={{ color:'var(--text-4)', fontSize:13 }}> rated</span>
             </div>
           </div>
-          <div style={{ display:'flex', alignItems:'center', gap:8, padding:'0 4px', fontSize:11.5, color:'var(--text-3)' }}>
-            <span style={{ width:7, height:7, borderRadius:'50%', background:'oklch(0.78 0.16 150)', boxShadow:'0 0 8px oklch(0.78 0.16 150)' }} />
-            <span className="mono">localhost:8000</span>
-            <button className="btn-quiet" onClick={resetDemo} title="Reset demo data"
-              style={{ marginLeft:'auto', padding:4, fontSize:11 }}>reset</button>
-          </div>
+          {ratedCount > 0 && (<>
+            <div style={{ display:'flex', gap:6 }}>
+              <button onClick={exportBackup} title="Export backup JSON"
+                style={{ flex:1, padding:'7px 10px', borderRadius:9, border:'none', cursor:'pointer',
+                  background:'var(--raised)', color:'var(--text-3)', fontWeight:600, fontSize:11.5,
+                  fontFamily:'inherit', boxShadow:'0 0 0 1px var(--line) inset',
+                  transition:'all .14s ease', display:'flex', alignItems:'center', justifyContent:'center', gap:5 }}
+                onMouseEnter={e => { e.currentTarget.style.color='var(--text)'; }}
+                onMouseLeave={e => { e.currentTarget.style.color='var(--text-3)'; }}>
+                <Ico name="upload" size={12} /> Export
+              </button>
+              <button onClick={() => restoreInput.current?.click()} title="Restore from backup JSON"
+                style={{ flex:1, padding:'7px 10px', borderRadius:9, border:'none', cursor:'pointer',
+                  background:'var(--raised)', color:'var(--text-3)', fontWeight:600, fontSize:11.5,
+                  fontFamily:'inherit', boxShadow:'0 0 0 1px var(--line) inset',
+                  transition:'all .14s ease', display:'flex', alignItems:'center', justifyContent:'center', gap:5 }}
+                onMouseEnter={e => { e.currentTarget.style.color='var(--text)'; }}
+                onMouseLeave={e => { e.currentTarget.style.color='var(--text-3)'; }}>
+                <Ico name="add" size={12} sw={2.4} /> Restore
+              </button>
+              <input ref={restoreInput} type="file" accept=".json" style={{ display:'none' }} onChange={restoreBackup} />
+            </div>
+            <button onClick={() => setShowDeleteLib(true)}
+              style={{ width:'100%', padding:'8px 12px', borderRadius:9, border:'none', cursor:'pointer',
+                background:'rgba(248,113,113,0.07)', color:'var(--text-4)', fontWeight:600, fontSize:12,
+                fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(248,113,113,0.18) inset',
+                transition:'all .14s ease', textAlign:'center' }}
+              onMouseEnter={e => { e.target.style.background='rgba(248,113,113,0.14)'; e.target.style.color='#f87171'; }}
+              onMouseLeave={e => { e.target.style.background='rgba(248,113,113,0.07)'; e.target.style.color='var(--text-4)'; }}>
+              Delete library
+            </button>
+          </>)}
         </div>
       </nav>
       <main className="mar-content">
@@ -1931,6 +2895,9 @@ function App() {
         )}
         {appLoading && view.name==='rankings' ? <RankingsSkeleton /> : screen}
       </main>
+      {showDeleteLib && (
+        <DeleteLibraryModal count={ratedCount} onClose={() => setShowDeleteLib(false)} onConfirm={deleteLibrary} />
+      )}
       <TweaksPanel>
         <TweakSection label="Theme" />
         <TweakColor label="Accent" value={(ACCENTS[t.accent]||ACCENTS.Azure)[0]}
@@ -1950,6 +2917,55 @@ function Root() {
 
 ReactDOM.createRoot(document.getElementById('scaler')).render(<Root />);
 
+</script>
+<script>
+(function () {
+  window.addEventListener('pywebviewready', function () {
+    const tb = document.getElementById('titlebar');
+    let dragging = false;
+    let maximized = false;
+    let dragGen = 0;
+    let startScreenX = 0, startScreenY = 0;
+    let startWinX = 0, startWinY = 0;
+
+    window._toggleMaximize = function () {
+      maximized = !maximized;
+      dragging = false;
+      dragGen++;
+      if (maximized) {
+        window.pywebview.api.maximize_window();
+      } else {
+        window.pywebview.api.restore_window();
+      }
+    };
+
+    tb.addEventListener('mousedown', async function (e) {
+      if (maximized || e.button !== 0 || e.target.closest('.tb-controls')) return;
+      const gen = ++dragGen;
+      dragging = true;
+      startScreenX = e.screenX;
+      startScreenY = e.screenY;
+      const pos = await window.pywebview.api.get_position();
+      if (gen !== dragGen) return;
+      startWinX = pos.x;
+      startWinY = pos.y;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      if (!(e.buttons & 1)) { dragging = false; return; }
+      window.pywebview.api.move_to(
+        startWinX + (e.screenX - startScreenX),
+        startWinY + (e.screenY - startScreenY)
+      );
+    });
+
+    document.addEventListener('mouseup', function () {
+      dragging = false;
+    });
+  });
+})();
 </script>
 </body>
 </html>

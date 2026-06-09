@@ -31,16 +31,60 @@ def _run_server(port: int) -> None:
     uvicorn.run(fastapi_app, host=_HOST, port=port, log_level="warning")
 
 
+class WindowApi:
+    def __init__(self):
+        self._win = None
+
+    def close(self):
+        if self._win:
+            self._win.destroy()
+
+    def minimize(self):
+        if self._win:
+            self._win.minimize()
+
+    def maximize_window(self):
+        if self._win:
+            try:
+                self._win.maximize()
+            except AttributeError:
+                self._win.toggle_fullscreen()
+
+    def restore_window(self):
+        if self._win:
+            try:
+                self._win.restore()
+            except AttributeError:
+                self._win.toggle_fullscreen()
+
+    def get_position(self):
+        if self._win:
+            try:
+                return {'x': self._win.x, 'y': self._win.y}
+            except AttributeError:
+                return {'x': 0, 'y': 0}
+        return {'x': 0, 'y': 0}
+
+    def move_to(self, x: int, y: int):
+        if self._win:
+            self._win.move(x, y)
+
+
 if __name__ == "__main__":
     port = _free_port()
     server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
     server_thread.start()
     _wait_for_server(port)
-    webview.create_window(
+    api = WindowApi()
+    win = webview.create_window(
         "MyAnimeRank",
         f"http://{_HOST}:{port}",
         width=1400,
         height=900,
         min_size=(900, 600),
+        frameless=True,
+        easy_drag=False,
+        js_api=api,
     )
+    api._win = win
     webview.start()

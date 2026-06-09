@@ -1,18 +1,21 @@
 import io
 import json
 import re
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from database import get_conn, init_db
-from jikan import search as jikan_search
-from models import AnimeCreate, RatingIn
+from jikan import search as jikan_search, seasonal as jikan_seasonal, by_mal_id as jikan_by_id
+from models import AnimeCreate, AnimeUpdate, RatingIn
 
 HTML_FILE = Path(__file__).parent / "MyAnimeRank.html"
 
@@ -43,6 +46,12 @@ def search(q: str = Query("", description="Title search query")):
 @app.post("/anime", status_code=201)
 def import_anime(body: AnimeCreate):
     with get_conn() as conn:
+        if body.api_id:
+            existing = conn.execute(
+                "SELECT id FROM anime WHERE api_id=?", (body.api_id,)
+            ).fetchone()
+            if existing:
+                return {"id": existing["id"]}
         cur = conn.execute(
             "INSERT INTO anime (api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -91,6 +100,7 @@ def rankings(
     genre:  str = Query(None),
     season: str = Query(None),
     format: str = Query(None),
+    status: str = Query(None),
     sort:   str = Query("overall"),
 ):
     if sort not in _VALID_CRITERIA | {"overall"}:
@@ -100,7 +110,7 @@ def rankings(
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT a.id, a.api_id, a.title, a.title_ro, a.cover_url, a.genres, a.year, a.season, "
-            "       a.episodes, a.format, a.synopsis, a.mal_score, "
+            "       a.episodes, a.format, a.synopsis, a.mal_score, a.status, a.notes, a.rewatch_count, "
             "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
             "       r.overall, r.updated_at "
             "FROM anime a JOIN rating r ON a.id = r.anime_id "
@@ -111,11 +121,15 @@ def rankings(
     for row in rows:
         item = dict(row)
         item["genres"] = json.loads(item["genres"] or "[]")
+        item["status"] = item.get("status") or "completed"
+        item["rewatch_count"] = item.get("rewatch_count") or 0
         if genre and genre not in item["genres"]:
             continue
         if format and item.get("format") != format:
             continue
         if season and item.get("season") != season:
+            continue
+        if status and item.get("status") != status:
             continue
         results.append(item)
 
@@ -202,7 +216,10 @@ def _parse_gdpr_entries(data) -> list[dict]:
             "status": e.get("status", ""),
         })
 
-    return results
+    seen: dict[str, dict] = {}
+    for r in results:
+        seen[r["title"].lower()] = r
+    return list(seen.values())
 
 
 def _parse_xml_entries(xml_bytes: bytes) -> list[dict]:
@@ -233,7 +250,10 @@ def _parse_xml_entries(xml_bytes: bytes) -> list[dict]:
         if criteria:
             entry["criteria"] = criteria
         results.append(entry)
-    return results
+    seen: dict[str, dict] = {}
+    for r in results:
+        seen[r["title"].lower()] = r
+    return list(seen.values())
 
 
 _MAR_COMMENTS_RE = re.compile(
@@ -258,6 +278,12 @@ def delete_anime(anime_id: int):
         if not conn.execute("SELECT id FROM anime WHERE id=?", (anime_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Anime not found")
         conn.execute("DELETE FROM anime WHERE id=?", (anime_id,))
+
+
+@app.delete("/library", status_code=204)
+def delete_library():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM anime")
 
 
 @app.get("/anime/{anime_id}/anchors")
@@ -292,3 +318,196 @@ def anchors(
             result.append(item)
 
     return {"anchors": result, "criterion": criterion, "anime_id": anime_id}
+
+
+@app.patch("/anime/{anime_id}", status_code=204)
+def update_anime(anime_id: int, body: AnimeUpdate):
+    with get_conn() as conn:
+        if not conn.execute("SELECT id FROM anime WHERE id=?", (anime_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Anime not found")
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            return
+        if "genres" in updates:
+            updates["genres"] = json.dumps(updates["genres"])
+        cols = ", ".join(f"{k}=?" for k in updates)
+        conn.execute(f"UPDATE anime SET {cols} WHERE id=?", (*updates.values(), anime_id))
+
+
+@app.get("/backup")
+def backup():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT a.*, r.story, r.characters, r.animation, r.audio, r.enjoyment, r.overall, r.updated_at "
+            "FROM anime a LEFT JOIN rating r ON a.id = r.anime_id"
+        ).fetchall()
+    entries = []
+    for row in rows:
+        item = dict(row)
+        item["genres"] = json.loads(item.get("genres") or "[]")
+        entries.append(item)
+    return {"version": 1, "entries": entries}
+
+
+@app.post("/restore", status_code=204)
+def restore(body: dict):
+    entries = body.get("entries", [])
+    updated_at = str(date.today())
+    with get_conn() as conn:
+        for e in entries:
+            genres = json.dumps(e.get("genres") or [])
+            cur = conn.execute(
+                "INSERT OR REPLACE INTO anime "
+                "(id, api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status, notes, rewatch_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    e.get("id"), e.get("api_id"), e.get("title", ""), e.get("title_ro"),
+                    e.get("cover_url"), genres, e.get("year"), e.get("season"),
+                    e.get("episodes"), e.get("format"), e.get("synopsis"),
+                    e.get("mal_score"), e.get("status"), e.get("notes"),
+                    e.get("rewatch_count", 0),
+                ),
+            )
+            aid = e.get("id") or cur.lastrowid
+            if e.get("overall") is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO rating (anime_id, story, characters, animation, audio, enjoyment, overall, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        aid, e.get("story", 5.0), e.get("characters", 5.0),
+                        e.get("animation", 5.0), e.get("audio", 5.0),
+                        e.get("enjoyment", 5.0), e["overall"],
+                        e.get("updated_at") or updated_at,
+                    ),
+                )
+
+
+@app.get("/seasonal")
+def seasonal():
+    return {"results": jikan_seasonal()}
+
+
+@app.get("/jikan/anime/{mal_id}")
+def jikan_anime_by_id(mal_id: int):
+    item = jikan_by_id(mal_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Anime not found")
+    return item
+
+
+_JIKAN_USER = "https://api.jikan.moe/v4/users/{}/animelist"
+
+
+@app.get("/jikan/user/{username}")
+def mal_user_list(username: str):
+    entries = []
+    page = 1
+    with httpx.Client(timeout=12.0) as client:
+        while page <= 10:
+            try:
+                resp = client.get(
+                    _JIKAN_USER.format(username),
+                    params={"page": page, "limit": 300, "status": "completed"},
+                )
+                if resp.status_code == 404:
+                    raise HTTPException(status_code=404, detail="MAL user not found")
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise HTTPException(status_code=404, detail="MAL user not found")
+                raise HTTPException(status_code=502, detail="Jikan API error")
+            except (httpx.TimeoutException, httpx.RequestError):
+                raise HTTPException(status_code=502, detail="Jikan API unreachable")
+
+            data = resp.json().get("data", [])
+            for item in data:
+                media = item.get("anime") or {}
+                score = item.get("score") or 0
+                if not score:
+                    continue
+                title = (media.get("title_english") or media.get("title") or "").strip()
+                title_ro = (media.get("title") or "").strip()
+                api_id = str(media["mal_id"]) if media.get("mal_id") else None
+                cover = (media.get("images") or {}).get("jpg", {}).get("large_image_url")
+                entries.append({
+                    "api_id":   api_id,
+                    "title":    title,
+                    "title_ro": title_ro,
+                    "cover_url": cover,
+                    "score":    float(score),
+                    "status":   item.get("status") or "completed",
+                    "genres":   [],
+                })
+            if len(data) < 300:
+                break
+            page += 1
+            time.sleep(0.35)
+
+    return {"entries": entries}
+
+
+def _cdata(s: str) -> str:
+    return f"<![CDATA[{(s or '').replace(']]>', ']]]]><![CDATA[>')}]]>"
+
+
+@app.get("/export/mal-xml")
+def export_mal_xml():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT a.api_id, a.title, a.format, a.episodes, a.genres, "
+            "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
+            "       r.overall, r.updated_at "
+            "FROM anime a JOIN rating r ON a.id = r.anime_id"
+        ).fetchall()
+
+    entries = []
+    for row in rows:
+        item = dict(row)
+        genres = ", ".join(json.loads(item.get("genres") or "[]"))
+        score = round(item["overall"]) if item["overall"] is not None else 0
+        finish = item.get("updated_at") or "0000-00-00"
+        criteria = (
+            f"Story:{item['story']} Characters:{item['characters']} "
+            f"Animation:{item['animation']} Audio:{item['audio']} "
+            f"Enjoyment:{item['enjoyment']}"
+        )
+        entries.append(
+            f"  <anime>\n"
+            f"    <series_animedb_id>{item.get('api_id') or 0}</series_animedb_id>\n"
+            f"    <series_title>{_cdata(item['title'])}</series_title>\n"
+            f"    <series_type>{item.get('format') or ''}</series_type>\n"
+            f"    <series_episodes>{item.get('episodes') or 0}</series_episodes>\n"
+            f"    <my_id>0</my_id>\n"
+            f"    <my_watched_episodes>{item.get('episodes') or 0}</my_watched_episodes>\n"
+            f"    <my_start_date>0000-00-00</my_start_date>\n"
+            f"    <my_finish_date>{finish}</my_finish_date>\n"
+            f"    <my_score>{score}</my_score>\n"
+            f"    <my_status>Completed</my_status>\n"
+            f"    <my_tags>{_cdata(genres)}</my_tags>\n"
+            f"    <my_comments>{_cdata(criteria)}</my_comments>\n"
+            f"    <update_on_import>1</update_on_import>\n"
+            f"  </anime>"
+        )
+
+    total = len(entries)
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<myanimelist>\n"
+        "  <myinfo>\n"
+        "    <user_export_type>1</user_export_type>\n"
+        f"    <user_total_anime>{total}</user_total_anime>\n"
+        f"    <user_total_completed>{total}</user_total_completed>\n"
+        "    <user_total_watching>0</user_total_watching>\n"
+        "    <user_total_onhold>0</user_total_onhold>\n"
+        "    <user_total_dropped>0</user_total_dropped>\n"
+        "    <user_total_plantowatch>0</user_total_plantowatch>\n"
+        "  </myinfo>\n"
+        + "\n".join(entries)
+        + "\n</myanimelist>"
+    )
+
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": 'attachment; filename="myanimelist.xml"'},
+    )

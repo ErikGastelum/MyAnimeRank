@@ -128,10 +128,13 @@ def seed_if_empty() -> None:
 def _migrate_db() -> None:
     """Add columns introduced after the initial schema without losing data."""
     additions = [
-        ("anime", "format",    "TEXT"),
-        ("anime", "synopsis",  "TEXT"),
-        ("anime", "mal_score", "REAL"),
-        ("anime", "title_ro",  "TEXT"),
+        ("anime", "format",        "TEXT"),
+        ("anime", "synopsis",      "TEXT"),
+        ("anime", "mal_score",     "REAL"),
+        ("anime", "title_ro",      "TEXT"),
+        ("anime", "status",        "TEXT"),
+        ("anime", "notes",         "TEXT"),
+        ("anime", "rewatch_count", "INTEGER"),
     ]
     with get_conn() as conn:
         for table, col, col_type in additions:
