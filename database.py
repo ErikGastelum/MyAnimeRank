@@ -1,7 +1,15 @@
+import os
 import sqlite3
+import sys
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "myanimrank.db"
+if getattr(sys, "frozen", False):
+    # Frozen exe: store DB in %LOCALAPPDATA%\MyAnimeRank so it persists across runs
+    _data_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MyAnimeRank"
+    _data_dir.mkdir(parents=True, exist_ok=True)
+    DB_PATH = _data_dir / "myanimrank.db"
+else:
+    DB_PATH = Path(__file__).parent / "myanimrank.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS anime (

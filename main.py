@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import sys
 import time
 import xml.etree.ElementTree as ET
 import zipfile
@@ -17,7 +18,9 @@ from database import get_conn, init_db
 from jikan import search as jikan_search, seasonal as jikan_seasonal, by_mal_id as jikan_by_id
 from models import AnimeCreate, AnimeUpdate, RatingIn
 
-HTML_FILE = Path(__file__).parent / "MyAnimeRank.html"
+# When frozen by PyInstaller, data files live in sys._MEIPASS; otherwise next to this script.
+_BASE = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent
+HTML_FILE = _BASE / "MyAnimeRank.html"
 
 _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
 
