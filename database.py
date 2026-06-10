@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS search_cache (
     results    TEXT NOT NULL,
     cached_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -143,6 +148,7 @@ def _migrate_db() -> None:
         ("anime", "status",        "TEXT"),
         ("anime", "notes",         "TEXT"),
         ("anime", "rewatch_count", "INTEGER"),
+        ("anime", "anilist_id",    "TEXT"),
     ]
     with get_conn() as conn:
         for table, col, col_type in additions:

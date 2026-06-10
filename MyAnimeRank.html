@@ -533,7 +533,7 @@ function DiscoverPanelCard({ item, inLibrary, onImport }) {
   );
 }
 
-function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime }) {
+function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime, discoverOpen }) {
   const [q, setQ]             = useState('');
   const [genre, setGenre]     = useState('All');
   const [fmtFilter, setFmt]   = useState('All');
@@ -572,7 +572,7 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
 
   const list = useMemo(() => {
     const l = rated.filter(a =>
-      (statusFilter==='all' || (a.status||'completed')===statusFilter) &&
+      (statusFilter==='all' || (()=>{ const raw=a.status||'completed'; return (raw==='on_hold'?'paused':raw==='plan_to_watch'?'planning':raw)===statusFilter; })()) &&
       (genre==='All' || a.genres.includes(genre)) &&
       (fmtFilter==='All' || a.format===fmtFilter) &&
       (season==='All' || a.season===season) &&
@@ -607,7 +607,7 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
     return { recs, topGenres };
   }, [seasonal, library, rated]);
 
-  const showPanel = seasonal !== null && discoverRecs.recs.length > 0;
+  const showPanel = seasonal !== null && discoverRecs.recs.length > 0 && discoverOpen;
 
   return (
     <div style={{ display:'flex', alignItems:'flex-start', position:'relative', zIndex:1, minHeight:'100%' }}>
@@ -650,12 +650,13 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
 
         {(() => {
           const STATUS_TABS = [
-            ['all','All'], ['watching','Watching'], ['completed','Completed'],
-            ['plan_to_watch','Plan to Watch'], ['on_hold','On Hold'], ['dropped','Dropped'],
+            ['all','All'], ['watching','Watching'], ['rewatching','Rewatching'],
+            ['completed','Completed'], ['paused','Paused'], ['dropped','Dropped'], ['planning','Planning'],
           ];
           const statusCounts = { all: rated.length };
           rated.forEach(a => {
-            const s = a.status || 'completed';
+            const raw = a.status || 'completed';
+            const s = raw==='on_hold' ? 'paused' : raw==='plan_to_watch' ? 'planning' : raw;
             statusCounts[s] = (statusCounts[s] || 0) + 1;
           });
           const activeTabs = STATUS_TABS.filter(([k]) => k==='all' || statusCounts[k]);
@@ -972,6 +973,142 @@ function Insights({ library }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── AniList connect / account modal ──────────────────────────────────── */
+function AniListConnectModal({ onClose, onStatusChange }) {
+  const [status, setStatus] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr]       = useState('');
+  const pollRef             = useRef(null);
+
+  useEffect(() => {
+    fetch('/anilist/token').then(r => r.json()).then(setStatus).catch(() => {});
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
+  const openAuth = async () => {
+    setErr(''); setSaving(true);
+    const redirectUri = `http://localhost:${window.location.port}/anilist/callback`;
+    try {
+      await fetch('/anilist/auth-start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ redirect_uri: redirectUri }),
+      });
+    } catch { setErr('Could not reach the local server.'); setSaving(false); return; }
+    setSaving(false);
+    window.open(
+      `https://anilist.co/api/v2/oauth/authorize?client_id=43290&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`,
+      '_blank'
+    );
+    pollRef.current = setInterval(async () => {
+      try {
+        const d = await fetch('/anilist/token').then(r => r.json());
+        if (d.connected) {
+          clearInterval(pollRef.current);
+          setStatus(d);
+          onStatusChange(d);
+        }
+      } catch {}
+    }, 2000);
+  };
+
+  const disconnect = async () => {
+    setSaving(true);
+    await fetch('/anilist/token', { method: 'DELETE' });
+    const next = { connected: false, username: null, adv_scoring: [] };
+    setStatus(next); onStatusChange(next); setSaving(false);
+  };
+
+  const connected = status?.connected;
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
+      style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.82)', backdropFilter:'blur(5px)',
+        display:'grid', placeItems:'center', zIndex:200 }}>
+      <div onClick={e => e.stopPropagation()} className="fade-up"
+        style={{ width:460, maxWidth:'calc(100vw - 32px)', background:'var(--surface-2)', borderRadius:18,
+          padding:'28px 28px 24px', boxShadow:'0 0 0 1px var(--line-2) inset, 0 24px 80px rgba(0,0,0,0.55)',
+          maxHeight:'90vh', overflowY:'auto' }}>
+
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+          <div>
+            <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>AniList Sync</h2>
+            <p style={{ margin:'4px 0 0', color:'var(--text-3)', fontSize:13 }}>
+              Keep your AniList scores in sync automatically.
+            </p>
+          </div>
+          <button className="btn-quiet" onClick={onClose} style={{ padding:'4px 8px', marginTop:-2 }}>
+            <Ico name="close" size={18} />
+          </button>
+        </div>
+
+        {status === null && (
+          <div style={{ color:'var(--text-3)', fontSize:13, padding:'20px 0' }}>Loading…</div>
+        )}
+
+        {status !== null && !connected && (
+          <>
+
+            <button onClick={openAuth} disabled={saving} style={{
+              width:'100%', padding:'11px 0', borderRadius:10, border:'none',
+              cursor: saving ? 'default' : 'pointer', opacity: saving ? 0.7 : 1,
+              background:'var(--accent)', color:'#fff', fontWeight:700, fontSize:14,
+              fontFamily:'inherit', marginBottom:8,
+            }}>
+              {saving ? 'Starting…' : 'Authorize with AniList →'}
+            </button>
+            {err && <div style={{ color:'#f87171', fontSize:12.5 }}>{err}</div>}
+            <p style={{ margin:'12px 0 0', color:'var(--text-4)', fontSize:12, lineHeight:1.5 }}>
+              After authorizing in your browser the app connects automatically.
+            </p>
+          </>
+        )}
+
+        {status !== null && connected && (
+          <>
+            <div style={{ display:'flex', alignItems:'center', gap:10, padding:'12px 16px',
+              borderRadius:11, background:'rgba(74,222,128,0.07)',
+              boxShadow:'0 0 0 1px rgba(74,222,128,0.2) inset', marginBottom:14 }}>
+              <span style={{ width:9, height:9, borderRadius:'50%', background:'#4ade80', flexShrink:0 }} />
+              <span style={{ fontWeight:700, fontSize:14 }}>{status.username}</span>
+              <span style={{ color:'var(--text-3)', fontSize:12.5, marginLeft:'auto' }}>Connected</span>
+            </div>
+
+            {status.adv_scoring?.length > 0 && (
+              <div style={{ padding:'12px 16px', borderRadius:11, background:'var(--surface)',
+                boxShadow:'0 0 0 1px var(--line) inset', marginBottom:14, fontSize:13 }}>
+                <div style={{ fontWeight:700, color:'var(--text-2)', marginBottom:6 }}>Advanced Scoring active</div>
+                <div style={{ color:'var(--text-3)', fontSize:12.5, lineHeight:1.6 }}>
+                  {['Story','Characters','Animation','Audio','Enjoyment'].map((our, i) => (
+                    <span key={i}>
+                      <span style={{ color:'var(--text-2)' }}>{our}</span>
+                      {status.adv_scoring[i] ? ` → ${status.adv_scoring[i]}` : ''}
+                      {i < 4 ? ', ' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ padding:'12px 16px', borderRadius:11, background:'var(--surface)',
+              boxShadow:'0 0 0 1px var(--line) inset', marginBottom:14, fontSize:13,
+              color:'var(--text-3)', lineHeight:1.6 }}>
+              Every rating save and status change syncs to AniList automatically.
+            </div>
+
+            <button onClick={disconnect} disabled={saving} style={{
+              width:'100%', padding:'9px 0', borderRadius:10, border:'none', cursor:'pointer',
+              background:'rgba(248,113,113,0.08)', color:'#f87171', fontWeight:600, fontSize:13,
+              fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(248,113,113,0.2) inset',
+            }}>
+              {saving ? 'Disconnecting…' : 'Disconnect AniList'}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -2159,7 +2296,7 @@ function EditModal({ anime, onClose, onSave }) {
           {fieldLabel('Status')}
           <select value={form.status} onChange={e => set('status', e.target.value)}
             style={{ ...inputStyle, cursor:'pointer' }}>
-            {[['completed','Completed'],['watching','Watching'],['plan_to_watch','Plan to Watch'],['on_hold','On Hold'],['dropped','Dropped']].map(([v,l]) => (
+            {[['watching','Watching'],['rewatching','Rewatching'],['completed','Completed'],['paused','Paused'],['dropped','Dropped'],['planning','Planning']].map(([v,l]) => (
               <option key={v} value={v}>{l}</option>
             ))}
           </select>
@@ -2299,7 +2436,7 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
                   {(() => {
                     const s = anime.status;
                     if (!s || s === 'completed') return null;
-                    const MAP = { watching:['Watching','var(--accent)'], plan_to_watch:['Plan to Watch','var(--text-3)'], on_hold:['On Hold','#f0b429'], dropped:['Dropped','#f87171'] };
+                    const MAP = { watching:['Watching','var(--accent)'], rewatching:['Rewatching','#a78bfa'], paused:['Paused','#f0b429'], on_hold:['Paused','#f0b429'], dropped:['Dropped','#f87171'], planning:['Planning','var(--text-3)'], plan_to_watch:['Planning','var(--text-3)'] };
                     const [label, color] = MAP[s] || [];
                     if (!label) return null;
                     return <span style={{ fontSize:11, fontWeight:700, letterSpacing:'0.04em',
@@ -2647,6 +2784,106 @@ function NavMark() {
   );
 }
 
+/* ─── Lists screen ─────────────────────────────────────────────────────── */
+const LIST_STATUSES = [
+  { key:'watching',   label:'Watching',   color:'var(--accent)' },
+  { key:'rewatching', label:'Rewatching', color:'#a78bfa' },
+  { key:'completed',  label:'Completed',  color:'oklch(0.78 0.16 150)' },
+  { key:'paused',     label:'Paused',     color:'#f0b429' },
+  { key:'dropped',    label:'Dropped',    color:'#f87171' },
+  { key:'planning',   label:'Planning',   color:'var(--text-3)' },
+];
+
+const normaliseStatus = (s) => {
+  if (s === 'on_hold') return 'paused';
+  if (s === 'plan_to_watch') return 'planning';
+  return s || 'completed';
+};
+
+function ListSection({ status, label, color, items, navigate, englishTitles }) {
+  const [open, setOpen] = useState(true);
+  if (items.length === 0) return null;
+  return (
+    <div style={{ marginBottom:24 }}>
+      <button onClick={()=>setOpen(v=>!v)}
+        style={{ display:'flex', alignItems:'center', gap:10, width:'100%', textAlign:'left',
+          background:'none', border:'none', cursor:'pointer', padding:'6px 0', marginBottom: open ? 10 : 0 }}>
+        <span style={{ width:10, height:10, borderRadius:'50%', background:color, flexShrink:0,
+          boxShadow:`0 0 8px ${color}` }} />
+        <span style={{ fontWeight:800, fontSize:16, color:'var(--text)', letterSpacing:'-0.01em' }}>{label}</span>
+        <span style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:700,
+          color:color, background:`color-mix(in srgb, ${color} 14%, transparent)`,
+          padding:'1px 8px', borderRadius:99, marginLeft:2 }}>{items.length}</span>
+        <span style={{ marginLeft:'auto', color:'var(--text-3)', fontSize:12,
+          transform: open ? 'rotate(90deg)' : 'none', transition:'transform .15s ease', display:'flex' }}>
+          <Ico name="chevron" size={14} />
+        </span>
+      </button>
+      {open && (
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {items.map(anime => {
+            const ov = overall(anime.rating);
+            return (
+              <div key={anime.id} onClick={()=>navigate({name:'detail',animeId:anime.id})}
+                style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px',
+                  borderRadius:11, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset',
+                  cursor:'pointer', transition:'background .12s ease' }}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
+                onMouseLeave={e=>e.currentTarget.style.background='var(--surface)'}>
+                <Poster anime={anime} w={44} radius={7} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:700, fontSize:14, letterSpacing:'-0.01em',
+                    whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                    {displayTitle(anime, englishTitles)}
+                  </div>
+                  <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:2 }}>
+                    {anime.year}{anime.format ? ` · ${anime.format}` : ''}
+                    {anime.genres.length > 0 ? ` · ${anime.genres.slice(0,2).join(', ')}` : ''}
+                  </div>
+                </div>
+                {anime.rating && <ScoreBadge value={ov} size="sm" />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Lists({ library, navigate, englishTitles }) {
+  const grouped = useMemo(() => {
+    const map = {};
+    LIST_STATUSES.forEach(s => { map[s.key] = []; });
+    library.forEach(anime => {
+      const s = normaliseStatus(anime.status);
+      if (map[s]) map[s].push(anime);
+      else map['completed'].push(anime);
+    });
+    return map;
+  }, [library]);
+
+  const total = library.length;
+
+  return (
+    <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
+      <h1 style={{ margin:'0 0 6px', fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Lists</h1>
+      <p style={{ margin:'0 0 28px', color:'var(--text-3)', fontSize:13.5 }}>
+        <span className="mono" style={{color:'var(--text-2)'}}>{total}</span> titles across all lists
+      </p>
+      {total === 0 && (
+        <div style={{ color:'var(--text-3)', textAlign:'center', paddingTop:60 }}>
+          No anime in your library yet.
+        </div>
+      )}
+      {LIST_STATUSES.map(({ key, label, color }) => (
+        <ListSection key={key} status={key} label={label} color={color}
+          items={grouped[key] || []} navigate={navigate} englishTitles={englishTitles} />
+      ))}
+    </div>
+  );
+}
+
 function RankingsSkeleton() {
   return (
     <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
@@ -2680,6 +2917,13 @@ function App() {
   const [appLoading, setAppLoading] = useState(true);
   const [view, setView]           = useState({ name:'rankings' });
   const [t, setTweak]             = useTweaks({ accent:'Azure', ambient:true, englishTitles:true, rankView:'grid' });
+  const [anilistStatus, setAnilistStatus] = useState(null);
+  const [showAnilistConnect, setShowAnilistConnect] = useState(false);
+  const [discoverOpen, setDiscoverOpen] = useState(false);
+
+  useEffect(() => {
+    fetch('/anilist/token').then(r => r.json()).then(setAnilistStatus).catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch('/rankings')
@@ -2797,7 +3041,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
   const et = t.englishTitles;
   let screen;
   if (view.name==='rankings') {
-    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} />;
+    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} discoverOpen={discoverOpen} />;
   } else if (view.name==='search') {
     screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} englishTitles={et} />;
   } else if (view.name==='rate') {
@@ -2808,11 +3052,13 @@ const animeFor  = (id) => library.find(a => a.id===id);
     const anime = animeFor(view.animeId);
     screen = anime
       ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} updateAnime={updateAnime} englishTitles={et} />
-      : <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} />;
+      : <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} discoverOpen={discoverOpen} />;
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;
   } else if (view.name==='seasonal') {
     screen = <Seasonal navigate={navigate} importAnime={importAnime} library={library} englishTitles={et} />;
+  } else if (view.name==='lists') {
+    screen = <Lists library={library} navigate={navigate} englishTitles={et} />;
   }
 
   const ratedCount = library.filter(a=>a.rating).length;
@@ -2826,6 +3072,11 @@ const animeFor  = (id) => library.find(a => a.id===id);
             className={'nav-item' + (view.name==='rankings'||view.name==='detail' ? ' active' : '')}
             onClick={()=>navigate({name:'rankings'})}>
             <Ico name="rank" size={18} /> Rankings <span className="nav-dot" />
+          </button>
+          <button
+            className={'nav-item' + (view.name==='lists' ? ' active' : '')}
+            onClick={()=>navigate({name:'lists'})}>
+            <Ico name="viewList" size={18} /> Lists <span className="nav-dot" />
           </button>
           <button
             className={'nav-item' + (view.name==='insights' ? ' active' : '')}
@@ -2842,8 +3093,34 @@ const animeFor  = (id) => library.find(a => a.id===id);
             onClick={()=>navigate({name:'seasonal'})}>
             <Ico name="seasonal" size={18} /> This Season <span className="nav-dot" />
           </button>
+          <button
+            className={'nav-item' + (discoverOpen ? ' active' : '')}
+            onClick={()=>{ if(view.name!=='rankings') navigate({name:'rankings'}); setDiscoverOpen(v=>!v); }}>
+            <Ico name="discover" size={18} /> Discover <span className="nav-dot" />
+          </button>
         </div>
         <div style={{ marginTop:'auto', display:'flex', flexDirection:'column', gap:14 }}>
+          <div onClick={() => setShowAnilistConnect(true)}
+            style={{ padding:'10px 13px', borderRadius:11, background:'var(--surface)',
+              boxShadow:'0 0 0 1px var(--line) inset', cursor:'pointer',
+              transition:'box-shadow .14s ease' }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow='0 0 0 1px var(--line-2) inset'}
+            onMouseLeave={e => e.currentTarget.style.boxShadow='0 0 0 1px var(--line) inset'}>
+            <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:600 }}>AniList</div>
+            {anilistStatus?.connected ? (
+              <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:3 }}>
+                <span style={{ width:7, height:7, borderRadius:'50%', background:'#4ade80', flexShrink:0 }} />
+                <span style={{ fontWeight:700, fontSize:13, color:'var(--text-2)',
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {anilistStatus.username}
+                </span>
+              </div>
+            ) : (
+              <div style={{ fontSize:12, color:'var(--accent-2)', fontWeight:600, marginTop:3 }}>
+                Connect →
+              </div>
+            )}
+          </div>
           <div style={{ padding:'12px 13px', borderRadius:11, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
             <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:600 }}>Library</div>
             <div style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:22, marginTop:2 }}>
@@ -2897,6 +3174,12 @@ const animeFor  = (id) => library.find(a => a.id===id);
       </main>
       {showDeleteLib && (
         <DeleteLibraryModal count={ratedCount} onClose={() => setShowDeleteLib(false)} onConfirm={deleteLibrary} />
+      )}
+      {showAnilistConnect && (
+        <AniListConnectModal
+          onClose={() => setShowAnilistConnect(false)}
+          onStatusChange={(s) => setAnilistStatus(s)}
+        />
       )}
       <TweaksPanel>
         <TweakSection label="Theme" />

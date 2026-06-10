@@ -25,6 +25,18 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Inject AniList credentials
+        env:
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+        shell: python
+        run: |
+          import os
+          with open('main.py', 'r') as f:
+              src = f.read()
+          src = src.replace('PLACEHOLDER_ANILIST_SECRET', os.environ['ANILIST_CLIENT_SECRET'])
+          with open('main.py', 'w') as f:
+              f.write(src)
+
       - name: Build executable
         run: pyinstaller MyAnimeRank.spec
 
