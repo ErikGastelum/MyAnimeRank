@@ -1155,21 +1155,36 @@ function AniListConnectModal({ onClose, onStatusChange }) {
               <span style={{ color:'var(--text-3)', fontSize:12.5, marginLeft:'auto' }}>Connected</span>
             </div>
 
-            {status.adv_scoring?.length > 0 && (
-              <div style={{ padding:'12px 16px', borderRadius:11, background:'var(--surface)',
-                boxShadow:'0 0 0 1px var(--line) inset', marginBottom:14, fontSize:13 }}>
-                <div style={{ fontWeight:700, color:'var(--text-2)', marginBottom:6 }}>Advanced Scoring active</div>
-                <div style={{ color:'var(--text-3)', fontSize:12.5, lineHeight:1.6 }}>
-                  {['Story','Characters','Animation','Audio','Enjoyment'].map((our, i) => (
-                    <span key={i}>
-                      <span style={{ color:'var(--text-2)' }}>{our}</span>
-                      {status.adv_scoring[i] ? ` → ${status.adv_scoring[i]}` : ''}
-                      {i < 4 ? ', ' : ''}
-                    </span>
-                  ))}
+            {status.adv_scoring?.length > 0 && (() => {
+              const aliases = { story:['story','narrative','plot','writing'], characters:['characters','character','chars'], animation:['animation','art','visuals','visual','artwork'], audio:['audio','music','sound','soundtrack','ost'], enjoyment:['enjoyment','fun','overall enjoyment'] };
+              const matchCriterion = (label) => { const k = label.toLowerCase().trim(); for (const [crit, alts] of Object.entries(aliases)) { if (alts.some(a => k === a || k.startsWith(a))) return crit; } return null; };
+              const criterionLabel = { story:'Story', characters:'Characters', animation:'Animation', audio:'Audio', enjoyment:'Enjoyment' };
+              return (
+                <div style={{ padding:'12px 16px', borderRadius:11, background:'var(--surface)',
+                  boxShadow:'0 0 0 1px var(--line) inset', marginBottom:14, fontSize:13 }}>
+                  <div style={{ fontWeight:700, color:'var(--text-2)', marginBottom:8 }}>Advanced Scoring</div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                    {status.adv_scoring.map((cat, i) => {
+                      const match = matchCriterion(cat);
+                      return (
+                        <div key={i} style={{ display:'flex', alignItems:'center', gap:6, fontSize:12.5 }}>
+                          <span style={{ color:'var(--text-3)', width:130, flexShrink:0 }}>{cat}</span>
+                          <span style={{ color:'var(--line-2)', fontSize:11 }}>→</span>
+                          <span style={{ color: match ? 'var(--accent-2)' : 'var(--text-4)', fontWeight: match ? 600 : 400 }}>
+                            {match ? criterionLabel[match] : 'unmapped'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {status.score_format && status.score_format.includes('100') && (
+                    <div style={{ marginTop:8, fontSize:11.5, color:'var(--text-3)' }}>
+                      100-point scale detected — scores will be multiplied ×10 when syncing.
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             <div style={{ padding:'12px 16px', borderRadius:11, background:'var(--surface)',
               boxShadow:'0 0 0 1px var(--line) inset', marginBottom:14, fontSize:13,

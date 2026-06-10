@@ -2,7 +2,7 @@
 
 A local-first desktop app for ranking anime through anchored relative scoring. Instead of pulling numbers out of thin air, every new rating is grounded in a comparison against anime you've already scored — filtered to the same genres, so a 7.5 story in Action means the same thing across all your Action titles.
 
-No account. No cloud. No tracking. Runs entirely on your machine.
+No cloud hosting. No telemetry. Your library lives in a single local SQLite file. Optional AniList sync is available if you want to keep your ratings in both places.
 
 ---
 
@@ -21,12 +21,13 @@ The master ranking re-sorts automatically every time a rating changes.
 - **Anchored comparison workflow** — genre-matched anchors for each criterion keep scores internally consistent
 - **Anime metadata autofill** — titles, covers, genres, year, and episode counts pulled from AniList / Jikan (MAL)
 - **Import your existing list** — from AniList (username), MAL (username), GDPR export, CSV, or XML
+- **AniList sync** — connect via OAuth to push ratings (including advanced scores) to AniList and pull your list back into the app automatically on startup
 - **Export to MAL-compatible XML** — take your ratings back to MyAnimeList
 - **Backup & restore** — full library export/import as JSON
 - **Seasonal recommendations** — a panel of upcoming/current anime based on your top genres
 - **Personal insights** — average scores by genre, score distributions, divergence from community ratings
 - **Frameless native-style window** — custom titlebar with minimize, maximize, and drag support
-- **Fully offline** — no login, no sync, no telemetry
+- **Local-first** — no account required; all data stays on your machine unless you opt into AniList sync
 
 ---
 
@@ -108,7 +109,7 @@ Imported entries with an existing score are distributed evenly across all five c
 
 ## Data & privacy
 
-Everything stays local. The app makes outbound requests only to the Jikan API for anime metadata and cover images; results are cached in the local database to minimize repeat calls. No usage data is collected or transmitted.
+Your library stays local. The app makes outbound requests to the Jikan API for anime metadata and cover images (cached locally), and to AniList only if you connect your account for sync. No usage data is collected or transmitted.
 
 ---
 
@@ -116,7 +117,6 @@ Everything stays local. The app makes outbound requests only to the Jikan API fo
 
 - Weighted criteria (user-defined per-genre weights)
 - Multi-user profiles
-- AniList GraphQL as a metadata source (richer genre data, no rate limits)
 - Criterion-level comparison against community scores
 - Exportable charts and taste profiles
 

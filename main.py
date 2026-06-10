@@ -150,10 +150,73 @@ def _get_anilist_id(anime_id: int, token: str) -> int | None:
     return None
 
 
+# Maps each app criterion to common AniList category name aliases (lowercase).
+_ADV_SCORE_ALIASES: dict[str, list[str]] = {
+    "story":      ["story", "narrative", "plot", "writing"],
+    "characters": ["characters", "character", "chars"],
+    "animation":  ["animation", "art", "visuals", "visual", "artwork", "visual production"],
+    "audio":      ["audio", "music", "sound", "soundtrack", "ost"],
+    "enjoyment":  ["enjoyment", "fun", "overall enjoyment"],
+}
+
+
+def _match_adv_score(label: str, row: dict) -> float:
+    """Return the app score whose criterion best matches an AniList category label."""
+    key = label.lower().strip()
+    for criterion, aliases in _ADV_SCORE_ALIASES.items():
+        if any(key == a or key.startswith(a) for a in aliases):
+            return float(row[criterion])
+    return 0.0
+
+
+def _map_adv_scores_from_anilist(adv_scores, use100: bool) -> dict | None:
+    """Map AniList advancedScores JSON object {"Story": 8.0, ...} to app criterion dict."""
+    if not adv_scores or not isinstance(adv_scores, dict):
+        return None
+    result: dict[str, float] = {}
+    for label, raw in adv_scores.items():
+        if not raw:
+            continue
+        key = label.lower().strip()
+        for criterion, aliases in _ADV_SCORE_ALIASES.items():
+            if any(key == a or key.startswith(a) for a in aliases):
+                result[criterion] = round(min(10.0, max(0.0, raw / 10 if use100 else float(raw))), 1)
+                break
+    return result if result else None
+
+
+def _fetch_and_cache_viewer(token: str) -> None:
+    """Fetch the AniList Viewer profile and cache all derived settings."""
+    try:
+        vr = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": "query{Viewer{id name mediaListOptions{scoreFormat animeList{advancedScoringEnabled advancedScoring}}}}"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
+            timeout=10.0,
+        )
+        vr.raise_for_status()
+        viewer   = vr.json().get("data", {}).get("Viewer") or {}
+        opts     = viewer.get("mediaListOptions") or {}
+        adv_opts = opts.get("animeList") or {}
+        _set_setting("anilist_adv_enabled",  "1" if adv_opts.get("advancedScoringEnabled") else "0")
+        _set_setting("anilist_adv_scoring",  json.dumps(adv_opts.get("advancedScoring") or []))
+        _set_setting("anilist_score_format", opts.get("scoreFormat") or "POINT_10_DECIMAL")
+        if viewer.get("id") and not _get_setting("anilist_user_id"):
+            _set_setting("anilist_user_id", str(viewer["id"]))
+        if viewer.get("name") and not _get_setting("anilist_username"):
+            _set_setting("anilist_username", viewer["name"])
+    except Exception:
+        _log.exception("Failed to refresh AniList Viewer profile")
+
+
 def _anilist_sync(anime_id: int) -> None:
     token = _get_setting("anilist_token")
     if not token:
         return
+
+    # Populate viewer settings on-demand if they were never saved (e.g. pre-v2 login).
+    if _get_setting("anilist_adv_enabled") is None:
+        _fetch_and_cache_viewer(token)
 
     al_id = _get_anilist_id(anime_id, token)
     if not al_id:
@@ -169,20 +232,27 @@ def _anilist_sync(anime_id: int) -> None:
     if not row or row["overall"] is None:
         return
 
-    adv_enabled = _get_setting("anilist_adv_enabled") == "1"
+    # Scale the overall score to match the user's AniList scoring format.
+    score_format = _get_setting("anilist_score_format") or "POINT_10_DECIMAL"
+    score_out = float(row["overall"]) * 10 if "100" in score_format else float(row["overall"])
+
     variables: dict = {
         "mediaId": al_id,
-        "score":   float(row["overall"]),
+        "score":   score_out,
         "status":  _STATUS_MAP.get(row["status"] or "completed", "COMPLETED"),
     }
+
+    adv_enabled = _get_setting("anilist_adv_enabled") == "1"
     if adv_enabled:
-        variables["advancedScores"] = [
-            float(row["story"]),
-            float(row["characters"]),
-            float(row["animation"]),
-            float(row["audio"]),
-            float(row["enjoyment"]),
-        ]
+        categories = json.loads(_get_setting("anilist_adv_scoring") or "[]")
+        if categories:
+            variables["advancedScores"] = [_match_adv_score(cat, row) for cat in categories]
+        else:
+            # No category names stored — fall back to positional order.
+            variables["advancedScores"] = [
+                float(row["story"]), float(row["characters"]),
+                float(row["animation"]), float(row["audio"]), float(row["enjoyment"]),
+            ]
 
     mutation = (
         "mutation($mediaId:Int,$score:Float,$status:MediaListStatus,$advancedScores:[Float]){"
@@ -201,7 +271,7 @@ def _anilist_sync(anime_id: int) -> None:
             timeout=10.0,
         ).raise_for_status()
     except Exception:
-        pass
+        _log.exception("AniList sync failed for anime_id=%s", anime_id)
 
 
 @asynccontextmanager
@@ -233,10 +303,11 @@ def _save_anilist_token(access_token: str) -> dict:
     adv_enabled = False
     adv_scoring: list = []
     viewer_id = None
+    score_format = "POINT_10_DECIMAL"
     try:
         vr = httpx.post(
             "https://graphql.anilist.co",
-            json={"query": "query{Viewer{id name advancedScoringEnabled advancedScoring}}"},
+            json={"query": "query{Viewer{id name mediaListOptions{scoreFormat animeList{advancedScoringEnabled advancedScoring}}}}"},
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
@@ -245,18 +316,22 @@ def _save_anilist_token(access_token: str) -> dict:
             timeout=10.0,
         )
         vr.raise_for_status()
-        viewer = vr.json().get("data", {}).get("Viewer") or {}
-        username    = viewer.get("name", "")
-        adv_enabled = viewer.get("advancedScoringEnabled", False)
-        adv_scoring = viewer.get("advancedScoring", [])
-        viewer_id   = viewer.get("id")
+        viewer       = vr.json().get("data", {}).get("Viewer") or {}
+        opts         = viewer.get("mediaListOptions") or {}
+        adv_opts     = opts.get("animeList") or {}
+        username     = viewer.get("name", "")
+        adv_enabled  = adv_opts.get("advancedScoringEnabled", False)
+        adv_scoring  = adv_opts.get("advancedScoring", [])
+        viewer_id    = viewer.get("id")
+        score_format = opts.get("scoreFormat", "POINT_10_DECIMAL")
     except Exception:
         _log.exception("Failed to fetch AniList Viewer profile — token will still be saved")
-    _set_setting("anilist_token",       access_token)
-    _set_setting("anilist_username",    username)
-    _set_setting("anilist_user_id",     str(viewer_id) if viewer_id else None)
-    _set_setting("anilist_adv_enabled", "1" if adv_enabled else "0")
-    _set_setting("anilist_adv_scoring", json.dumps(adv_scoring))
+    _set_setting("anilist_token",        access_token)
+    _set_setting("anilist_username",     username)
+    _set_setting("anilist_user_id",      str(viewer_id) if viewer_id else None)
+    _set_setting("anilist_adv_enabled",  "1" if adv_enabled else "0")
+    _set_setting("anilist_adv_scoring",  json.dumps(adv_scoring))
+    _set_setting("anilist_score_format", score_format)
     return {"username": username, "adv_enabled": adv_enabled, "adv_scoring": adv_scoring}
 
 
@@ -318,8 +393,9 @@ def anilist_callback(
 def anilist_status():
     token    = _get_setting("anilist_token")
     username = _get_setting("anilist_username")
-    adv_cats = json.loads(_get_setting("anilist_adv_scoring") or "[]")
-    return {"connected": bool(token), "username": username or None, "adv_scoring": adv_cats}
+    adv_cats     = json.loads(_get_setting("anilist_adv_scoring") or "[]")
+    score_format = _get_setting("anilist_score_format") or "POINT_10_DECIMAL"
+    return {"connected": bool(token), "username": username or None, "adv_scoring": adv_cats, "score_format": score_format}
 
 
 @app.delete("/anilist/token", status_code=204)
@@ -359,7 +435,7 @@ def _pull_anilist_library() -> dict:
     query = """
     query($userId:Int){
       MediaListCollection(userId:$userId,type:ANIME){
-        lists{entries{score status repeat media{
+        lists{entries{score advancedScores status repeat media{
           id idMal
           title{english romaji native}
           coverImage{large}
@@ -411,6 +487,8 @@ def _pull_anilist_library() -> dict:
             score: float | None = None
             if raw_score > 0:
                 score = round(min(10.0, max(1.0, raw_score / 10 if use100 else float(raw_score))), 1)
+            adv = _map_adv_scores_from_anilist(e.get("advancedScores"), use100)
+            adv = _map_adv_scores_from_anilist(e.get("advancedScores"), use100)
 
             existing = None
             if mal_id:
@@ -438,7 +516,16 @@ def _pull_anilist_library() -> dict:
                         "INSERT OR REPLACE INTO rating "
                         "(anime_id,story,characters,animation,audio,enjoyment,overall,updated_at) "
                         "VALUES (?,?,?,?,?,?,?,?)",
-                        (anime_id, score, score, score, score, score, score, today),
+                        (
+                            anime_id,
+                            adv.get("story", score) if adv else score,
+                            adv.get("characters", score) if adv else score,
+                            adv.get("animation", score) if adv else score,
+                            adv.get("audio", score) if adv else score,
+                            adv.get("enjoyment", score) if adv else score,
+                            score,
+                            today,
+                        ),
                     )
                 updated += 1
             else:
@@ -470,7 +557,16 @@ def _pull_anilist_library() -> dict:
                         "INSERT OR REPLACE INTO rating "
                         "(anime_id,story,characters,animation,audio,enjoyment,overall,updated_at) "
                         "VALUES (?,?,?,?,?,?,?,?)",
-                        (cur.lastrowid, score, score, score, score, score, score, today),
+                        (
+                            cur.lastrowid,
+                            adv.get("story", score) if adv else score,
+                            adv.get("characters", score) if adv else score,
+                            adv.get("animation", score) if adv else score,
+                            adv.get("audio", score) if adv else score,
+                            adv.get("enjoyment", score) if adv else score,
+                            score,
+                            today,
+                        ),
                     )
                 added += 1
 
