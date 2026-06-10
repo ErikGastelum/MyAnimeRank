@@ -243,9 +243,11 @@ const scoreLabel = (v) => {
   return 'Awful';
 };
 
+const stripHtml = (s) => s ? s.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").trim() : '';
 const normaliseRanked = (row) => {
   const { story, characters, animation, audio, enjoyment, overall: ov, updated_at, ...rest } = row;
-  return { ...rest, rating: { story, characters, animation, audio, enjoyment, overall: ov, updated_at } };
+  const rating = ov != null ? { story, characters, animation, audio, enjoyment, overall: ov, updated_at } : null;
+  return { ...rest, rating };
 };
 
 
@@ -583,6 +585,15 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
 
   const sortOpts = [{ key:'overall', label:'Overall' }, ...CRITERIA];
 
+  const unrated = useMemo(() => {
+    const normalStatus = (a) => { const raw = a.status||'completed'; return raw==='on_hold'?'paused':raw==='plan_to_watch'?'planning':raw; };
+    return library.filter(a => !a.rating &&
+      (statusFilter==='all' || normalStatus(a)===statusFilter) &&
+      (genre==='All' || a.genres.includes(genre)) &&
+      (fmtFilter==='All' || a.format===fmtFilter) &&
+      (q==='' || a.title.toLowerCase().includes(q.toLowerCase())));
+  }, [library, q, genre, fmtFilter, statusFilter]);
+
   const exportMAL = () => { window.location.href = '/export/mal-xml'; };
 
   const discoverRecs = useMemo(() => {
@@ -716,10 +727,65 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
             <RankCard key={a.id} anime={a} rank={i+1} sortKey={sortKey}
               onOpen={()=>navigate({name:'detail', animeId:a.id})} englishTitles={englishTitles} variant={rankView} />
           ))}
-          {list.length===0 && (
+          {list.length===0 && unrated.length===0 && (
             <div style={{ gridColumn:'1/-1', textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No titles match these filters.</div>
           )}
         </div>
+
+        {unrated.length > 0 && (
+          <div style={{ marginTop:32 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:16 }}>
+              <span style={{ fontSize:13, fontWeight:700, color:'var(--text-3)', letterSpacing:'0.04em', textTransform:'uppercase' }}>
+                In your list · not yet rated
+              </span>
+              <span style={{ fontSize:12, color:'var(--text-3)', opacity:.5 }}>{unrated.length}</span>
+            </div>
+            <div style={{ display:'grid',
+              gridTemplateColumns: rankView==='list' ? '1fr' : rankView==='card' ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)',
+              gap: rankView==='list' ? 8 : 16 }}>
+              {unrated.map(a => (
+                <div key={a.id} onClick={() => navigate({name:'detail', animeId:a.id})}
+                  className="fade-up"
+                  style={{ cursor:'pointer', borderRadius:16, overflow:'hidden', background:'var(--surface)',
+                    boxShadow:'0 0 0 1px var(--line) inset', transition:'background .14s, box-shadow .14s, transform .14s' }}
+                  onMouseEnter={e => { e.currentTarget.style.background='var(--hover)'; e.currentTarget.style.transform='translateY(-2px)'; e.currentTarget.style.boxShadow='0 0 0 1px var(--line-2) inset, 0 14px 36px -14px rgba(0,0,0,0.85)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background='var(--surface)'; e.currentTarget.style.transform='none'; e.currentTarget.style.boxShadow='0 0 0 1px var(--line) inset'; }}>
+                  {rankView !== 'list'
+                    ? (<>
+                        <Poster anime={a} fluid radius={0} />
+                        <div style={{ padding:'10px 12px 12px' }}>
+                          <div style={{ fontWeight:700, fontSize:13, letterSpacing:'-0.01em', lineHeight:1.25,
+                            display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
+                            marginBottom:4 }}>{displayTitle(a, englishTitles)}</div>
+                          <div style={{ fontSize:11, color:'var(--text-3)' }}>
+                            {a.status && <span style={{ textTransform:'capitalize' }}>{a.status}</span>}
+                            {a.year && <span> · {a.year}</span>}
+                          </div>
+                        </div>
+                      </>)
+                    : (
+                        <div style={{ display:'flex', alignItems:'center', gap:16, padding:'12px 16px' }}>
+                          <div style={{ width:36, height:50, flexShrink:0, borderRadius:6, overflow:'hidden' }}>
+                            <Poster anime={a} fluid radius={0} />
+                          </div>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontWeight:700, fontSize:14, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {displayTitle(a, englishTitles)}
+                            </div>
+                            <div style={{ fontSize:12, color:'var(--text-3)', marginTop:2 }}>
+                              {a.status && <span style={{ textTransform:'capitalize' }}>{a.status}</span>}
+                              {a.format && <span> · {a.format}</span>}
+                              {a.year && <span> · {a.year}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      )
+                  }
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {showPanel && (
@@ -1017,7 +1083,13 @@ function AniListConnectModal({ onClose, onStatusChange }) {
 
   const disconnect = async () => {
     setSaving(true);
-    await fetch('/anilist/token', { method: 'DELETE' });
+    try {
+      const r = await fetch('/anilist/token', { method: 'DELETE' });
+      if (!r.ok) throw new Error(r.status);
+    } catch {
+      setSaving(false);
+      return;
+    }
     const next = { connected: false, username: null, adv_scoring: [] };
     setStatus(next); onStatusChange(next); setSaving(false);
   };
@@ -1063,6 +1135,12 @@ function AniListConnectModal({ onClose, onStatusChange }) {
             {err && <div style={{ color:'#f87171', fontSize:12.5 }}>{err}</div>}
             <p style={{ margin:'12px 0 0', color:'var(--text-4)', fontSize:12, lineHeight:1.5 }}>
               After authorizing in your browser the app connects automatically.
+            </p>
+            <p style={{ margin:'10px 0 0', color:'var(--text-4)', fontSize:11, lineHeight:1.6 }}>
+              Your AniList app's redirect URI must be set to:<br/>
+              <code style={{ userSelect:'all', color:'var(--text-3)' }}>
+                {`http://localhost:${window.location.port}/anilist/callback`}
+              </code>
             </p>
           </>
         )}
@@ -1140,7 +1218,7 @@ function parseAniListCSV(text) {
     }));
 }
 
-function AniListImport({ onClose, library, setLibrary }) {
+function AniListImport({ onClose, library, setLibrary, initialUsername = '', autoFetch = false }) {
   const [phase, setPhase]         = useState('pick');
   const [entries, setEntries]     = useState([]);
   const [progress, setProgress]   = useState(0);
@@ -1149,7 +1227,7 @@ function AniListImport({ onClose, library, setLibrary }) {
   const [skipCount, setSkipCount] = useState(0);
   const [fileErr, setFileErr]         = useState('');
   const [pickTab, setPickTab]         = useState('anilist');
-  const [username, setUsername]       = useState('');
+  const [username, setUsername]       = useState(initialUsername);
   const [fetching, setFetching]       = useState(false);
   const [malUsername, setMalUsername] = useState('');
   const [malFetching, setMalFetching] = useState(false);
@@ -1221,6 +1299,10 @@ function AniListImport({ onClose, library, setLibrary }) {
     }
     setFetching(false);
   };
+
+  useEffect(() => {
+    if (autoFetch && initialUsername.trim()) fetchByUsername();
+  }, []);
 
   const fetchByMal = async () => {
     if (!malUsername.trim()) return;
@@ -1710,7 +1792,7 @@ function SeasonalPreviewModal({ item, inLibrary, onImport, onClose }) {
         </div>
         {item.synopsis && (
           <p style={{ margin:'0 0 24px', color:'var(--text-2)', fontSize:13.5, lineHeight:1.65 }}>
-            {item.synopsis}
+            {stripHtml(item.synopsis)}
           </p>
         )}
         <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
@@ -2400,7 +2482,7 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
         <div style={{ display:'flex', gap:30 }}>
           <div style={{ position:'relative' }}>
             <Poster anime={anime} w={188} radius={14} showBadge />
-            {overallRank<=3 && (
+            {overallRank > 0 && overallRank <= 3 && (
               <div style={{ position:'absolute', top:-10, right:-10, width:44, height:44, borderRadius:12,
                 background:'var(--accent)', color:'#04121f', display:'grid', placeItems:'center',
                 fontFamily:'var(--mono)', fontWeight:800, fontSize:17,
@@ -2417,7 +2499,7 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
                   <span style={{opacity:.4}}>&bull;</span>
                   <span>{anime.format}</span>
                   {anime.episodes>1 && <><span style={{opacity:.4}}>&bull;</span><span>{anime.episodes} episodes</span></>}
-                  {anime.mal_score != null && (() => {
+                  {anime.mal_score != null && ov != null && (() => {
                     const delta = ov - anime.mal_score;
                     const pos = delta >= 0;
                     return <>
@@ -2452,20 +2534,20 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
               <div style={{ textAlign:'center', flexShrink:0 }}>
                 <ScoreBadge value={ov} size="lg" />
                 <div style={{ fontSize:10.5, letterSpacing:'0.07em', textTransform:'uppercase',
-                  fontWeight:700, color:'var(--text-3)', marginTop:8 }}>Overall &middot; #{overallRank}</div>
+                  fontWeight:700, color:'var(--text-3)', marginTop:8 }}>Overall{overallRank > 0 ? ` · #${overallRank}` : ''}</div>
               </div>
             </div>
-            {anime.synopsis && <p style={{ margin:'18px 0 0', color:'var(--text-2)', fontSize:14, lineHeight:1.65, maxWidth:620 }}>{anime.synopsis}</p>}
+            {anime.synopsis && <p style={{ margin:'18px 0 0', color:'var(--text-2)', fontSize:14, lineHeight:1.65, maxWidth:620 }}>{stripHtml(anime.synopsis)}</p>}
             <div style={{ display:'flex', gap:10, marginTop:22, flexWrap:'wrap' }}>
               <button className="btn btn-primary" onClick={()=>navigate({name:'rate',animeId:anime.id})}>
-                <Ico name="star" size={16} sw={1.9} /> Re-rate
+                <Ico name="star" size={16} sw={1.9} /> {anime.rating ? 'Re-rate' : 'Rate'}
               </button>
-              <button className="btn btn-ghost" onClick={onRewatch} disabled={rewatching}>
+              {anime.rating && <button className="btn btn-ghost" onClick={onRewatch} disabled={rewatching}>
                 <Ico name="check" size={15} /> {rewatching ? '…' : '+ Rewatch'}
-              </button>
-              <button className="btn btn-ghost" onClick={()=>setShowCompare(true)}>
+              </button>}
+              {anime.rating && <button className="btn btn-ghost" onClick={()=>setShowCompare(true)}>
                 <Ico name="compare" size={16} /> Compare
-              </button>
+              </button>}
               <button className="btn btn-ghost" onClick={()=>setShowEdit(true)}>
                 <Ico name="edit" size={16} /> Edit
               </button>
@@ -2478,6 +2560,7 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
       </div>
 
       <div style={{ padding:'34px 38px 60px' }}>
+        {anime.rating ? (<>
         <h2 style={{ margin:'0 0 6px', fontSize:14, fontWeight:800, letterSpacing:'0.06em',
           textTransform:'uppercase', color:'var(--text-3)' }}>Score breakdown</h2>
         <div style={{ marginTop:10, padding:'8px 22px', borderRadius:16, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
@@ -2490,6 +2573,14 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
         <p style={{ margin:'14px 2px 0', color:'var(--text-4)', fontSize:12 }}>
           Last rated <span className="mono">{anime.rating.updated_at}</span> &middot; Overall is the unweighted average of the five.
         </p>
+        </>) : (
+        <div style={{ padding:'32px 0', textAlign:'center', color:'var(--text-3)' }}>
+          <p style={{ margin:'0 0 16px', fontSize:14 }}>You haven't rated this anime yet.</p>
+          <button className="btn btn-primary" onClick={()=>navigate({name:'rate',animeId:anime.id})}>
+            <Ico name="star" size={16} sw={1.9} /> Rate now
+          </button>
+        </div>
+        )}
 
         <div style={{ marginTop:32 }}>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
@@ -2921,8 +3012,26 @@ function App() {
   const [showAnilistConnect, setShowAnilistConnect] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
 
+  const reloadLibrary = useCallback(() => {
+    fetch('/rankings')
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(d => { setLibrary((d.results || []).map(normaliseRanked)); })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
-    fetch('/anilist/token').then(r => r.json()).then(setAnilistStatus).catch(() => {});
+    fetch('/anilist/token')
+      .then(r => r.json())
+      .then(status => {
+        setAnilistStatus(status);
+        if (status.connected) {
+          fetch('/anilist/pull', { method: 'POST' })
+            .then(r => r.json())
+            .then(({ added, updated }) => { if (added + updated > 0) reloadLibrary(); })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -3178,7 +3287,17 @@ const animeFor  = (id) => library.find(a => a.id===id);
       {showAnilistConnect && (
         <AniListConnectModal
           onClose={() => setShowAnilistConnect(false)}
-          onStatusChange={(s) => setAnilistStatus(s)}
+          onStatusChange={(s) => {
+            const firstConnect = !anilistStatus?.connected && s.connected;
+            setAnilistStatus(s);
+            if (firstConnect) {
+              setShowAnilistConnect(false);
+              fetch('/anilist/pull', { method: 'POST' })
+                .then(r => r.json())
+                .then(({ added, updated }) => { if (added + updated > 0) reloadLibrary(); })
+                .catch(() => {});
+            }
+          }}
         />
       )}
       <TweaksPanel>

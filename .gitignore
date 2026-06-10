@@ -23,4 +23,5 @@ Thumbs.db
 # Personal
 PRD.md
 .env
+_secrets.py
 .devcontainer/

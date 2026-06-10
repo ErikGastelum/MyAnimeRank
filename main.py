@@ -12,8 +12,19 @@ from pathlib import Path
 
 import httpx
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, UploadFile
+import logging
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+
+_log = logging.getLogger("myanimrank")
+
+def _strip_html(s: str | None) -> str | None:
+    if not s:
+        return s
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = re.sub(r'\s{2,}', ' ', s)
+    return s.strip() or None
 from pydantic import BaseModel as _BaseModel
 
 from database import get_conn, init_db
@@ -27,7 +38,10 @@ HTML_FILE = _BASE / "MyAnimeRank.html"
 _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
 
 ANILIST_CLIENT_ID = 43290
-ANILIST_CLIENT_SECRET: str = os.environ.get("ANILIST_CLIENT_SECRET", "PLACEHOLDER_ANILIST_SECRET")
+try:
+    from _secrets import ANILIST_CLIENT_SECRET  # type: ignore[import]  # git-ignored, set before release
+except ImportError:
+    ANILIST_CLIENT_SECRET: str = os.environ.get("ANILIST_CLIENT_SECRET", "")
 
 _PAGE_CSS = (
     "<style>body{font-family:system-ui,sans-serif;background:#0c0d10;color:#eef1f6;"
@@ -80,6 +94,15 @@ _STATUS_MAP = {
     # legacy values stored before rename
     "plan_to_watch": "PLANNING",
     "on_hold":       "PAUSED",
+}
+
+_ANILIST_STATUS_REVERSE = {
+    "COMPLETED":  "completed",
+    "CURRENT":    "watching",
+    "REPEATING":  "rewatching",
+    "PLANNING":   "planning",
+    "DROPPED":    "dropped",
+    "PAUSED":     "paused",
 }
 
 
@@ -209,10 +232,11 @@ def _save_anilist_token(access_token: str) -> dict:
     username = ""
     adv_enabled = False
     adv_scoring: list = []
+    viewer_id = None
     try:
         vr = httpx.post(
             "https://graphql.anilist.co",
-            json={"query": "query{Viewer{name advancedScoringEnabled advancedScoring}}"},
+            json={"query": "query{Viewer{id name advancedScoringEnabled advancedScoring}}"},
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
@@ -225,19 +249,28 @@ def _save_anilist_token(access_token: str) -> dict:
         username    = viewer.get("name", "")
         adv_enabled = viewer.get("advancedScoringEnabled", False)
         adv_scoring = viewer.get("advancedScoring", [])
+        viewer_id   = viewer.get("id")
     except Exception:
-        pass
+        _log.exception("Failed to fetch AniList Viewer profile — token will still be saved")
     _set_setting("anilist_token",       access_token)
     _set_setting("anilist_username",    username)
+    _set_setting("anilist_user_id",     str(viewer_id) if viewer_id else None)
     _set_setting("anilist_adv_enabled", "1" if adv_enabled else "0")
     _set_setting("anilist_adv_scoring", json.dumps(adv_scoring))
     return {"username": username, "adv_enabled": adv_enabled, "adv_scoring": adv_scoring}
 
 
 @app.get("/anilist/callback")
-def anilist_callback(code: str = Query(None), error: str = Query(None)):
+def anilist_callback(
+    request: Request,
+    code: str = Query(None),
+    error: str = Query(None),
+    message: str = Query(None),
+):
+    _log.warning("AniList callback received — full URL: %s", request.url)
     if error:
-        return Response(content=_callback_page(False, f"AniList error: {error}"), media_type="text/html")
+        detail = f"{error}" + (f": {message}" if message else "")
+        return Response(content=_callback_page(False, f"AniList error — {detail}"), media_type="text/html")
     if not code:
         return Response(content=_callback_page(False, "No authorization code received."), media_type="text/html")
 
@@ -259,15 +292,26 @@ def anilist_callback(code: str = Query(None), error: str = Query(None)):
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10.0,
         )
-        tr.raise_for_status()
+        if not tr.is_success:
+            body = tr.json() if tr.headers.get("content-type", "").startswith("application/json") else {}
+            al_error = body.get("error") or body.get("message") or tr.text[:200]
+            return Response(
+                content=_callback_page(False, f"Token exchange failed ({tr.status_code}): {al_error}"),
+                media_type="text/html",
+            )
         access_token = tr.json().get("access_token", "")
         if not access_token:
             raise ValueError("empty access_token")
     except Exception as exc:
         return Response(content=_callback_page(False, f"Token exchange failed: {exc}"), media_type="text/html")
 
-    info = _save_anilist_token(access_token)
-    return Response(content=_callback_page(True, info["username"] or "unknown"), media_type="text/html")
+    try:
+        info = _save_anilist_token(access_token)
+        display_name = info.get("username") or "unknown"
+    except Exception:
+        _log.exception("Failed to persist AniList token metadata — token was saved, profile info may be missing")
+        display_name = "unknown"
+    return Response(content=_callback_page(True, display_name), media_type="text/html")
 
 
 @app.get("/anilist/token")
@@ -280,9 +324,164 @@ def anilist_status():
 
 @app.delete("/anilist/token", status_code=204)
 def anilist_disconnect():
-    for key in ("anilist_token", "anilist_username", "anilist_adv_enabled",
-                "anilist_adv_scoring", "anilist_redirect_uri"):
+    for key in ("anilist_token", "anilist_username", "anilist_user_id",
+                "anilist_adv_enabled", "anilist_adv_scoring", "anilist_redirect_uri"):
         _set_setting(key, None)
+
+
+def _pull_anilist_library() -> dict:
+    token = _get_setting("anilist_token")
+    if not token:
+        return {"added": 0, "updated": 0}
+
+    user_id_str = _get_setting("anilist_user_id")
+    if not user_id_str:
+        # Connected before user_id storage was added — fetch and cache it now
+        try:
+            vr = httpx.post(
+                "https://graphql.anilist.co",
+                json={"query": "query{Viewer{id name}}"},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
+                timeout=10.0,
+            )
+            viewer = vr.json().get("data", {}).get("Viewer") or {}
+            uid = viewer.get("id")
+            uname = viewer.get("name", "")
+            if not uid:
+                return {"added": 0, "updated": 0}
+            user_id_str = str(uid)
+            _set_setting("anilist_user_id", user_id_str)
+            if uname and not _get_setting("anilist_username"):
+                _set_setting("anilist_username", uname)
+        except Exception:
+            return {"added": 0, "updated": 0}
+
+    query = """
+    query($userId:Int){
+      MediaListCollection(userId:$userId,type:ANIME){
+        lists{entries{score status repeat media{
+          id idMal
+          title{english romaji native}
+          coverImage{large}
+          episodes format averageScore
+          startDate{year}
+          genres
+          description(asHtml:false)
+        }}}
+      }
+    }"""
+    try:
+        resp = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": {"userId": int(user_id_str)}},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=30.0,
+        )
+        if not resp.is_success:
+            return {"added": 0, "updated": 0}
+        raw_entries = [
+            e
+            for lst in (resp.json().get("data", {}).get("MediaListCollection") or {}).get("lists", [])
+            for e in lst.get("entries", [])
+        ]
+    except Exception:
+        return {"added": 0, "updated": 0}
+
+    scores = [e["score"] for e in raw_entries if e.get("score", 0) > 0]
+    use100 = any(s > 10 for s in scores)
+
+    added = updated = 0
+    today = date.today().isoformat()
+    with get_conn() as conn:
+        for e in raw_entries:
+            media = e.get("media") or {}
+            mal_id = media.get("idMal")
+            al_id  = media.get("id")
+            titles = media.get("title") or {}
+            title  = titles.get("english") or titles.get("romaji") or titles.get("native") or ""
+            if not title:
+                continue
+
+            status = _ANILIST_STATUS_REVERSE.get(e.get("status", ""), "completed")
+            raw_score = e.get("score", 0)
+            score: float | None = None
+            if raw_score > 0:
+                score = round(min(10.0, max(1.0, raw_score / 10 if use100 else float(raw_score))), 1)
+
+            existing = None
+            if mal_id:
+                existing = conn.execute(
+                    "SELECT id FROM anime WHERE api_id=?", (str(mal_id),)
+                ).fetchone()
+            if not existing:
+                existing = conn.execute(
+                    "SELECT id FROM anime WHERE lower(title)=?", (title.lower(),)
+                ).fetchone()
+
+            if existing:
+                anime_id = existing["id"]
+                conn.execute("UPDATE anime SET status=? WHERE id=?", (status, anime_id))
+                if al_id:
+                    conn.execute(
+                        "UPDATE anime SET anilist_id=? WHERE id=? AND (anilist_id IS NULL OR anilist_id='')",
+                        (str(al_id), anime_id),
+                    )
+                has_rating = conn.execute(
+                    "SELECT 1 FROM rating WHERE anime_id=?", (anime_id,)
+                ).fetchone()
+                if not has_rating and score is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO rating "
+                        "(anime_id,story,characters,animation,audio,enjoyment,overall,updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (anime_id, score, score, score, score, score, score, today),
+                    )
+                updated += 1
+            else:
+                title_ro = titles.get("romaji")
+                if title_ro == title:
+                    title_ro = None
+                avg = media.get("averageScore")
+                cur = conn.execute(
+                    "INSERT INTO anime "
+                    "(api_id,title,title_ro,cover_url,genres,year,episodes,format,synopsis,mal_score,status,anilist_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(mal_id) if mal_id else None,
+                        title,
+                        title_ro,
+                        (media.get("coverImage") or {}).get("large"),
+                        json.dumps(media.get("genres") or []),
+                        (media.get("startDate") or {}).get("year"),
+                        media.get("episodes"),
+                        media.get("format"),
+                        _strip_html(media.get("description")),
+                        round(avg / 10, 1) if avg else None,
+                        status,
+                        str(al_id) if al_id else None,
+                    ),
+                )
+                if score is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO rating "
+                        "(anime_id,story,characters,animation,audio,enjoyment,overall,updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (cur.lastrowid, score, score, score, score, score, score, today),
+                    )
+                added += 1
+
+    return {"added": added, "updated": updated}
+
+
+@app.post("/anilist/pull")
+def anilist_pull():
+    if not _get_setting("anilist_token"):
+        raise HTTPException(status_code=400, detail="Not connected to AniList")
+    return _pull_anilist_library()
 
 
 @app.get("/search")
@@ -363,8 +562,8 @@ def rankings(
             "       a.episodes, a.format, a.synopsis, a.mal_score, a.status, a.notes, a.rewatch_count, "
             "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
             "       r.overall, r.updated_at "
-            "FROM anime a JOIN rating r ON a.id = r.anime_id "
-            f"ORDER BY {col} DESC"
+            "FROM anime a LEFT JOIN rating r ON a.id = r.anime_id "
+            f"ORDER BY COALESCE({col}, 0) DESC"
         ).fetchall()
 
     results = []

@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 import time
@@ -8,12 +9,16 @@ import webview
 from main import app as fastapi_app
 
 _HOST = "127.0.0.1"
+_PORT = int(os.environ.get("MAR_PORT", "6969"))
 
 
-def _free_port() -> int:
+def _port_available(port: int) -> bool:
     with socket.socket() as s:
-        s.bind((_HOST, 0))
-        return s.getsockname()[1]
+        try:
+            s.bind((_HOST, port))
+            return True
+        except OSError:
+            return False
 
 
 def _wait_for_server(port: int, timeout: float = 10.0) -> None:
@@ -71,7 +76,13 @@ class WindowApi:
 
 
 if __name__ == "__main__":
-    port = _free_port()
+    port = _PORT
+    if not _port_available(port):
+        raise SystemExit(
+            f"Port {port} is already in use. "
+            f"Set MAR_PORT=<number> to use a different port, "
+            f"then update your AniList app's redirect URI to http://localhost:<number>/anilist/callback"
+        )
     server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
     server_thread.start()
     _wait_for_server(port)
