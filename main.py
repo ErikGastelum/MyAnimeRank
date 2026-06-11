@@ -8,7 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -28,7 +28,9 @@ def _strip_html(s: str | None) -> str | None:
     return s.strip() or None
 from pydantic import BaseModel as _BaseModel
 
-from database import get_conn, init_db
+from database import get_conn, init_db, DB_PATH
+
+_BACKUPS_DIR = DB_PATH.parent / "backups"
 from jikan import search as jikan_search, seasonal as jikan_seasonal, by_mal_id as jikan_by_id
 from models import AnimeCreate, AnimeUpdate, RatingIn
 
@@ -510,6 +512,24 @@ def anilist_profile_stats():
     }
 
 
+def _auto_backup() -> None:
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT a.*, r.story, r.characters, r.animation, r.audio, r.enjoyment, r.overall, r.updated_at "
+                "FROM anime a LEFT JOIN rating r ON a.id = r.anime_id"
+            ).fetchall()
+        entries = [dict(r) | {"genres": json.loads(r["genres"] or "[]")} for r in rows]
+        _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = _BACKUPS_DIR / f"backup_{ts}.json"
+        path.write_text(json.dumps({"version": 1, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+        for old in sorted(_BACKUPS_DIR.glob("backup_*.json"))[:-10]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        _log.exception("auto-backup failed")
+
+
 def _pull_anilist_library() -> dict:
     token = _get_setting("anilist_token")
     if not token:
@@ -698,7 +718,73 @@ def _pull_anilist_library() -> dict:
 def anilist_pull():
     if not _get_setting("anilist_token"):
         raise HTTPException(status_code=400, detail="Not connected to AniList")
+    _auto_backup()
     return _pull_anilist_library()
+
+
+@app.post("/anilist/push")
+def anilist_push():
+    token = _get_setting("anilist_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="Not connected to AniList")
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT a.id, a.anilist_id FROM anime a INNER JOIN rating r ON a.id = r.anime_id"
+        ).fetchall()
+    synced = skipped = errors = 0
+    for row in rows:
+        if not row["anilist_id"]:
+            skipped += 1
+            continue
+        try:
+            _anilist_sync(row["id"])
+            synced += 1
+        except Exception:
+            _log.exception("push failed for anime_id=%s", row["id"])
+            errors += 1
+        time.sleep(0.4)
+    _set_setting("anilist_last_push", date.today().isoformat())
+    return {"synced": synced, "skipped": skipped, "errors": errors}
+
+
+@app.get("/backups")
+def list_backups():
+    _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(_BACKUPS_DIR.glob("backup_*.json"), reverse=True)
+    result = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            entry_count = len(data.get("entries", []))
+        except Exception:
+            entry_count = 0
+        st = f.stat()
+        result.append({
+            "filename": f.name,
+            "created_at": datetime.fromtimestamp(st.st_mtime).isoformat(),
+            "entry_count": entry_count,
+        })
+    return {"backups": result}
+
+
+@app.get("/backups/{filename}")
+def download_backup_file(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = _BACKUPS_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return FileResponse(path, media_type="application/json", filename=filename)
+
+
+@app.delete("/backups/{filename}", status_code=204)
+def delete_backup(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = _BACKUPS_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Backup not found")
+    path.unlink()
 
 
 @app.get("/search")
@@ -1031,6 +1117,7 @@ def backup():
 
 @app.post("/restore", status_code=204)
 def restore(body: dict):
+    _auto_backup()
     entries = body.get("entries", [])
     updated_at = str(date.today())
     with get_conn() as conn:
@@ -1038,8 +1125,8 @@ def restore(body: dict):
             genres = json.dumps(e.get("genres") or [])
             cur = conn.execute(
                 "INSERT OR REPLACE INTO anime "
-                "(id, api_id, anilist_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status, notes, rewatch_count, episodes_watched) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(id, api_id, anilist_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status, notes, rewatch_count, episodes_watched, is_airing, episodes_aired, next_episode_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     e.get("id"), e.get("api_id"), e.get("anilist_id"),
                     e.get("title", ""), e.get("title_ro"),
@@ -1047,6 +1134,7 @@ def restore(body: dict):
                     e.get("episodes"), e.get("format"), e.get("synopsis"),
                     e.get("mal_score"), e.get("status"), e.get("notes"),
                     e.get("rewatch_count", 0), e.get("episodes_watched", 0),
+                    e.get("is_airing"), e.get("episodes_aired"), e.get("next_episode_at"),
                 ),
             )
             aid = e.get("id") or cur.lastrowid

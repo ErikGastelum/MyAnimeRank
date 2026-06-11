@@ -989,6 +989,8 @@ function Insights({ library }) {
 /* ─── AniList profile panel ────────────────────────────────────────────── */
 function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfileUpdate }) {
   const [disconnecting, setDisconnecting] = React.useState(false);
+  const [pushing, setPushing] = React.useState(false);
+  const [pushResult, setPushResult] = React.useState(null);
 
   React.useEffect(() => {
     fetch('/anilist/profile')
@@ -996,6 +998,17 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
       .then(p => { if (p && onProfileUpdate) onProfileUpdate(p); })
       .catch(() => {});
   }, []);
+
+  const doPush = async () => {
+    setPushing(true);
+    setPushResult(null);
+    try {
+      const r = await fetch('/anilist/push', { method: 'POST' });
+      const d = await r.json();
+      setPushResult(r.ok ? d : { error: true });
+    } catch { setPushResult({ error: true }); }
+    finally { setPushing(false); }
+  };
 
   const doDisconnect = async () => {
     setDisconnecting(true);
@@ -1063,6 +1076,24 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
             ))}
           </div>
           <div style={{ height:1, background:'var(--line)', marginBottom:18 }} />
+          <button onClick={doPush} disabled={pushing}
+            style={{ width:'100%', padding:'12px 0', borderRadius:12, border:'none', cursor:'pointer',
+              background:'rgba(52,168,240,0.07)', color:'var(--accent-2)', fontWeight:600, fontSize:13,
+              fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(52,168,240,0.18) inset',
+              opacity: pushing ? 0.6 : 1, transition:'opacity .14s', marginBottom:10 }}>
+            {pushing ? 'Pushing to AniList…' : 'Push all ratings to AniList'}
+          </button>
+          {pushResult && !pushResult.error && (
+            <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:14 }}>
+              {`Synced ${pushResult.synced} · Skipped ${pushResult.skipped}${pushResult.errors ? ` · ${pushResult.errors} errors` : ''}`}
+            </div>
+          )}
+          {pushResult?.error && (
+            <div style={{ fontSize:12, color:'#f87171', textAlign:'center', marginBottom:14 }}>
+              Push failed — check your connection
+            </div>
+          )}
+          <div style={{ height:1, background:'var(--line)', marginBottom:18 }} />
           <button onClick={doDisconnect} disabled={disconnecting}
             style={{ width:'100%', padding:'12px 0', borderRadius:12, border:'none', cursor:'pointer',
               background:'rgba(248,113,113,0.08)', color:'#f87171', fontWeight:600, fontSize:13,
@@ -1071,6 +1102,132 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
             {disconnecting ? 'Signing out…' : 'Sign out'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Backup panel ──────────────────────────────────────────────────────── */
+function BackupPanel({ onClose }) {
+  const [backups, setBackups] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [deleting, setDeleting] = React.useState(null);
+  const lastDownloaded = localStorage.getItem('lastBackupDate');
+  const daysSince = lastDownloaded
+    ? Math.floor((Date.now() - new Date(lastDownloaded).getTime()) / 86400000)
+    : null;
+  const overdue = daysSince === null || daysSince > 30;
+
+  React.useEffect(() => {
+    fetch('/backups').then(r => r.json()).then(d => { setBackups(d.backups || []); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const downloadCurrent = async () => {
+    const d = await fetch('/backup').then(r => r.json());
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `myanimrank_backup_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    localStorage.setItem('lastBackupDate', new Date().toISOString().slice(0,10));
+  };
+
+  const downloadAutoBackup = async (filename) => {
+    const r = await fetch(`/backups/${encodeURIComponent(filename)}`);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+  };
+
+  const deleteAutoBackup = async (filename) => {
+    setDeleting(filename);
+    await fetch(`/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    setBackups(b => b.filter(x => x.filename !== filename));
+    setDeleting(null);
+  };
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
+      style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.75)', backdropFilter:'blur(4px)',
+        display:'grid', placeItems:'center', zIndex:200 }}>
+      <div onClick={e => e.stopPropagation()} className="fade-up"
+        style={{ width:520, maxWidth:'calc(100vw - 36px)', borderRadius:18, background:'var(--surface-2)',
+          boxShadow:'0 0 0 1px var(--line-2) inset, 0 24px 80px rgba(0,0,0,0.6)', padding:'28px 28px 24px' }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:22 }}>
+          <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>Backup</h2>
+          <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--text-3)', padding:4 }}>
+            <Ico name="close" size={18} />
+          </button>
+        </div>
+
+        {overdue && (
+          <div style={{ padding:'12px 16px', borderRadius:12, background:'rgba(251,191,36,0.08)',
+            boxShadow:'0 0 0 1px rgba(251,191,36,0.25) inset', marginBottom:18,
+            fontSize:13, color:'#fbbf24', display:'flex', gap:10, alignItems:'flex-start' }}>
+            <span style={{ flexShrink:0, marginTop:1 }}>⚠</span>
+            <span>
+              {daysSince === null
+                ? 'You have never downloaded a backup. Download one and store it somewhere safe (cloud storage, USB drive) — this is your only recovery option if both the app and AniList are wiped.'
+                : `Last download was ${daysSince} days ago. Keep a fresh copy somewhere outside this machine.`}
+            </span>
+          </div>
+        )}
+
+        <button onClick={downloadCurrent}
+          style={{ width:'100%', padding:'13px 0', borderRadius:12, border:'none', cursor:'pointer',
+            background:'var(--accent)', color:'#fff', fontWeight:700, fontSize:14,
+            fontFamily:'inherit', marginBottom:6 }}>
+          Download backup now
+        </button>
+        {!overdue && (
+          <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:18 }}>
+            Last downloaded {daysSince === 0 ? 'today' : `${daysSince} day${daysSince === 1 ? '' : 's'} ago`}
+          </div>
+        )}
+
+        {backups.length > 0 && (
+          <>
+            <div style={{ height:1, background:'var(--line)', margin:'18px 0 14px' }} />
+            <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:700, textTransform:'uppercase',
+              letterSpacing:'0.06em', marginBottom:10 }}>
+              Auto-backups ({backups.length})
+            </div>
+            <div style={{ display:'flex', flexDirection:'column', gap:6, maxHeight:240, overflowY:'auto' }}>
+              {backups.map(b => (
+                <div key={b.filename} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
+                  borderRadius:10, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:'var(--text-2)' }}>
+                      {b.created_at.slice(0,16).replace('T', ' ')}
+                    </div>
+                    <div style={{ fontSize:11, color:'var(--text-4)', marginTop:2 }}>
+                      {b.entry_count} entries
+                    </div>
+                  </div>
+                  <button onClick={() => downloadAutoBackup(b.filename)}
+                    style={{ padding:'5px 10px', borderRadius:7, border:'none', cursor:'pointer',
+                      background:'rgba(52,168,240,0.08)', color:'var(--accent-2)', fontSize:12,
+                      fontFamily:'inherit', fontWeight:600 }}>
+                    Download
+                  </button>
+                  <button onClick={() => deleteAutoBackup(b.filename)} disabled={deleting === b.filename}
+                    style={{ padding:'5px 10px', borderRadius:7, border:'none', cursor:'pointer',
+                      background:'rgba(248,113,113,0.07)', color:'#f87171', fontSize:12,
+                      fontFamily:'inherit', fontWeight:600, opacity: deleting === b.filename ? 0.5 : 1 }}>
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {!loading && backups.length === 0 && (
+          <div style={{ fontSize:12, color:'var(--text-4)', textAlign:'center', marginTop:10 }}>
+            Auto-backups are saved here before every sync or restore.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3214,6 +3371,10 @@ function App() {
   const [showAnilistConnect, setShowAnilistConnect] = useState(false);
   const [showAnilistProfile, setShowAnilistProfile] = useState(false);
   const [syncState, setSyncState] = useState(null); // null | 'syncing' | { added, updated }
+  const [showBackupPanel, setShowBackupPanel] = useState(false);
+  const lastBackupDate = localStorage.getItem('lastBackupDate');
+  const backupDaysSince = lastBackupDate ? Math.floor((Date.now() - new Date(lastBackupDate).getTime()) / 86400000) : null;
+  const backupOverdue = backupDaysSince === null || backupDaysSince > 30;
 
   const reloadLibrary = useCallback(() => {
     fetch('/rankings')
@@ -3436,6 +3597,22 @@ const animeFor  = (id) => library.find(a => a.id===id);
               {ratedCount}<span style={{ color:'var(--text-4)', fontSize:13 }}> rated</span>
             </div>
           </div>
+          <div onClick={() => setShowBackupPanel(true)}
+            style={{ padding:'10px 13px', borderRadius:11, background:'var(--surface)',
+              boxShadow: backupOverdue
+                ? '0 0 0 1px rgba(251,191,36,0.35) inset'
+                : '0 0 0 1px var(--line) inset',
+              cursor:'pointer', transition:'box-shadow .14s ease' }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow = backupOverdue ? '0 0 0 1px rgba(251,191,36,0.6) inset' : '0 0 0 1px var(--line-2) inset'}
+            onMouseLeave={e => e.currentTarget.style.boxShadow = backupOverdue ? '0 0 0 1px rgba(251,191,36,0.35) inset' : '0 0 0 1px var(--line) inset'}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ fontSize:11, color: backupOverdue ? '#fbbf24' : 'var(--text-3)', fontWeight:600 }}>Backup</div>
+              {backupOverdue && <span style={{ fontSize:13 }}>⚠</span>}
+            </div>
+            <div style={{ fontSize:12, color:'var(--text-3)', marginTop:3 }}>
+              {backupDaysSince === null ? 'Never downloaded' : backupDaysSince === 0 ? 'Downloaded today' : `${backupDaysSince}d ago`}
+            </div>
+          </div>
           {ratedCount > 0 && (
             <button onClick={() => setShowDeleteLib(true)}
               style={{ width:'100%', padding:'8px 12px', borderRadius:9, border:'none', cursor:'pointer',
@@ -3463,6 +3640,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
       {showDeleteLib && (
         <DeleteLibraryModal count={ratedCount} onClose={() => setShowDeleteLib(false)} onConfirm={deleteLibrary} />
       )}
+      {showBackupPanel && <BackupPanel onClose={() => setShowBackupPanel(false)} />}
       {showAnilistConnect && (
         <AniListConnectModal
           onClose={() => setShowAnilistConnect(false)}
