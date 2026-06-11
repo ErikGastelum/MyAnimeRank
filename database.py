@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 if getattr(sys, "frozen", False):
@@ -49,11 +50,19 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
-def get_conn() -> sqlite3.Connection:
+@contextmanager
+def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:

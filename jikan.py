@@ -56,6 +56,8 @@ def _fetch_seasonal() -> list[dict]:
         results: list[dict] = []
         for item in resp.json().get("data", []):
             norm = _normalise(item)
+            if not norm["api_id"]:
+                continue
             title_key = norm["title"].lower().strip()
             if norm["api_id"] not in seen_ids and title_key not in seen_titles:
                 seen_ids.add(norm["api_id"])
@@ -71,7 +73,7 @@ def _fetch(q: str) -> list[dict]:
         with httpx.Client(timeout=8.0) as client:
             resp = client.get(_JIKAN_URL, params={"q": q, "limit": 20, "sfw": "true"})
             resp.raise_for_status()
-        return [_normalise(item) for item in resp.json().get("data", [])]
+        return [n for n in (_normalise(item) for item in resp.json().get("data", [])) if n["api_id"]]
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError):
         return []
 
@@ -82,7 +84,7 @@ def _normalise(item: dict) -> dict:
     season = f"{season_raw.title()} {season_year}" if season_raw and season_year else None
 
     return {
-        "api_id":    str(item["mal_id"]),
+        "api_id":    str(item["mal_id"]) if item.get("mal_id") else None,
         "title":     item.get("title_english") or item.get("title") or "",
         "title_ro":  item.get("title") or "",
         "cover_url": (item.get("images") or {}).get("jpg", {}).get("large_image_url"),

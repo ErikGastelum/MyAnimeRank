@@ -12,13 +12,14 @@ from datetime import date, datetime
 from pathlib import Path
 
 import httpx
-
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel as _BaseModel
 
 _log = logging.getLogger("myanimrank")
+
 
 def _strip_html(s: str | None) -> str | None:
     if not s:
@@ -26,7 +27,6 @@ def _strip_html(s: str | None) -> str | None:
     s = re.sub(r'<[^>]+>', ' ', s)
     s = re.sub(r'\s{2,}', ' ', s)
     return s.strip() or None
-from pydantic import BaseModel as _BaseModel
 
 from database import get_conn, init_db, DB_PATH
 
@@ -39,6 +39,8 @@ _BASE = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).
 HTML_FILE = _BASE / "MyAnimeRank.html"
 
 _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
+_SORT_COLS = {c: f"r.{c}" for c in _VALID_CRITERIA}
+_SORT_COLS["overall"] = "r.overall"
 
 ANILIST_CLIENT_ID = 43290
 try:
@@ -464,7 +466,6 @@ def anilist_disconnect():
 
 @app.get("/anilist/profile")
 def anilist_profile_stats():
-    import time as _time
     token = _get_setting("anilist_token")
     if not token:
         raise HTTPException(status_code=404, detail="Not connected")
@@ -477,7 +478,7 @@ def anilist_profile_stats():
     fetched_at   = float(_get_setting("anilist_stats_fetched_at") or 0)
 
     # Re-fetch from AniList at most once every 5 minutes
-    if _time.time() - fetched_at > 300:
+    if time.time() - fetched_at > 300:
         try:
             vr = httpx.post(
                 "https://graphql.anilist.co",
@@ -499,7 +500,7 @@ def anilist_profile_stats():
             _set_setting("anilist_total_anime",      str(total_anime))
             _set_setting("anilist_days_watched",     str(days_watched))
             _set_setting("anilist_mean_score",       str(mean_score))
-            _set_setting("anilist_stats_fetched_at", str(_time.time()))
+            _set_setting("anilist_stats_fetched_at", str(time.time()))
         except Exception:
             _log.exception("Failed to fetch AniList profile stats")
 
@@ -873,9 +874,7 @@ def rankings(
     status: str = Query(None),
     sort:   str = Query("overall"),
 ):
-    if sort not in _VALID_CRITERIA | {"overall"}:
-        sort = "overall"
-    col = f"r.{sort}" if sort != "overall" else "r.overall"
+    col = _SORT_COLS.get(sort, "r.overall")
 
     with get_conn() as conn:
         rows = conn.execute(
@@ -1077,10 +1076,11 @@ def anchors(
 
         target_genres: list[str] = json.loads(target["genres"] or "[]")
 
+        crit_col = _SORT_COLS.get(criterion, "r.story")
         rows = conn.execute(
-            f"SELECT a.id, a.title, a.title_ro, a.cover_url, a.genres, a.year, r.{criterion} AS score "
+            f"SELECT a.id, a.title, a.title_ro, a.cover_url, a.genres, a.year, {crit_col} AS score "
             "FROM anime a JOIN rating r ON a.id = r.anime_id "
-            f"WHERE a.id != ? ORDER BY r.{criterion} DESC",
+            f"WHERE a.id != ? ORDER BY {crit_col} DESC",
             (anime_id,),
         ).fetchall()
 
@@ -1133,10 +1133,15 @@ def backup():
     return {"version": 1, "entries": entries}
 
 
+class _RestoreBody(_BaseModel):
+    version: int = 1
+    entries: list[dict] = []
+
+
 @app.post("/restore")
-def restore(body: dict):
+def restore(body: _RestoreBody):
     _auto_backup()
-    entries = body.get("entries", [])
+    entries = body.entries
     updated_at = str(date.today())
     with get_conn() as conn:
         for e in entries:
