@@ -25,3 +25,4 @@ PRD.md
 .env
 _secrets.py
 .devcontainer/
+backups/

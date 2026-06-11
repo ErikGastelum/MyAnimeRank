@@ -51,14 +51,24 @@ class WindowApi:
 
     def save_file(self, filename: str, content: str) -> dict:
         import pathlib, base64
-        downloads = pathlib.Path.home() / "Downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        dest = downloads / filename
-        # content is base64-encoded so binary files (xml, json) both work
         try:
             data = base64.b64decode(content)
         except Exception:
             data = content.encode("utf-8")
+        if self._win:
+            result = self._win.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=filename,
+            )
+            if result:
+                path = result[0] if isinstance(result, (list, tuple)) else result
+                pathlib.Path(path).write_bytes(data)
+                return {"path": str(path)}
+            return {"path": None}
+        # fallback when window ref unavailable
+        downloads = pathlib.Path.home() / "Downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        dest = downloads / filename
         dest.write_bytes(data)
         return {"path": str(dest)}
 
