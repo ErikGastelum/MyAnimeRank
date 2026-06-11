@@ -535,22 +535,13 @@ function DiscoverPanelCard({ item, inLibrary, onImport }) {
   );
 }
 
-function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime, discoverOpen }) {
+function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime, headerSlot }) {
   const [q, setQ]             = useState('');
   const [genre, setGenre]     = useState('All');
   const [fmtFilter, setFmt]   = useState('All');
   const [season, setSeason]   = useState('All');
   const [sortKey, setSortKey]           = useState('overall');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [seasonal, setSeasonal]         = useState(null);
-
-  useEffect(() => {
-    if (seasonal !== null) return;
-    const rated = library.filter(a => a.rating);
-    if (rated.length < 5) return;
-    fetch('/seasonal').then(r => r.ok ? r.json() : { results:[] })
-      .then(d => setSeasonal(d.results || []));
-  }, [library.filter(a=>a.rating).length]);
 
   const rated  = library.filter(a => a.rating);
   const genres = useMemo(() => {
@@ -596,33 +587,10 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
 
   const exportMAL = () => { window.location.href = '/export/mal-xml'; };
 
-  const discoverRecs = useMemo(() => {
-    if (!seasonal || seasonal.length === 0) return { recs: [], topGenres: [] };
-    const libraryTitles = new Set(library.map(a => a.title.toLowerCase()));
-    const genreScore = {}, genreCount = {};
-    rated.forEach(a => {
-      a.genres.forEach(g => {
-        genreScore[g] = (genreScore[g] || 0) + overall(a.rating);
-        genreCount[g] = (genreCount[g] || 0) + 1;
-      });
-    });
-    const topGenres = Object.entries(genreScore)
-      .map(([g, s]) => ({ g, avg: s / genreCount[g] }))
-      .sort((a, b) => b.avg - a.avg)
-      .slice(0, 3)
-      .map(x => x.g);
-    const recs = seasonal.filter(item =>
-      !libraryTitles.has((item.title || '').toLowerCase()) &&
-      (item.genres || []).some(g => topGenres.includes(g))
-    ).slice(0, 10);
-    return { recs, topGenres };
-  }, [seasonal, library, rated]);
-
-  const showPanel = seasonal !== null && discoverRecs.recs.length > 0 && discoverOpen;
-
   return (
     <div style={{ display:'flex', alignItems:'flex-start', position:'relative', zIndex:1, minHeight:'100%' }}>
       <div style={{ flex:1, minWidth:0, padding:'30px 38px 60px' }}>
+        {headerSlot}
         <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:20, marginBottom:22 }}>
           <div>
             <h1 style={{ margin:0, fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Your Rankings</h1>
@@ -788,32 +756,7 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
         )}
       </div>
 
-      {showPanel && (
-        <div style={{ width:292, flexShrink:0, borderLeft:'1px solid var(--line)',
-          position:'sticky', top:0, height:'100vh', overflowY:'auto',
-          padding:'28px 18px 40px',
-          background:'linear-gradient(180deg, rgba(255,255,255,0.012), transparent 40%)' }}>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
-            <h2 style={{ margin:0, fontSize:16, fontWeight:800, letterSpacing:'-0.01em',
-              display:'flex', alignItems:'center', gap:7 }}>
-              <Ico name="discover" size={15} color="var(--accent-2)" /> Discover
-            </h2>
-            <button className="btn-quiet" onClick={()=>navigate({name:'seasonal'})}
-              style={{ fontSize:12, color:'var(--text-3)', padding:'4px 8px' }}>
-              All <Ico name="chevron" size={12} style={{transform:'rotate(-90deg)'}} />
-            </button>
-          </div>
-          <p style={{ margin:'0 0 16px', color:'var(--text-3)', fontSize:12, lineHeight:1.5 }}>
-            This season · {discoverRecs.topGenres.join(', ')}
-          </p>
-          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-            {discoverRecs.recs.map(item => (
-              <DiscoverPanelCard key={item.api_id || item.title} item={item} onImport={importAnime}
-                inLibrary={new Set(library.map(a=>a.title.toLowerCase())).has((item.title||'').toLowerCase())} />
-            ))}
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }
@@ -1039,6 +982,96 @@ function Insights({ library }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── AniList profile panel ────────────────────────────────────────────── */
+function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfileUpdate }) {
+  const [disconnecting, setDisconnecting] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch('/anilist/profile')
+      .then(r => r.ok ? r.json() : null)
+      .then(p => { if (p && onProfileUpdate) onProfileUpdate(p); })
+      .catch(() => {});
+  }, []);
+
+  const doDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      const r = await fetch('/anilist/token', { method: 'DELETE' });
+      if (!r.ok) throw new Error(r.status);
+      onDisconnect();
+    } catch { setDisconnecting(false); }
+  };
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
+      style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.75)', backdropFilter:'blur(4px)',
+        display:'grid', placeItems:'center', zIndex:200 }}>
+      <div onClick={e => e.stopPropagation()} className="fade-up"
+        style={{ width:645, maxWidth:'calc(100vw - 36px)', borderRadius:18,
+          boxShadow:'0 0 0 1px var(--line-2) inset, 0 24px 80px rgba(0,0,0,0.6)' }}>
+        <div style={{ position:'relative', height:165, borderRadius:'18px 18px 0 0', overflow:'hidden',
+          background: profile?.banner
+            ? `url(${profile.banner}) center/cover no-repeat`
+            : 'linear-gradient(135deg, var(--accent-deep) 0%, #0c0d10 100%)' }}>
+          <div style={{ position:'absolute', inset:0,
+            background:'linear-gradient(to bottom, transparent 40%, var(--surface-2))' }} />
+          <button onClick={onClose}
+            style={{ position:'absolute', top:10, right:10, width:33, height:33, borderRadius:9,
+              background:'rgba(0,0,0,0.45)', border:'none', cursor:'pointer',
+              color:'rgba(255,255,255,0.75)', display:'flex', alignItems:'center',
+              justifyContent:'center', backdropFilter:'blur(4px)' }}>
+            <Ico name="close" size={16} />
+          </button>
+        </div>
+        <div style={{ padding:'0 33px 33px', marginTop:-52, background:'var(--surface-2)', borderRadius:'0 0 18px 18px', position:'relative' }}>
+          <div style={{ display:'flex', alignItems:'flex-end', gap:18, marginBottom:27 }}>
+            {profile?.avatar ? (
+              <img src={profile.avatar} alt=""
+                style={{ width:105, height:105, borderRadius:16, objectFit:'cover',
+                  border:'4px solid var(--surface-2)', flexShrink:0 }} />
+            ) : (
+              <div style={{ width:105, height:105, borderRadius:16, background:'var(--raised)',
+                border:'4px solid var(--surface-2)', flexShrink:0,
+                display:'flex', alignItems:'center', justifyContent:'center' }}>
+                <Ico name="star" size={39} color="var(--text-4)" />
+              </div>
+            )}
+            <div style={{ paddingBottom:6 }}>
+              <div style={{ fontWeight:800, fontSize:27, letterSpacing:'-0.02em' }}>{username}</div>
+              <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:4 }}>
+                <span style={{ width:9, height:9, borderRadius:'50%', background:'#4ade80', flexShrink:0 }} />
+                <span style={{ fontSize:13, color:'var(--text-3)' }}>Connected to AniList</span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:10, marginBottom:27 }}>
+            {[
+              { value: profile?.totalAnime ?? '—', label: 'Total Anime' },
+              { value: profile?.daysWatched != null ? Number(profile.daysWatched).toFixed(1) : '—', label: 'Days Watched' },
+              { value: profile?.meanScore != null ? Number(profile.meanScore).toFixed(1) : '—', label: 'Mean Score' },
+            ].map(({ value, label }) => (
+              <div key={label} style={{ padding:'22px 15px', borderRadius:15, background:'var(--surface)',
+                boxShadow:'0 0 0 1px var(--line) inset', textAlign:'center' }}>
+                <div style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:36, color:'var(--text)',
+                  letterSpacing:'-0.02em', lineHeight:1 }}>{value}</div>
+                <div style={{ fontSize:12, color:'var(--text-3)', fontWeight:700, marginTop:7,
+                  textTransform:'uppercase', letterSpacing:'0.05em' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ height:1, background:'var(--line)', marginBottom:18 }} />
+          <button onClick={doDisconnect} disabled={disconnecting}
+            style={{ width:'100%', padding:'12px 0', borderRadius:12, border:'none', cursor:'pointer',
+              background:'rgba(248,113,113,0.08)', color:'#f87171', fontWeight:600, fontSize:13,
+              fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(248,113,113,0.2) inset',
+              opacity: disconnecting ? 0.6 : 1, transition:'opacity .14s' }}>
+            {disconnecting ? 'Signing out…' : 'Sign out'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1739,7 +1772,7 @@ function Seasonal({ navigate, importAnime, library, englishTitles }) {
         </p>
       </div>
       {loading && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:16 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:16 }}>
           {Array.from({length:12}).map((_,i) => (
             <div key={i} style={{ borderRadius:12, background:'var(--surface)',
               boxShadow:'0 0 0 1px var(--line) inset', overflow:'hidden' }}>
@@ -1760,7 +1793,7 @@ function Seasonal({ navigate, importAnime, library, englishTitles }) {
         <div style={{ textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No seasonal data available.</div>
       )}
       {!loading && !err && results.length > 0 && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:16 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:16 }}>
           {results.map(item => (
             <ResultCard key={item.api_id || item.title} item={item}
               inLibrary={have.has(item.title.toLowerCase())}
@@ -1940,9 +1973,9 @@ function Search({ library, navigate, importAnime, setLibrary, englishTitles }) {
 
   return (
     <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1, maxWidth:940 }}>
-      <button className="btn-quiet" onClick={()=>navigate({name:'rankings'})}
+      <button className="btn-quiet" onClick={()=>navigate({name:'lists'})}
         style={{ display:'inline-flex', alignItems:'center', gap:6, marginBottom:16 }}>
-        <Ico name="back" size={16} /> Rankings
+        <Ico name="back" size={16} /> Lists
       </button>
       <h1 style={{ margin:'0 0 6px', fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Add an anime</h1>
       <p style={{ margin:'0 0 22px', color:'var(--text-3)', fontSize:13.5 }}>
@@ -2344,9 +2377,10 @@ function CompareModal({ anime, library, onClose, englishTitles }) {
 /* ─── Edit metadata modal ──────────────────────────────────────────────── */
 function EditModal({ anime, onClose, onSave }) {
   const [form, setForm] = useState({
-    status:        anime.status        || 'completed',
-    rewatch_count: anime.rewatch_count != null ? String(anime.rewatch_count) : '0',
-    notes:         anime.notes         || '',
+    status:           anime.status           || 'completed',
+    rewatch_count:    anime.rewatch_count    != null ? String(anime.rewatch_count)    : '0',
+    episodes_watched: anime.episodes_watched != null ? String(anime.episodes_watched) : '0',
+    notes:            anime.notes            || '',
   });
   const [saving, setSaving] = useState(false);
 
@@ -2354,10 +2388,12 @@ function EditModal({ anime, onClose, onSave }) {
 
   const save = async () => {
     setSaving(true);
+    const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
     const payload = {
-      status:        form.status || 'completed',
-      rewatch_count: parseInt(form.rewatch_count) || 0,
-      notes:         form.notes || undefined,
+      status:           form.status || 'completed',
+      rewatch_count:    parseInt(form.rewatch_count)    || 0,
+      episodes_watched: cap != null ? Math.min(parseInt(form.episodes_watched) || 0, cap) : (parseInt(form.episodes_watched) || 0),
+      notes:            form.notes || undefined,
     };
     await fetch(`/anime/${anime.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -2391,8 +2427,16 @@ function EditModal({ anime, onClose, onSave }) {
 
         <div style={{ marginBottom:14 }}>
           {fieldLabel('Status')}
-          <select value={form.status} onChange={e => set('status', e.target.value)}
-            style={{ ...inputStyle, cursor:'pointer' }}>
+          <select value={form.status} onChange={e => {
+            const next = e.target.value;
+            setForm(f => {
+              const update = { ...f, status: next };
+              if (next === 'completed' && f.status === 'rewatching') {
+                update.rewatch_count = String((parseInt(f.rewatch_count) || 0) + 1);
+              }
+              return update;
+            });
+          }} style={{ ...inputStyle, cursor:'pointer' }}>
             {[['watching','Watching'],['rewatching','Rewatching'],['completed','Completed'],['paused','Paused'],['dropped','Dropped'],['planning','Planning']].map(([v,l]) => (
               <option key={v} value={v}>{l}</option>
             ))}
@@ -2405,6 +2449,24 @@ function EditModal({ anime, onClose, onSave }) {
             onChange={e => set('rewatch_count', e.target.value)}
             style={inputStyle} />
         </div>
+
+        {['watching','rewatching'].includes(form.status) && (
+          <div style={{ marginBottom:14 }}>
+            {fieldLabel('Episodes watched')}
+            <input type="number" min="0"
+              max={anime.episodes_aired != null ? anime.episodes_aired : (anime.episodes || undefined)}
+              value={form.episodes_watched}
+              onChange={e => set('episodes_watched', e.target.value)}
+              style={inputStyle} />
+            {anime.episodes && (
+              <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:4 }}>
+                {anime.episodes_aired != null && anime.episodes_aired < anime.episodes
+                  ? `${anime.episodes_aired} aired of ${anime.episodes} total`
+                  : `Total: ${anime.episodes} episodes`}
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ marginBottom:22 }}>
           {fieldLabel('Notes')}
@@ -2490,9 +2552,9 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
   return (
     <div style={{ position:'relative', zIndex:1 }}>
       <div style={{ position:'relative', padding:'24px 38px 0' }}>
-        <button className="btn-quiet" onClick={()=>navigate({name:'rankings'})}
+        <button className="btn-quiet" onClick={()=>navigate({name:'lists'})}
           style={{ display:'inline-flex', alignItems:'center', gap:6, marginBottom:18 }}>
-          <Ico name="back" size={16} /> Rankings
+          <Ico name="back" size={16} /> Lists
         </button>
         <div style={{ display:'flex', gap:30 }}>
           <div style={{ position:'relative' }}>
@@ -2697,6 +2759,20 @@ function useTweaks(defaults) {
 
 const displayTitle = (anime, englishTitles) =>
   englishTitles ? anime.title : (anime.title_ro || anime.title);
+
+const fmtAirTime = (ts) => {
+  if (!ts) return null;
+  const left = ts * 1000 - Date.now();
+  if (left <= 0) return null;
+  const mins = Math.floor(left / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.floor(left / 3600000);
+  if (hrs < 24) return `in ${hrs}h`;
+  const days = Math.floor(left / 86400000);
+  if (days === 1) return 'tomorrow';
+  if (days < 7) return `in ${days}d`;
+  return new Date(ts * 1000).toLocaleDateString('en-US', { month:'short', day:'numeric' });
+};
 
 const TWEAK_CSS = `
 .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:260px;
@@ -2906,7 +2982,7 @@ const normaliseStatus = (s) => {
   return s || 'completed';
 };
 
-function ListSection({ status, label, color, items, navigate, englishTitles }) {
+function ListSection({ status, label, color, items, navigate, englishTitles, onEpisodeUpdate, epErrors }) {
   const [open, setOpen] = useState(true);
   if (items.length === 0) return null;
   return (
@@ -2929,6 +3005,9 @@ function ListSection({ status, label, color, items, navigate, englishTitles }) {
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
           {items.map(anime => {
             const ov = overall(anime.rating);
+            const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
+            const isBehind = anime.is_airing && cap && (anime.episodes_watched || 0) < cap;
+            const indicatorColor = isBehind ? '#f0b429' : (anime.is_airing ? '#4ade80' : null);
             return (
               <div key={anime.id} onClick={()=>navigate({name:'detail',animeId:anime.id})}
                 style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px',
@@ -2936,17 +3015,70 @@ function ListSection({ status, label, color, items, navigate, englishTitles }) {
                   cursor:'pointer', transition:'background .12s ease' }}
                 onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
                 onMouseLeave={e=>e.currentTarget.style.background='var(--surface)'}>
-                <Poster anime={anime} w={44} radius={7} />
+                <div style={{ position:'relative', flexShrink:0 }}>
+                  <Poster anime={anime} w={44} radius={7} />
+                  {indicatorColor && (
+                    <span style={{ position:'absolute', bottom:3, right:3,
+                      width:9, height:9, borderRadius:'50%', background:indicatorColor,
+                      boxShadow:`0 0 6px ${indicatorColor}, 0 0 0 2px var(--surface)` }} />
+                  )}
+                </div>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:700, fontSize:14, letterSpacing:'-0.01em',
                     whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                     {displayTitle(anime, englishTitles)}
                   </div>
-                  <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:2 }}>
-                    {anime.year}{anime.format ? ` · ${anime.format}` : ''}
-                    {anime.genres.length > 0 ? ` · ${anime.genres.slice(0,2).join(', ')}` : ''}
+                  <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:2, display:'flex', alignItems:'center', gap:5, flexWrap:'wrap' }}>
+                    <span>{anime.year}{anime.format ? ` · ${anime.format}` : ''}{anime.genres.length > 0 ? ` · ${anime.genres.slice(0,2).join(', ')}` : ''}</span>
+                    {['watching','rewatching'].includes(status) && (anime.episodes || (anime.episodes_watched || 0) > 0) && (
+                      <span style={{ fontFamily:'var(--mono)', color:'var(--text-2)', flexShrink:0 }}>
+                        · Ep {anime.episodes_watched || 0}{anime.episodes ? ` / ${anime.episodes}` : ''}
+                      </span>
+                    )}
+                    {!['watching','rewatching'].includes(status) && anime.episodes && (
+                      <span style={{ fontFamily:'var(--mono)', color:'var(--text-3)', flexShrink:0 }}>
+                        · {anime.episodes} eps
+                      </span>
+                    )}
+                    {(anime.rewatch_count || 0) > 0 && (
+                      <span style={{ fontFamily:'var(--mono)', color:'#a78bfa', flexShrink:0, fontSize:10.5, fontWeight:700 }}>
+                        ×{anime.rewatch_count}
+                      </span>
+                    )}
+                    {anime.is_airing && ['watching','rewatching'].includes(status) && (() => {
+                      const label = fmtAirTime(anime.next_episode_at);
+                      if (!label) return null;
+                      const ep = anime.episodes_aired != null ? anime.episodes_aired + 1 : null;
+                      return (
+                        <span style={{ fontSize:10.5, fontWeight:700, flexShrink:0,
+                          color:'#4ade80', background:'rgba(74,222,128,0.1)',
+                          padding:'1px 6px', borderRadius:5,
+                          boxShadow:'0 0 0 1px rgba(74,222,128,0.25) inset' }}>
+                          {ep ? `Ep ${ep} · ` : ''}{label}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
+                {['watching','rewatching'].includes(status) && onEpisodeUpdate && (() => {
+                  const hasErr = epErrors && epErrors.has(anime.id);
+                  return (
+                    <button onClick={e => {
+                      e.stopPropagation();
+                      const next = (anime.episodes_watched || 0) + 1;
+                      const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
+                      if (!cap || next <= cap) onEpisodeUpdate(anime, next);
+                    }}
+                    style={{ fontSize:11, fontWeight:700, flexShrink:0,
+                      padding:'3px 8px', borderRadius:6, cursor:'pointer',
+                      border:'none', fontFamily:'inherit', transition:'all .15s',
+                      color:      hasErr ? '#f87171' : 'var(--accent-2)',
+                      background: hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(52,168,240,0.1)',
+                      boxShadow:  hasErr ? '0 0 0 1px rgba(248,113,113,0.3) inset' : '0 0 0 1px rgba(52,168,240,0.2) inset' }}>
+                      {hasErr ? 'failed' : '+1 ep'}
+                    </button>
+                  );
+                })()}
                 {anime.rating && <ScoreBadge value={ov} size="sm" />}
               </div>
             );
@@ -2957,7 +3089,9 @@ function ListSection({ status, label, color, items, navigate, englishTitles }) {
   );
 }
 
-function Lists({ library, navigate, englishTitles }) {
+function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRankView, importAnime, initialMode }) {
+  const [listMode, setListMode] = useState(initialMode || 'status');
+
   const grouped = useMemo(() => {
     const map = {};
     LIST_STATUSES.forEach(s => { map[s.key] = []; });
@@ -2971,12 +3105,63 @@ function Lists({ library, navigate, englishTitles }) {
 
   const total = library.length;
 
+  const [epErrors, setEpErrors] = useState(new Set());
+
+  const handleEpisodeUpdate = useCallback(async (anime, newCount) => {
+    try {
+      const patch = { episodes_watched: newCount };
+      const totalEps = anime.episodes;
+      if (totalEps && newCount >= totalEps) {
+        patch.status = 'completed';
+        if (anime.status === 'rewatching') {
+          patch.rewatch_count = (anime.rewatch_count || 0) + 1;
+        }
+      }
+      const res = await fetch(`/anime/${anime.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(res.status);
+      if (updateAnime) updateAnime(anime.id, patch);
+      setEpErrors(s => { const n = new Set(s); n.delete(anime.id); return n; });
+    } catch {
+      setEpErrors(s => new Set(s).add(anime.id));
+      setTimeout(() => setEpErrors(s => { const n = new Set(s); n.delete(anime.id); return n; }), 2500);
+    }
+  }, [updateAnime]);
+
+  const modeToggle = (
+    <div style={{ display:'flex', gap:4, padding:'3px', borderRadius:10,
+      background:'var(--raised)', marginBottom:24, alignSelf:'flex-start' }}>
+      {[['status','By Status'],['rankings','Rankings']].map(([key, lbl]) => (
+        <button key={key} onClick={() => setListMode(key)}
+          style={{ padding:'5px 16px', borderRadius:8, fontSize:13, fontWeight:600,
+            border:'none', cursor:'pointer', fontFamily:'inherit', transition:'all .15s',
+            background: listMode === key ? 'var(--surface)' : 'transparent',
+            color: listMode === key ? 'var(--text)' : 'var(--text-3)',
+            boxShadow: listMode === key ? '0 1px 4px rgba(0,0,0,.18)' : 'none' }}>
+          {lbl}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (listMode === 'rankings') {
+    return (
+      <Rankings library={library} navigate={navigate} englishTitles={englishTitles}
+        rankView={rankView} setRankView={setRankView} importAnime={importAnime}
+        headerSlot={modeToggle} />
+    );
+  }
+
   return (
     <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
       <h1 style={{ margin:'0 0 6px', fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Lists</h1>
-      <p style={{ margin:'0 0 28px', color:'var(--text-3)', fontSize:13.5 }}>
+      <p style={{ margin:'0 0 20px', color:'var(--text-3)', fontSize:13.5 }}>
         <span className="mono" style={{color:'var(--text-2)'}}>{total}</span> titles across all lists
       </p>
+      {modeToggle}
       {total === 0 && (
         <div style={{ color:'var(--text-3)', textAlign:'center', paddingTop:60 }}>
           No anime in your library yet.
@@ -2984,7 +3169,8 @@ function Lists({ library, navigate, englishTitles }) {
       )}
       {LIST_STATUSES.map(({ key, label, color }) => (
         <ListSection key={key} status={key} label={label} color={color}
-          items={grouped[key] || []} navigate={navigate} englishTitles={englishTitles} />
+          items={grouped[key] || []} navigate={navigate} englishTitles={englishTitles}
+          onEpisodeUpdate={handleEpisodeUpdate} epErrors={epErrors} />
       ))}
     </div>
   );
@@ -3021,11 +3207,13 @@ function App() {
   const [library, setLibrary]     = useState([]);
   const [loadErr, setLoadErr]     = useState(null);
   const [appLoading, setAppLoading] = useState(true);
-  const [view, setView]           = useState({ name:'rankings' });
+  const [view, setView]           = useState({ name:'lists' });
   const [t, setTweak]             = useTweaks({ accent:'Azure', ambient:true, englishTitles:true, rankView:'grid' });
   const [anilistStatus, setAnilistStatus] = useState(null);
+  const [anilistProfile, setAnilistProfile] = useState(null);
   const [showAnilistConnect, setShowAnilistConnect] = useState(false);
-  const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [showAnilistProfile, setShowAnilistProfile] = useState(false);
+  const [syncState, setSyncState] = useState(null); // null | 'syncing' | { added, updated }
 
   const reloadLibrary = useCallback(() => {
     fetch('/rankings')
@@ -3040,10 +3228,17 @@ function App() {
       .then(status => {
         setAnilistStatus(status);
         if (status.connected) {
+          fetch('/anilist/profile').then(r => r.ok ? r.json() : null).then(p => { if (p) setAnilistProfile(p); }).catch(() => {});
+          setSyncState('syncing');
           fetch('/anilist/pull', { method: 'POST' })
             .then(r => r.json())
-            .then(({ added, updated }) => { if (added + updated > 0) reloadLibrary(); })
-            .catch(() => {});
+            .then(({ added, updated }) => {
+              setSyncState({ added, updated });
+              setTimeout(() => setSyncState(null), 4000);
+              if (added + updated > 0) reloadLibrary();
+              fetch('/anilist/token').then(r => r.json()).then(setAnilistStatus).catch(() => {});
+            })
+            .catch(() => setSyncState(null));
         }
       })
       .catch(() => {});
@@ -3095,7 +3290,7 @@ function App() {
   const deleteAnime = async (id) => {
     await fetch(`/anime/${id}`, { method: 'DELETE' });
     setLibrary(lib => lib.filter(a => a.id !== id));
-    navigate({ name:'rankings' });
+    navigate({ name:'lists' });
   };
 
   const updateAnime = async (id, fields) => {
@@ -3108,42 +3303,12 @@ function App() {
 
   const [showDeleteLib, setShowDeleteLib] = useState(false);
 
-  const exportBackup = async () => {
-    const data = await fetch('/backup').then(r => r.json());
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `myanimrank-backup-${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const restoreInput = React.useRef(null);
-  const restoreBackup = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      const res = await fetch('/restore', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) throw new Error(res.status);
-      const d = await fetch('/rankings').then(r => r.json());
-      setLibrary((d.results || []).map(normaliseRanked));
-    } catch (err) {
-      alert(`Restore failed: ${err.message}`);
-    }
-    e.target.value = '';
-  };
-
   const deleteLibrary = async () => {
     const res = await fetch('/library', { method: 'DELETE' });
     if (!res.ok) { alert(`Delete failed (${res.status})`); return; }
     setLibrary([]);
     setShowDeleteLib(false);
-    navigate({ name: 'rankings' });
+    navigate({ name: 'lists' });
   };
 
   const setAnchorScore = (id, key, v) => {
@@ -3165,7 +3330,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
   const et = t.englishTitles;
   let screen;
   if (view.name==='rankings') {
-    screen = <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} discoverOpen={discoverOpen} />;
+    screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' />;
   } else if (view.name==='search') {
     screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} englishTitles={et} />;
   } else if (view.name==='rate') {
@@ -3176,13 +3341,13 @@ const animeFor  = (id) => library.find(a => a.id===id);
     const anime = animeFor(view.animeId);
     screen = anime
       ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} updateAnime={updateAnime} englishTitles={et} />
-      : <Rankings library={library} navigate={navigate} englishTitles={et} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} discoverOpen={discoverOpen} />;
+      : <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' />;
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;
   } else if (view.name==='seasonal') {
     screen = <Seasonal navigate={navigate} importAnime={importAnime} library={library} englishTitles={et} />;
   } else if (view.name==='lists') {
-    screen = <Lists library={library} navigate={navigate} englishTitles={et} />;
+    screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} />;
   }
 
   const ratedCount = library.filter(a=>a.rating).length;
@@ -3193,12 +3358,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
         <NavMark />
         <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
           <button
-            className={'nav-item' + (view.name==='rankings'||view.name==='detail' ? ' active' : '')}
-            onClick={()=>navigate({name:'rankings'})}>
-            <Ico name="rank" size={18} /> Rankings <span className="nav-dot" />
-          </button>
-          <button
-            className={'nav-item' + (view.name==='lists' ? ' active' : '')}
+            className={'nav-item' + (['lists','rankings','detail'].includes(view.name) ? ' active' : '')}
             onClick={()=>navigate({name:'lists'})}>
             <Ico name="viewList" size={18} /> Lists <span className="nav-dot" />
           </button>
@@ -3217,14 +3377,9 @@ const animeFor  = (id) => library.find(a => a.id===id);
             onClick={()=>navigate({name:'seasonal'})}>
             <Ico name="seasonal" size={18} /> This Season <span className="nav-dot" />
           </button>
-          <button
-            className={'nav-item' + (discoverOpen ? ' active' : '')}
-            onClick={()=>{ if(view.name!=='rankings') navigate({name:'rankings'}); setDiscoverOpen(v=>!v); }}>
-            <Ico name="discover" size={18} /> Discover <span className="nav-dot" />
-          </button>
         </div>
         <div style={{ marginTop:'auto', display:'flex', flexDirection:'column', gap:14 }}>
-          <div onClick={() => setShowAnilistConnect(true)}
+          <div onClick={() => anilistStatus?.connected ? setShowAnilistProfile(true) : setShowAnilistConnect(true)}
             style={{ padding:'10px 13px', borderRadius:11, background:'var(--surface)',
               boxShadow:'0 0 0 1px var(--line) inset', cursor:'pointer',
               transition:'box-shadow .14s ease' }}
@@ -3232,13 +3387,43 @@ const animeFor  = (id) => library.find(a => a.id===id);
             onMouseLeave={e => e.currentTarget.style.boxShadow='0 0 0 1px var(--line) inset'}>
             <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:600 }}>AniList</div>
             {anilistStatus?.connected ? (
-              <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:3 }}>
-                <span style={{ width:7, height:7, borderRadius:'50%', background:'#4ade80', flexShrink:0 }} />
-                <span style={{ fontWeight:700, fontSize:13, color:'var(--text-2)',
-                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                  {anilistStatus.username}
-                </span>
-              </div>
+              <>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:4 }}>
+                  {anilistProfile?.avatar ? (
+                    <img src={anilistProfile.avatar} alt=""
+                      style={{ width:26, height:26, borderRadius:7, objectFit:'cover', flexShrink:0,
+                        border:'2px solid rgba(52,168,240,0.35)' }} />
+                  ) : (
+                    <span style={{ width:7, height:7, borderRadius:'50%', background:'#4ade80', flexShrink:0 }} />
+                  )}
+                  <span style={{ fontWeight:700, fontSize:13, color:'var(--text-2)',
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                    {anilistStatus.username}
+                  </span>
+                </div>
+                {syncState === 'syncing' && (
+                  <div style={{ fontSize:11, color:'var(--text-3)', marginTop:5,
+                    display:'flex', alignItems:'center', gap:5 }}>
+                    <span style={{ width:6, height:6, borderRadius:'50%', background:'var(--accent)',
+                      animation:'mar-pulse 1s ease-in-out infinite', flexShrink:0 }} />
+                    Syncing with AniList…
+                  </div>
+                )}
+                {syncState && syncState !== 'syncing' && (
+                  <div style={{ fontSize:11, color:'var(--text-3)', marginTop:5 }}>
+                    {syncState.added + syncState.updated === 0
+                      ? 'AniList up to date'
+                      : `Synced · ${[syncState.added && `+${syncState.added} new`, syncState.updated && `${syncState.updated} updated`].filter(Boolean).join(', ')}`}
+                  </div>
+                )}
+                {!syncState && anilistStatus?.sync_error && (
+                  <div style={{ fontSize:11, color:'#f87171', marginTop:5,
+                    display:'flex', alignItems:'center', gap:5 }}>
+                    <span style={{ width:6, height:6, borderRadius:'50%', background:'#f87171', flexShrink:0 }} />
+                    {anilistStatus.sync_error === 'token_expired' ? 'Token expired — reconnect' : 'Last sync failed'}
+                  </div>
+                )}
+              </>
             ) : (
               <div style={{ fontSize:12, color:'var(--accent-2)', fontWeight:600, marginTop:3 }}>
                 Connect →
@@ -3251,28 +3436,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
               {ratedCount}<span style={{ color:'var(--text-4)', fontSize:13 }}> rated</span>
             </div>
           </div>
-          {ratedCount > 0 && (<>
-            <div style={{ display:'flex', gap:6 }}>
-              <button onClick={exportBackup} title="Export backup JSON"
-                style={{ flex:1, padding:'7px 10px', borderRadius:9, border:'none', cursor:'pointer',
-                  background:'var(--raised)', color:'var(--text-3)', fontWeight:600, fontSize:11.5,
-                  fontFamily:'inherit', boxShadow:'0 0 0 1px var(--line) inset',
-                  transition:'all .14s ease', display:'flex', alignItems:'center', justifyContent:'center', gap:5 }}
-                onMouseEnter={e => { e.currentTarget.style.color='var(--text)'; }}
-                onMouseLeave={e => { e.currentTarget.style.color='var(--text-3)'; }}>
-                <Ico name="upload" size={12} /> Export
-              </button>
-              <button onClick={() => restoreInput.current?.click()} title="Restore from backup JSON"
-                style={{ flex:1, padding:'7px 10px', borderRadius:9, border:'none', cursor:'pointer',
-                  background:'var(--raised)', color:'var(--text-3)', fontWeight:600, fontSize:11.5,
-                  fontFamily:'inherit', boxShadow:'0 0 0 1px var(--line) inset',
-                  transition:'all .14s ease', display:'flex', alignItems:'center', justifyContent:'center', gap:5 }}
-                onMouseEnter={e => { e.currentTarget.style.color='var(--text)'; }}
-                onMouseLeave={e => { e.currentTarget.style.color='var(--text-3)'; }}>
-                <Ico name="add" size={12} sw={2.4} /> Restore
-              </button>
-              <input ref={restoreInput} type="file" accept=".json" style={{ display:'none' }} onChange={restoreBackup} />
-            </div>
+          {ratedCount > 0 && (
             <button onClick={() => setShowDeleteLib(true)}
               style={{ width:'100%', padding:'8px 12px', borderRadius:9, border:'none', cursor:'pointer',
                 background:'rgba(248,113,113,0.07)', color:'var(--text-4)', fontWeight:600, fontSize:12,
@@ -3282,7 +3446,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
               onMouseLeave={e => { e.target.style.background='rgba(248,113,113,0.07)'; e.target.style.color='var(--text-4)'; }}>
               Delete library
             </button>
-          </>)}
+          )}
         </div>
       </nav>
       <main className="mar-content">
@@ -3294,7 +3458,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
             {loadErr}
           </div>
         )}
-        {appLoading && view.name==='rankings' ? <RankingsSkeleton /> : screen}
+        {appLoading && ['rankings','lists'].includes(view.name) ? <RankingsSkeleton /> : screen}
       </main>
       {showDeleteLib && (
         <DeleteLibraryModal count={ratedCount} onClose={() => setShowDeleteLib(false)} onConfirm={deleteLibrary} />
@@ -3307,11 +3471,31 @@ const animeFor  = (id) => library.find(a => a.id===id);
             setAnilistStatus(s);
             if (firstConnect) {
               setShowAnilistConnect(false);
+              fetch('/anilist/profile').then(r => r.ok ? r.json() : null).then(p => { if (p) setAnilistProfile(p); }).catch(() => {});
+              setSyncState('syncing');
               fetch('/anilist/pull', { method: 'POST' })
                 .then(r => r.json())
-                .then(({ added, updated }) => { if (added + updated > 0) reloadLibrary(); })
-                .catch(() => {});
+                .then(({ added, updated }) => {
+                  setSyncState({ added, updated });
+                  setTimeout(() => setSyncState(null), 4000);
+                  if (added + updated > 0) reloadLibrary();
+                  fetch('/anilist/token').then(r => r.json()).then(setAnilistStatus).catch(() => {});
+                })
+                .catch(() => setSyncState(null));
             }
+          }}
+        />
+      )}
+      {showAnilistProfile && (
+        <AniListProfilePanel
+          profile={anilistProfile}
+          username={anilistStatus?.username}
+          onClose={() => setShowAnilistProfile(false)}
+          onProfileUpdate={p => setAnilistProfile(p)}
+          onDisconnect={() => {
+            setAnilistStatus({ connected: false, username: null, adv_scoring: [] });
+            setAnilistProfile(null);
+            setShowAnilistProfile(false);
           }}
         />
       )}

@@ -1,3 +1,4 @@
+import difflib
 import io
 import os
 import json
@@ -109,7 +110,7 @@ _ANILIST_STATUS_REVERSE = {
 def _get_anilist_id(anime_id: int, token: str) -> int | None:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT anilist_id, api_id FROM anime WHERE id=?", (anime_id,)
+            "SELECT anilist_id, api_id, title FROM anime WHERE id=?", (anime_id,)
         ).fetchone()
         if not row:
             return None
@@ -119,34 +120,70 @@ def _get_anilist_id(anime_id: int, token: str) -> int | None:
             except (ValueError, TypeError):
                 pass
         mal_id = row["api_id"]
+        title  = row["title"]
 
-    if not mal_id:
-        return None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
-    try:
-        resp = httpx.post(
-            "https://graphql.anilist.co",
-            json={
-                "query": "query($idMal:Int){Media(idMal:$idMal,type:ANIME){id}}",
-                "variables": {"idMal": int(mal_id)},
-            },
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            timeout=8.0,
-        )
-        resp.raise_for_status()
-        al_id = resp.json().get("data", {}).get("Media", {}).get("id")
-        if al_id:
-            with get_conn() as conn:
-                conn.execute(
-                    "UPDATE anime SET anilist_id=? WHERE id=?", (str(al_id), anime_id)
+    if mal_id:
+        try:
+            resp = httpx.post(
+                "https://graphql.anilist.co",
+                json={
+                    "query": "query($idMal:Int){Media(idMal:$idMal,type:ANIME){id}}",
+                    "variables": {"idMal": int(mal_id)},
+                },
+                headers=headers,
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            al_id = resp.json().get("data", {}).get("Media", {}).get("id")
+            if al_id:
+                with get_conn() as conn:
+                    conn.execute(
+                        "UPDATE anime SET anilist_id=? WHERE id=?", (str(al_id), anime_id)
+                    )
+                return int(al_id)
+        except Exception:
+            pass
+
+    # Fallback: search by title (covers seed anime that have no MAL ID)
+    if title:
+        try:
+            resp = httpx.post(
+                "https://graphql.anilist.co",
+                json={
+                    "query": "query($search:String){Media(search:$search,type:ANIME){id idMal title{english romaji native}}}",
+                    "variables": {"search": title},
+                },
+                headers=headers,
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            media = resp.json().get("data", {}).get("Media") or {}
+            al_id = media.get("id")
+            if al_id:
+                al_titles = media.get("title") or {}
+                candidates = [v.lower() for v in al_titles.values() if v]
+                best = max(
+                    (difflib.SequenceMatcher(None, title.lower(), c).ratio() for c in candidates),
+                    default=0,
                 )
-            return int(al_id)
-    except Exception:
-        pass
+                if best < 0.6:
+                    _log.warning("_get_anilist_id: title mismatch for %r (best=%.2f), skipping", title, best)
+                    return None
+                with get_conn() as conn:
+                    conn.execute(
+                        "UPDATE anime SET anilist_id=?, api_id=COALESCE(api_id,?) WHERE id=?",
+                        (str(al_id), str(media["idMal"]) if media.get("idMal") else None, anime_id),
+                    )
+                return int(al_id)
+        except Exception:
+            pass
+
     return None
 
 
@@ -224,40 +261,41 @@ def _anilist_sync(anime_id: int) -> None:
 
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT a.status, r.story, r.characters, r.animation, r.audio, r.enjoyment, r.overall "
+            "SELECT a.status, a.episodes_watched, a.rewatch_count, r.story, r.characters, r.animation, r.audio, r.enjoyment, r.overall "
             "FROM anime a LEFT JOIN rating r ON a.id=r.anime_id WHERE a.id=?",
             (anime_id,),
         ).fetchone()
 
-    if not row or row["overall"] is None:
+    if not row:
         return
 
-    # Scale the overall score to match the user's AniList scoring format.
-    score_format = _get_setting("anilist_score_format") or "POINT_10_DECIMAL"
-    score_out = float(row["overall"]) * 10 if "100" in score_format else float(row["overall"])
-
     variables: dict = {
-        "mediaId": al_id,
-        "score":   score_out,
-        "status":  _STATUS_MAP.get(row["status"] or "completed", "COMPLETED"),
+        "mediaId":  al_id,
+        "status":   _STATUS_MAP.get(row["status"] or "completed", "COMPLETED"),
+        "progress": row["episodes_watched"] or 0,
     }
+    if row["rewatch_count"] is not None:
+        variables["repeat"] = int(row["rewatch_count"])
 
-    adv_enabled = _get_setting("anilist_adv_enabled") == "1"
-    if adv_enabled:
-        categories = json.loads(_get_setting("anilist_adv_scoring") or "[]")
-        if categories:
-            variables["advancedScores"] = [_match_adv_score(cat, row) for cat in categories]
-        else:
-            # No category names stored — fall back to positional order.
-            variables["advancedScores"] = [
-                float(row["story"]), float(row["characters"]),
-                float(row["animation"]), float(row["audio"]), float(row["enjoyment"]),
-            ]
+    if row["overall"] is not None:
+        score_format = _get_setting("anilist_score_format") or "POINT_10_DECIMAL"
+        variables["score"] = float(row["overall"]) * 10 if "100" in score_format else float(row["overall"])
+
+        adv_enabled = _get_setting("anilist_adv_enabled") == "1"
+        if adv_enabled:
+            categories = json.loads(_get_setting("anilist_adv_scoring") or "[]")
+            if categories:
+                variables["advancedScores"] = [_match_adv_score(cat, row) for cat in categories]
+            else:
+                variables["advancedScores"] = [
+                    float(row["story"]), float(row["characters"]),
+                    float(row["animation"]), float(row["audio"]), float(row["enjoyment"]),
+                ]
 
     mutation = (
-        "mutation($mediaId:Int,$score:Float,$status:MediaListStatus,$advancedScores:[Float]){"
-        "SaveMediaListEntry(mediaId:$mediaId,score:$score,status:$status,advancedScores:$advancedScores)"
-        "{id score advancedScores}}"
+        "mutation($mediaId:Int,$score:Float,$status:MediaListStatus,$advancedScores:[Float],$progress:Int,$repeat:Int){"
+        "SaveMediaListEntry(mediaId:$mediaId,score:$score,status:$status,advancedScores:$advancedScores,progress:$progress,repeat:$repeat)"
+        "{id score advancedScores progress repeat}}"
     )
     try:
         httpx.post(
@@ -270,7 +308,14 @@ def _anilist_sync(anime_id: int) -> None:
             },
             timeout=10.0,
         ).raise_for_status()
+        _set_setting("anilist_stats_fetched_at", "0")
+        _set_setting("anilist_sync_error", None)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        _set_setting("anilist_sync_error", "token_expired" if code == 401 else f"http_{code}")
+        _log.exception("AniList sync failed for anime_id=%s (HTTP %s)", anime_id, code)
     except Exception:
+        _set_setting("anilist_sync_error", "network_error")
         _log.exception("AniList sync failed for anime_id=%s", anime_id)
 
 
@@ -304,10 +349,12 @@ def _save_anilist_token(access_token: str) -> dict:
     adv_scoring: list = []
     viewer_id = None
     score_format = "POINT_10_DECIMAL"
+    avatar = ""
+    banner = ""
     try:
         vr = httpx.post(
             "https://graphql.anilist.co",
-            json={"query": "query{Viewer{id name mediaListOptions{scoreFormat animeList{advancedScoringEnabled advancedScoring}}}}"},
+            json={"query": "query{Viewer{id name avatar{large} bannerImage mediaListOptions{scoreFormat animeList{advancedScoringEnabled advancedScoring}}}}"},
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
@@ -324,6 +371,8 @@ def _save_anilist_token(access_token: str) -> dict:
         adv_scoring  = adv_opts.get("advancedScoring", [])
         viewer_id    = viewer.get("id")
         score_format = opts.get("scoreFormat", "POINT_10_DECIMAL")
+        avatar       = (viewer.get("avatar") or {}).get("large") or ""
+        banner       = viewer.get("bannerImage") or ""
     except Exception:
         _log.exception("Failed to fetch AniList Viewer profile — token will still be saved")
     _set_setting("anilist_token",        access_token)
@@ -332,6 +381,8 @@ def _save_anilist_token(access_token: str) -> dict:
     _set_setting("anilist_adv_enabled",  "1" if adv_enabled else "0")
     _set_setting("anilist_adv_scoring",  json.dumps(adv_scoring))
     _set_setting("anilist_score_format", score_format)
+    _set_setting("anilist_avatar",       avatar or None)
+    _set_setting("anilist_banner",       banner or None)
     return {"username": username, "adv_enabled": adv_enabled, "adv_scoring": adv_scoring}
 
 
@@ -395,14 +446,68 @@ def anilist_status():
     username = _get_setting("anilist_username")
     adv_cats     = json.loads(_get_setting("anilist_adv_scoring") or "[]")
     score_format = _get_setting("anilist_score_format") or "POINT_10_DECIMAL"
-    return {"connected": bool(token), "username": username or None, "adv_scoring": adv_cats, "score_format": score_format}
+    sync_error = _get_setting("anilist_sync_error")
+    return {"connected": bool(token), "username": username or None, "adv_scoring": adv_cats, "score_format": score_format, "sync_error": sync_error}
 
 
 @app.delete("/anilist/token", status_code=204)
 def anilist_disconnect():
     for key in ("anilist_token", "anilist_username", "anilist_user_id",
-                "anilist_adv_enabled", "anilist_adv_scoring", "anilist_redirect_uri"):
+                "anilist_adv_enabled", "anilist_adv_scoring", "anilist_redirect_uri",
+                "anilist_avatar", "anilist_banner",
+                "anilist_total_anime", "anilist_days_watched", "anilist_mean_score",
+                "anilist_stats_fetched_at", "anilist_sync_error"):
         _set_setting(key, None)
+
+
+@app.get("/anilist/profile")
+def anilist_profile_stats():
+    import time as _time
+    token = _get_setting("anilist_token")
+    if not token:
+        raise HTTPException(status_code=404, detail="Not connected")
+
+    avatar       = _get_setting("anilist_avatar") or ""
+    banner       = _get_setting("anilist_banner") or ""
+    total_anime  = int(_get_setting("anilist_total_anime") or 0)
+    days_watched = float(_get_setting("anilist_days_watched") or 0)
+    mean_score   = float(_get_setting("anilist_mean_score") or 0)
+    fetched_at   = float(_get_setting("anilist_stats_fetched_at") or 0)
+
+    # Re-fetch from AniList at most once every 5 minutes
+    if _time.time() - fetched_at > 300:
+        try:
+            vr = httpx.post(
+                "https://graphql.anilist.co",
+                json={"query": "query{Viewer{avatar{large} bannerImage statistics{anime{count minutesWatched meanScore}}}}"},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
+                timeout=10.0,
+            )
+            vr.raise_for_status()
+            viewer       = vr.json().get("data", {}).get("Viewer") or {}
+            avatar       = (viewer.get("avatar") or {}).get("large") or avatar
+            banner       = viewer.get("bannerImage") or banner
+            stats        = (viewer.get("statistics") or {}).get("anime") or {}
+            total_anime  = stats.get("count") or 0
+            minutes      = stats.get("minutesWatched") or 0
+            days_watched = round(minutes / 1440, 1)
+            mean_score   = round(float(stats.get("meanScore") or 0), 1)
+            _set_setting("anilist_avatar",           avatar or None)
+            _set_setting("anilist_banner",           banner or None)
+            _set_setting("anilist_total_anime",      str(total_anime))
+            _set_setting("anilist_days_watched",     str(days_watched))
+            _set_setting("anilist_mean_score",       str(mean_score))
+            _set_setting("anilist_stats_fetched_at", str(_time.time()))
+        except Exception:
+            _log.exception("Failed to fetch AniList profile stats")
+
+    return {
+        "avatar":      avatar,
+        "banner":      banner,
+        "totalAnime":  total_anime,
+        "daysWatched": days_watched,
+        "meanScore":   mean_score,
+    }
 
 
 def _pull_anilist_library() -> dict:
@@ -435,11 +540,11 @@ def _pull_anilist_library() -> dict:
     query = """
     query($userId:Int){
       MediaListCollection(userId:$userId,type:ANIME){
-        lists{entries{score advancedScores status repeat media{
+        lists{entries{score advancedScores status repeat progress media{
           id idMal
           title{english romaji native}
           coverImage{large}
-          episodes format averageScore
+          episodes format averageScore status nextAiringEpisode{episode airingAt}
           startDate{year}
           genres
           description(asHtml:false)
@@ -483,11 +588,17 @@ def _pull_anilist_library() -> dict:
                 continue
 
             status = _ANILIST_STATUS_REVERSE.get(e.get("status", ""), "completed")
+            is_airing = 1 if media.get("status") == "RELEASING" else 0
+            nae_obj = media.get("nextAiringEpisode") or {}
+            nae = nae_obj.get("episode")
+            episodes_aired    = (nae - 1) if nae else None
+            next_episode_at   = nae_obj.get("airingAt")  # Unix seconds, None when finished
+            al_progress = e.get("progress") or 0
+            al_repeat   = e.get("repeat") or 0
             raw_score = e.get("score", 0)
             score: float | None = None
             if raw_score > 0:
                 score = round(min(10.0, max(1.0, raw_score / 10 if use100 else float(raw_score))), 1)
-            adv = _map_adv_scores_from_anilist(e.get("advancedScores"), use100)
             adv = _map_adv_scores_from_anilist(e.get("advancedScores"), use100)
 
             existing = None
@@ -502,7 +613,12 @@ def _pull_anilist_library() -> dict:
 
             if existing:
                 anime_id = existing["id"]
-                conn.execute("UPDATE anime SET status=? WHERE id=?", (status, anime_id))
+                conn.execute(
+                    "UPDATE anime SET status=?, is_airing=?, episodes_aired=?, next_episode_at=?,"
+                    " episodes_watched=MAX(COALESCE(episodes_watched,0),?),"
+                    " rewatch_count=MAX(COALESCE(rewatch_count,0),?) WHERE id=?",
+                    (status, is_airing, episodes_aired, next_episode_at, al_progress, al_repeat, anime_id),
+                )
                 if al_id:
                     conn.execute(
                         "UPDATE anime SET anilist_id=? WHERE id=? AND (anilist_id IS NULL OR anilist_id='')",
@@ -535,8 +651,8 @@ def _pull_anilist_library() -> dict:
                 avg = media.get("averageScore")
                 cur = conn.execute(
                     "INSERT INTO anime "
-                    "(api_id,title,title_ro,cover_url,genres,year,episodes,format,synopsis,mal_score,status,anilist_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "(api_id,title,title_ro,cover_url,genres,year,episodes,format,synopsis,mal_score,status,anilist_id,is_airing,episodes_aired,next_episode_at,episodes_watched,rewatch_count) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         str(mal_id) if mal_id else None,
                         title,
@@ -550,6 +666,11 @@ def _pull_anilist_library() -> dict:
                         round(avg / 10, 1) if avg else None,
                         status,
                         str(al_id) if al_id else None,
+                        is_airing,
+                        episodes_aired,
+                        next_episode_at,
+                        al_progress,
+                        al_repeat,
                     ),
                 )
                 if score is not None:
@@ -655,7 +776,7 @@ def rankings(
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT a.id, a.api_id, a.title, a.title_ro, a.cover_url, a.genres, a.year, a.season, "
-            "       a.episodes, a.format, a.synopsis, a.mal_score, a.status, a.notes, a.rewatch_count, "
+            "       a.episodes, a.episodes_watched, a.episodes_aired, a.is_airing, a.next_episode_at, a.format, a.synopsis, a.mal_score, a.status, a.notes, a.rewatch_count, "
             "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
             "       r.overall, r.updated_at "
             "FROM anime a LEFT JOIN rating r ON a.id = r.anime_id "
@@ -668,6 +789,10 @@ def rankings(
         item["genres"] = json.loads(item["genres"] or "[]")
         item["status"] = item.get("status") or "completed"
         item["rewatch_count"] = item.get("rewatch_count") or 0
+        item["episodes_watched"] = item.get("episodes_watched") or 0
+        item["is_airing"] = bool(item.get("is_airing"))
+        if item.get("episodes_aired") is None:
+            item["episodes_aired"] = item.get("episodes")
         if genre and genre not in item["genres"]:
             continue
         if format and item.get("format") != format:
@@ -875,9 +1000,17 @@ def update_anime(anime_id: int, body: AnimeUpdate, bg: BackgroundTasks):
             return
         if "genres" in updates:
             updates["genres"] = json.dumps(updates["genres"])
+        if "episodes_watched" in updates:
+            row = conn.execute(
+                "SELECT episodes, episodes_aired FROM anime WHERE id=?", (anime_id,)
+            ).fetchone()
+            cap = row["episodes_aired"] if row["episodes_aired"] is not None else row["episodes"]
+            if cap is not None:
+                updates["episodes_watched"] = min(updates["episodes_watched"], cap)
         cols = ", ".join(f"{k}=?" for k in updates)
         conn.execute(f"UPDATE anime SET {cols} WHERE id=?", (*updates.values(), anime_id))
-    if "status" in body.model_dump(exclude_none=True):
+    changed = body.model_dump(exclude_none=True)
+    if "status" in changed or "episodes_watched" in changed or "rewatch_count" in changed:
         bg.add_task(_anilist_sync, anime_id)
 
 
@@ -905,14 +1038,15 @@ def restore(body: dict):
             genres = json.dumps(e.get("genres") or [])
             cur = conn.execute(
                 "INSERT OR REPLACE INTO anime "
-                "(id, api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status, notes, rewatch_count) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(id, api_id, anilist_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status, notes, rewatch_count, episodes_watched) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    e.get("id"), e.get("api_id"), e.get("title", ""), e.get("title_ro"),
+                    e.get("id"), e.get("api_id"), e.get("anilist_id"),
+                    e.get("title", ""), e.get("title_ro"),
                     e.get("cover_url"), genres, e.get("year"), e.get("season"),
                     e.get("episodes"), e.get("format"), e.get("synopsis"),
                     e.get("mal_score"), e.get("status"), e.get("notes"),
-                    e.get("rewatch_count", 0),
+                    e.get("rewatch_count", 0), e.get("episodes_watched", 0),
                 ),
             )
             aid = e.get("id") or cur.lastrowid

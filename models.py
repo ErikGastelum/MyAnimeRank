@@ -35,5 +35,6 @@ class AnimeUpdate(BaseModel):
     format:        Optional[str]       = None
     synopsis:      Optional[str]       = None
     notes:         Optional[str]       = None
-    status:        Optional[Literal["completed","watching","planning","dropped","paused","repeating"]] = None
-    rewatch_count: Optional[int]       = None
+    status:        Optional[Literal["completed","watching","planning","dropped","paused","repeating","rewatching"]] = None
+    rewatch_count:    Optional[int]    = None
+    episodes_watched: Optional[int]    = None
