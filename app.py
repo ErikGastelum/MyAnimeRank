@@ -76,6 +76,8 @@ class WindowApi:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     port = _PORT
     if not _port_available(port):
         raise SystemExit(

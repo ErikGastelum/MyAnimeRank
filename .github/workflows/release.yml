@@ -31,11 +31,9 @@ jobs:
         shell: python
         run: |
           import os
-          with open('main.py', 'r') as f:
-              src = f.read()
-          src = src.replace('PLACEHOLDER_ANILIST_SECRET', os.environ['ANILIST_CLIENT_SECRET'])
-          with open('main.py', 'w') as f:
-              f.write(src)
+          secret = os.environ.get('ANILIST_CLIENT_SECRET', '')
+          with open('_secrets.py', 'w') as f:
+              f.write(f'ANILIST_CLIENT_SECRET = {secret!r}\n')
 
       - name: Build executable
         run: pyinstaller MyAnimeRank.spec

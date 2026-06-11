@@ -1,17 +1,45 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
 datas = [
     ('MyAnimeRank.html', '.'),
 ]
-datas += collect_data_files('webview')
 
-hiddenimports = collect_submodules('webview')
+binaries = []
+hiddenimports = []
+
+# collect_all picks up datas + binaries (e.g. WebView2Loader.dll) + submodules
+tmp = collect_all('webview')
+datas    += tmp[0]
+binaries += tmp[1]
+hiddenimports += tmp[2]
+
+# uvicorn uses runtime plugin selection — these modules are not statically imported
+hiddenimports += [
+    'uvicorn.logging',
+    'uvicorn.loops',
+    'uvicorn.loops.auto',
+    'uvicorn.loops.asyncio',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.http.h11_impl',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'uvicorn.lifespan.off',
+    'anyio',
+    'anyio._backends._asyncio',
+    'h11',
+    'multipart',
+    'multipart.multipart',
+]
 
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
