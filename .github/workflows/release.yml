@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:  # allows manual trigger from GitHub Actions UI
 
 permissions:
   contents: write
@@ -38,7 +39,15 @@ jobs:
       - name: Build executable
         run: pyinstaller MyAnimeRank.spec
 
+      - name: Upload build artifact (always — for testing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyAnimeRank-exe
+          path: dist/MyAnimeRank.exe
+          retention-days: 7
+
       - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/MyAnimeRank.exe
