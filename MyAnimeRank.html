@@ -991,6 +991,7 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
   const [disconnecting, setDisconnecting] = React.useState(false);
   const [pushing, setPushing] = React.useState(false);
   const [pushResult, setPushResult] = React.useState(null);
+  const [xmlResult, setXmlResult] = React.useState(null);
 
   React.useEffect(() => {
     fetch('/anilist/profile')
@@ -1008,6 +1009,19 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
       setPushResult(r.ok ? d : { error: true });
     } catch { setPushResult({ error: true }); }
     finally { setPushing(false); }
+  };
+
+  const downloadXml = async () => {
+    setXmlResult(null);
+    const r = await fetch('/export/mal-xml');
+    const blob = await r.blob();
+    const total = parseInt(r.headers.get('X-Entry-Count') || '0', 10);
+    const excluded = parseInt(r.headers.get('X-Excluded-Count') || '0', 10);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'myanimelist.xml';
+    a.click();
+    setXmlResult({ total, excluded });
   };
 
   const doDisconnect = async () => {
@@ -1091,6 +1105,22 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
           {pushResult?.error && (
             <div style={{ fontSize:12, color:'#f87171', textAlign:'center', marginBottom:14 }}>
               Push failed — check your connection
+            </div>
+          )}
+          <button onClick={downloadXml}
+            style={{ width:'100%', padding:'12px 0', borderRadius:12, border:'none', cursor:'pointer',
+              background:'rgba(52,168,240,0.07)', color:'var(--accent-2)', fontWeight:600, fontSize:13,
+              fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(52,168,240,0.18) inset',
+              transition:'opacity .14s', marginBottom:6 }}>
+            Download AniList import file
+          </button>
+          <div style={{ fontSize:11, color:'var(--text-4)', textAlign:'center', marginBottom: xmlResult ? 6 : 18, lineHeight:1.5 }}>
+            Then: anilist.co → Settings → Import &amp; Export → Import Anime List
+          </div>
+          {xmlResult && (
+            <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:18 }}>
+              {xmlResult.total} entries
+              {xmlResult.excluded > 0 && ` · ${xmlResult.excluded} excluded (no MAL ID)`}
             </div>
           )}
           <div style={{ height:1, background:'var(--line)', marginBottom:18 }} />

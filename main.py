@@ -1219,39 +1219,64 @@ def _cdata(s: str) -> str:
     return f"<![CDATA[{(s or '').replace(']]>', ']]]]><![CDATA[>')}]]>"
 
 
+_MAL_XML_STATUS = {
+    "completed":  "Completed",
+    "watching":   "Watching",
+    "rewatching": "Watching",
+    "repeating":  "Watching",
+    "planning":   "Plan to Watch",
+    "dropped":    "Dropped",
+    "paused":     "On-Hold",
+}
+
+
 @app.get("/export/mal-xml")
 def export_mal_xml():
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT a.api_id, a.title, a.format, a.episodes, a.genres, "
+            "SELECT a.api_id, a.title, a.format, a.episodes, a.genres, a.status, "
+            "       a.episodes_watched, a.rewatch_count, "
             "       r.story, r.characters, r.animation, r.audio, r.enjoyment, "
             "       r.overall, r.updated_at "
-            "FROM anime a JOIN rating r ON a.id = r.anime_id"
+            "FROM anime a LEFT JOIN rating r ON a.id = r.anime_id"
         ).fetchall()
 
     entries = []
+    excluded = 0
+    counts = {"Completed": 0, "Watching": 0, "Plan to Watch": 0, "Dropped": 0, "On-Hold": 0}
+
     for row in rows:
         item = dict(row)
+        if not item.get("api_id"):
+            excluded += 1
+            continue
+
+        mal_status = _MAL_XML_STATUS.get(item.get("status") or "completed", "Completed")
+        counts[mal_status] = counts.get(mal_status, 0) + 1
+        score = round(item["overall"]) if item.get("overall") is not None else 0
+        finish = item.get("updated_at") if mal_status == "Completed" else "0000-00-00"
         genres = ", ".join(json.loads(item.get("genres") or "[]"))
-        score = round(item["overall"]) if item["overall"] is not None else 0
-        finish = item.get("updated_at") or "0000-00-00"
+        watched = item.get("episodes_watched") or 0
+        rewatched = item.get("rewatch_count") or 0
         criteria = (
             f"Story:{item['story']} Characters:{item['characters']} "
             f"Animation:{item['animation']} Audio:{item['audio']} "
             f"Enjoyment:{item['enjoyment']}"
-        )
+        ) if item.get("overall") is not None else ""
+
         entries.append(
             f"  <anime>\n"
-            f"    <series_animedb_id>{item.get('api_id') or 0}</series_animedb_id>\n"
+            f"    <series_animedb_id>{item['api_id']}</series_animedb_id>\n"
             f"    <series_title>{_cdata(item['title'])}</series_title>\n"
             f"    <series_type>{item.get('format') or ''}</series_type>\n"
             f"    <series_episodes>{item.get('episodes') or 0}</series_episodes>\n"
             f"    <my_id>0</my_id>\n"
-            f"    <my_watched_episodes>{item.get('episodes') or 0}</my_watched_episodes>\n"
+            f"    <my_watched_episodes>{watched}</my_watched_episodes>\n"
             f"    <my_start_date>0000-00-00</my_start_date>\n"
-            f"    <my_finish_date>{finish}</my_finish_date>\n"
+            f"    <my_finish_date>{finish or '0000-00-00'}</my_finish_date>\n"
             f"    <my_score>{score}</my_score>\n"
-            f"    <my_status>Completed</my_status>\n"
+            f"    <my_status>{mal_status}</my_status>\n"
+            f"    <my_times_watched>{rewatched}</my_times_watched>\n"
             f"    <my_tags>{_cdata(genres)}</my_tags>\n"
             f"    <my_comments>{_cdata(criteria)}</my_comments>\n"
             f"    <update_on_import>1</update_on_import>\n"
@@ -1265,11 +1290,11 @@ def export_mal_xml():
         "  <myinfo>\n"
         "    <user_export_type>1</user_export_type>\n"
         f"    <user_total_anime>{total}</user_total_anime>\n"
-        f"    <user_total_completed>{total}</user_total_completed>\n"
-        "    <user_total_watching>0</user_total_watching>\n"
-        "    <user_total_onhold>0</user_total_onhold>\n"
-        "    <user_total_dropped>0</user_total_dropped>\n"
-        "    <user_total_plantowatch>0</user_total_plantowatch>\n"
+        f"    <user_total_completed>{counts['Completed']}</user_total_completed>\n"
+        f"    <user_total_watching>{counts['Watching']}</user_total_watching>\n"
+        f"    <user_total_onhold>{counts['On-Hold']}</user_total_onhold>\n"
+        f"    <user_total_dropped>{counts['Dropped']}</user_total_dropped>\n"
+        f"    <user_total_plantowatch>{counts['Plan to Watch']}</user_total_plantowatch>\n"
         "  </myinfo>\n"
         + "\n".join(entries)
         + "\n</myanimelist>"
@@ -1278,5 +1303,10 @@ def export_mal_xml():
     return Response(
         content=xml,
         media_type="application/xml",
-        headers={"Content-Disposition": 'attachment; filename="myanimelist.xml"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="myanimelist.xml"',
+            "X-Entry-Count": str(total),
+            "X-Excluded-Count": str(excluded),
+            "Access-Control-Expose-Headers": "X-Entry-Count, X-Excluded-Count",
+        },
     )
