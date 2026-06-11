@@ -3169,9 +3169,111 @@ const normaliseStatus = (s) => {
   return s || 'completed';
 };
 
+const FMT_ORDER = ['TV','Movie','OVA','ONA','TV Short','Special'];
+
 function ListSection({ status, label, color, items, navigate, englishTitles, onEpisodeUpdate, epErrors }) {
   const [open, setOpen] = useState(true);
+  const [sortByFmt, setSortByFmt] = useState(false);
   if (items.length === 0) return null;
+
+  const isCompleted = status === 'completed';
+
+  const fmtGroups = useMemo(() => {
+    if (!sortByFmt) return null;
+    const byFmt = {};
+    items.forEach(a => {
+      const f = a.format || '';
+      if (!byFmt[f]) byFmt[f] = [];
+      byFmt[f].push(a);
+    });
+    Object.values(byFmt).forEach(g => g.sort((a, b) => (overall(b.rating) || 0) - (overall(a.rating) || 0)));
+    const known = FMT_ORDER.filter(f => byFmt[f]);
+    const other = Object.keys(byFmt).filter(f => f && !FMT_ORDER.includes(f)).sort();
+    const noFmt = byFmt[''] ? [''] : [];
+    return [...known, ...other, ...noFmt].map(f => ({ fmt: f, items: byFmt[f] }));
+  }, [items, sortByFmt]);
+
+  const AnimeRow = ({ anime }) => {
+    const ov = overall(anime.rating);
+    const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
+    const isBehind = anime.is_airing && cap && (anime.episodes_watched || 0) < cap;
+    const indicatorColor = isBehind ? '#f0b429' : (anime.is_airing ? '#4ade80' : null);
+    return (
+      <div key={anime.id} onClick={()=>navigate({name:'detail',animeId:anime.id})}
+        style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px',
+          borderRadius:11, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset',
+          cursor:'pointer', transition:'background .12s ease' }}
+        onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
+        onMouseLeave={e=>e.currentTarget.style.background='var(--surface)'}>
+        <div style={{ position:'relative', flexShrink:0 }}>
+          <Poster anime={anime} w={44} radius={7} />
+          {indicatorColor && (
+            <span style={{ position:'absolute', bottom:3, right:3,
+              width:9, height:9, borderRadius:'50%', background:indicatorColor,
+              boxShadow:`0 0 6px ${indicatorColor}, 0 0 0 2px var(--surface)` }} />
+          )}
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontWeight:700, fontSize:14, letterSpacing:'-0.01em',
+            whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+            {displayTitle(anime, englishTitles)}
+          </div>
+          <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:2, display:'flex', alignItems:'center', gap:5, flexWrap:'wrap' }}>
+            <span>{anime.year}{anime.format ? ` · ${anime.format}` : ''}{anime.genres.length > 0 ? ` · ${anime.genres.slice(0,2).join(', ')}` : ''}</span>
+            {['watching','rewatching'].includes(status) && (anime.episodes || (anime.episodes_watched || 0) > 0) && (
+              <span style={{ fontFamily:'var(--mono)', color:'var(--text-2)', flexShrink:0 }}>
+                · Ep {anime.episodes_watched || 0}{anime.episodes ? ` / ${anime.episodes}` : ''}
+              </span>
+            )}
+            {!['watching','rewatching'].includes(status) && anime.episodes && (
+              <span style={{ fontFamily:'var(--mono)', color:'var(--text-3)', flexShrink:0 }}>
+                · {anime.episodes} eps
+              </span>
+            )}
+            {(anime.rewatch_count || 0) > 0 && (
+              <span style={{ fontFamily:'var(--mono)', color:'#a78bfa', flexShrink:0, fontSize:10.5, fontWeight:700 }}>
+                ×{anime.rewatch_count}
+              </span>
+            )}
+            {anime.is_airing && ['watching','rewatching'].includes(status) && (() => {
+              const lbl = fmtAirTime(anime.next_episode_at);
+              if (!lbl) return null;
+              const ep = anime.episodes_aired != null ? anime.episodes_aired + 1 : null;
+              return (
+                <span style={{ fontSize:10.5, fontWeight:700, flexShrink:0,
+                  color:'#4ade80', background:'rgba(74,222,128,0.1)',
+                  padding:'1px 6px', borderRadius:5,
+                  boxShadow:'0 0 0 1px rgba(74,222,128,0.25) inset' }}>
+                  {ep ? `Ep ${ep} · ` : ''}{lbl}
+                </span>
+              );
+            })()}
+          </div>
+        </div>
+        {['watching','rewatching'].includes(status) && onEpisodeUpdate && (() => {
+          const hasErr = epErrors && epErrors.has(anime.id);
+          return (
+            <button onClick={e => {
+              e.stopPropagation();
+              const next = (anime.episodes_watched || 0) + 1;
+              const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
+              if (!cap || next <= cap) onEpisodeUpdate(anime, next);
+            }}
+            style={{ fontSize:11, fontWeight:700, flexShrink:0,
+              padding:'3px 8px', borderRadius:6, cursor:'pointer',
+              border:'none', fontFamily:'inherit', transition:'all .15s',
+              color:      hasErr ? '#f87171' : 'var(--accent-2)',
+              background: hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(52,168,240,0.1)',
+              boxShadow:  hasErr ? '0 0 0 1px rgba(248,113,113,0.3) inset' : '0 0 0 1px rgba(52,168,240,0.2) inset' }}>
+              {hasErr ? 'failed' : '+1 ep'}
+            </button>
+          );
+        })()}
+        {anime.rating && <ScoreBadge value={ov} size="sm" />}
+      </div>
+    );
+  };
+
   return (
     <div style={{ marginBottom:24 }}>
       <button onClick={()=>setOpen(v=>!v)}
@@ -3183,6 +3285,22 @@ function ListSection({ status, label, color, items, navigate, englishTitles, onE
         <span style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:700,
           color:color, background:`color-mix(in srgb, ${color} 14%, transparent)`,
           padding:'1px 8px', borderRadius:99, marginLeft:2 }}>{items.length}</span>
+        {isCompleted && (
+          <div onClick={e => e.stopPropagation()}
+            style={{ display:'flex', gap:2, padding:'2px', borderRadius:8, marginLeft:8,
+              background:'var(--raised)', boxShadow:'0 0 0 1px var(--line) inset' }}>
+            {[['as-is','As is'],['format','By format']].map(([key, lbl]) => (
+              <button key={key} onClick={() => setSortByFmt(key === 'format')}
+                style={{ padding:'3px 10px', borderRadius:6, fontSize:11, fontWeight:600,
+                  border:'none', cursor:'pointer', fontFamily:'inherit', transition:'all .12s',
+                  background: (sortByFmt ? 'format' : 'as-is') === key ? 'var(--surface)' : 'transparent',
+                  color:      (sortByFmt ? 'format' : 'as-is') === key ? 'var(--text-2)' : 'var(--text-3)',
+                  boxShadow:  (sortByFmt ? 'format' : 'as-is') === key ? '0 1px 3px rgba(0,0,0,.2)' : 'none' }}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+        )}
         <span style={{ marginLeft:'auto', color:'var(--text-3)', fontSize:12,
           transform: open ? 'rotate(90deg)' : 'none', transition:'transform .15s ease', display:'flex' }}>
           <Ico name="chevron" size={14} />
@@ -3190,86 +3308,16 @@ function ListSection({ status, label, color, items, navigate, englishTitles, onE
       </button>
       {open && (
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {items.map(anime => {
-            const ov = overall(anime.rating);
-            const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
-            const isBehind = anime.is_airing && cap && (anime.episodes_watched || 0) < cap;
-            const indicatorColor = isBehind ? '#f0b429' : (anime.is_airing ? '#4ade80' : null);
-            return (
-              <div key={anime.id} onClick={()=>navigate({name:'detail',animeId:anime.id})}
-                style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px',
-                  borderRadius:11, background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset',
-                  cursor:'pointer', transition:'background .12s ease' }}
-                onMouseEnter={e=>e.currentTarget.style.background='var(--hover)'}
-                onMouseLeave={e=>e.currentTarget.style.background='var(--surface)'}>
-                <div style={{ position:'relative', flexShrink:0 }}>
-                  <Poster anime={anime} w={44} radius={7} />
-                  {indicatorColor && (
-                    <span style={{ position:'absolute', bottom:3, right:3,
-                      width:9, height:9, borderRadius:'50%', background:indicatorColor,
-                      boxShadow:`0 0 6px ${indicatorColor}, 0 0 0 2px var(--surface)` }} />
-                  )}
-                </div>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:14, letterSpacing:'-0.01em',
-                    whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-                    {displayTitle(anime, englishTitles)}
-                  </div>
-                  <div style={{ fontSize:11.5, color:'var(--text-3)', marginTop:2, display:'flex', alignItems:'center', gap:5, flexWrap:'wrap' }}>
-                    <span>{anime.year}{anime.format ? ` · ${anime.format}` : ''}{anime.genres.length > 0 ? ` · ${anime.genres.slice(0,2).join(', ')}` : ''}</span>
-                    {['watching','rewatching'].includes(status) && (anime.episodes || (anime.episodes_watched || 0) > 0) && (
-                      <span style={{ fontFamily:'var(--mono)', color:'var(--text-2)', flexShrink:0 }}>
-                        · Ep {anime.episodes_watched || 0}{anime.episodes ? ` / ${anime.episodes}` : ''}
-                      </span>
-                    )}
-                    {!['watching','rewatching'].includes(status) && anime.episodes && (
-                      <span style={{ fontFamily:'var(--mono)', color:'var(--text-3)', flexShrink:0 }}>
-                        · {anime.episodes} eps
-                      </span>
-                    )}
-                    {(anime.rewatch_count || 0) > 0 && (
-                      <span style={{ fontFamily:'var(--mono)', color:'#a78bfa', flexShrink:0, fontSize:10.5, fontWeight:700 }}>
-                        ×{anime.rewatch_count}
-                      </span>
-                    )}
-                    {anime.is_airing && ['watching','rewatching'].includes(status) && (() => {
-                      const label = fmtAirTime(anime.next_episode_at);
-                      if (!label) return null;
-                      const ep = anime.episodes_aired != null ? anime.episodes_aired + 1 : null;
-                      return (
-                        <span style={{ fontSize:10.5, fontWeight:700, flexShrink:0,
-                          color:'#4ade80', background:'rgba(74,222,128,0.1)',
-                          padding:'1px 6px', borderRadius:5,
-                          boxShadow:'0 0 0 1px rgba(74,222,128,0.25) inset' }}>
-                          {ep ? `Ep ${ep} · ` : ''}{label}
-                        </span>
-                      );
-                    })()}
-                  </div>
-                </div>
-                {['watching','rewatching'].includes(status) && onEpisodeUpdate && (() => {
-                  const hasErr = epErrors && epErrors.has(anime.id);
-                  return (
-                    <button onClick={e => {
-                      e.stopPropagation();
-                      const next = (anime.episodes_watched || 0) + 1;
-                      const cap = anime.episodes_aired != null ? anime.episodes_aired : anime.episodes;
-                      if (!cap || next <= cap) onEpisodeUpdate(anime, next);
-                    }}
-                    style={{ fontSize:11, fontWeight:700, flexShrink:0,
-                      padding:'3px 8px', borderRadius:6, cursor:'pointer',
-                      border:'none', fontFamily:'inherit', transition:'all .15s',
-                      color:      hasErr ? '#f87171' : 'var(--accent-2)',
-                      background: hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(52,168,240,0.1)',
-                      boxShadow:  hasErr ? '0 0 0 1px rgba(248,113,113,0.3) inset' : '0 0 0 1px rgba(52,168,240,0.2) inset' }}>
-                      {hasErr ? 'failed' : '+1 ep'}
-                    </button>
-                  );
-                })()}
-                {anime.rating && <ScoreBadge value={ov} size="sm" />}
+          {fmtGroups ? fmtGroups.map(({ fmt, items: grpItems }) => (
+            <React.Fragment key={fmt || '__none__'}>
+              <div style={{ fontSize:10.5, fontWeight:700, textTransform:'uppercase',
+                letterSpacing:'0.07em', color:'var(--text-4)', padding:'6px 2px 2px',
+                marginTop:4 }}>
+                {fmt || 'Unknown'} <span style={{ fontFamily:'var(--mono)', opacity:0.6 }}>{grpItems.length}</span>
               </div>
-            );
-          })}
+              {grpItems.map(anime => <AnimeRow key={anime.id} anime={anime} />)}
+            </React.Fragment>
+          )) : items.map(anime => <AnimeRow key={anime.id} anime={anime} />)}
         </div>
       )}
     </div>
