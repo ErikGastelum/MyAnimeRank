@@ -33,7 +33,16 @@ def _wait_for_server(port: int, timeout: float = 10.0) -> None:
 
 
 def _run_server(port: int) -> None:
-    uvicorn.run(fastapi_app, host=_HOST, port=port, log_level="warning")
+    import logging
+    import pathlib
+    log_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(log_dir / "server.log"),
+        level=logging.ERROR,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    uvicorn.run(fastapi_app, host=_HOST, port=port, log_level="error")
 
 
 class WindowApi:
@@ -83,11 +92,15 @@ if __name__ == "__main__":
     try:
         port = _PORT
         if not _port_available(port):
-            raise SystemExit(
-                f"Port {port} is already in use. "
-                f"Set MAR_PORT=<number> to use a different port, "
-                f"then update your AniList app's redirect URI to http://localhost:<number>/anilist/callback"
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"MyAnimeRank is already running.\n\nIf it isn't, port {port} is in use by another program. "
+                f"Close it and try again, or set MAR_PORT=<number> to use a different port.",
+                "MyAnimeRank",
+                0x30,  # MB_ICONWARNING
             )
+            raise SystemExit(f"Port {port} already in use")
         server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
         server_thread.start()
         _wait_for_server(port)
@@ -103,7 +116,7 @@ if __name__ == "__main__":
             js_api=api,
         )
         api._win = win
-        webview.start(gui='edgechromium')
+        webview.start()
     except SystemExit:
         raise
     except Exception:

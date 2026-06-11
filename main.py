@@ -217,7 +217,7 @@ def _map_adv_scores_from_anilist(adv_scores, use100: bool) -> dict | None:
         key = label.lower().strip()
         for criterion, aliases in _ADV_SCORE_ALIASES.items():
             if any(key == a or key.startswith(a) for a in aliases):
-                result[criterion] = round(min(10.0, max(0.0, raw / 10 if use100 else float(raw))), 1)
+                result[criterion] = round(min(10.0, max(1.0, raw / 10 if use100 else float(raw))), 1)
                 break
     return result if result else None
 
