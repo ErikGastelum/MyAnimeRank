@@ -103,12 +103,12 @@ if __name__ == "__main__":
             js_api=api,
         )
         api._win = win
-        webview.start()
+        webview.start(gui='edgechromium')
     except SystemExit:
         raise
     except Exception:
         import pathlib
         log_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank"
         log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "crash.log").write_text(traceback.format_exc())
+        (log_dir / "crash.log").write_text(traceback.format_exc(), encoding="utf-8")
         raise
