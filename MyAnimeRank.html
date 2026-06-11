@@ -1140,7 +1140,12 @@ function BackupPanel({ onClose }) {
   const triggerDownload = async (filename, blob) => {
     if (window.pywebview?.api?.save_file) {
       const buf = await blob.arrayBuffer();
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      }
+      const b64 = btoa(binary);
       const result = await window.pywebview.api.save_file(filename, b64);
       return result?.path || null;
     }
