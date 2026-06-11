@@ -667,6 +667,24 @@ def _pull_anilist_library() -> dict:
                             today,
                         ),
                     )
+                elif has_rating and adv:
+                    conn.execute(
+                        "UPDATE rating SET "
+                        "story=COALESCE(?,story), characters=COALESCE(?,characters), "
+                        "animation=COALESCE(?,animation), audio=COALESCE(?,audio), "
+                        "enjoyment=COALESCE(?,enjoyment), overall=COALESCE(?,overall), "
+                        "updated_at=? WHERE anime_id=?",
+                        (
+                            adv.get("story"),
+                            adv.get("characters"),
+                            adv.get("animation"),
+                            adv.get("audio"),
+                            adv.get("enjoyment"),
+                            score,
+                            today,
+                            anime_id,
+                        ),
+                    )
                 updated += 1
             else:
                 title_ro = titles.get("romaji")
