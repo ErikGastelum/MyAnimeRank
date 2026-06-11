@@ -366,6 +366,9 @@ const ICON_PATHS = {
   seasonal:   'M12 3v2 M12 19v2 M3 12H1 M23 12h-2 M5.6 5.6l1.4 1.4 M17 17l1.4 1.4 M5.6 18.4l1.4-1.4 M17 7l1.4-1.4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
   compare:    'M3 6h8 M3 10h8 M3 14h8 M13 6h8 M13 10h8 M13 14h8',
   discover:   'M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7z M12 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  friends:    'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75',
+  larp:       'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z',
+  reconcile:  'M21 2H3v16h5v4l4-4h5l4-4V2z M8 10h8 M8 6h4',
 };
 
 function Ico({ name, size=18, sw=1.7, color='currentColor', style={} }) {
@@ -3541,6 +3544,612 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
   );
 }
 
+/* ─── Friends ──────────────────────────────────────────────────────────── */
+function Friends({ navigate, anilistConnected }) {
+  const [friends, setFriends] = useState([]);
+  const [adding, setAdding] = useState(false);
+  const [username, setUsername] = useState('');
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  const [syncMsg, setSyncMsg] = useState(null);
+
+  const reload = () =>
+    fetch('/friends').then(r => r.json()).then(d => setFriends(d.friends || [])).catch(() => {});
+
+  useEffect(() => { reload(); }, []);
+
+  const doAdd = async () => {
+    if (!username.trim()) return;
+    setBusy('add'); setErr(null);
+    try {
+      const r = await fetch('/friends', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.trim() }),
+      });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || r.status); }
+      setUsername(''); setAdding(false); reload();
+    } catch (e) { setErr(e.message); }
+    setBusy(null);
+  };
+
+  const doRefresh = async (id) => {
+    setBusy(id); setErr(null);
+    try {
+      const r = await fetch(`/friends/${id}/refresh`, { method: 'POST' });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `Error ${r.status}`); }
+      reload();
+    } catch (e) { setErr(e.message || 'Refresh failed'); }
+    setBusy(null);
+  };
+
+  const doDelete = async (id) => {
+    setBusy('del-' + id);
+    await fetch(`/friends/${id}`, { method: 'DELETE' }).catch(() => {});
+    reload(); setBusy(null);
+  };
+
+  const doSyncFromAniList = async () => {
+    setBusy('anilist-sync'); setSyncMsg(null); setErr(null);
+    try {
+      const r = await fetch('/friends/sync-from-anilist', { method: 'POST' });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.detail || r.status); }
+      const d = await r.json();
+      setSyncMsg(`Synced ${d.total} following · ${d.added} new, ${d.already_existed} updated`);
+      reload();
+    } catch (e) { setErr(e.message); }
+    setBusy(null);
+  };
+
+  return (
+    <div style={{ padding: '32px 38px', maxWidth: 780 }} className="fade-up">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 28, flexWrap: 'wrap' }}>
+        <Ico name="friends" size={22} color="var(--accent)" />
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em' }}>Friends</h2>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {anilistConnected && (
+            <button className="btn btn-ghost" style={{ padding: '8px 14px' }}
+              onClick={doSyncFromAniList} disabled={busy === 'anilist-sync'}>
+              <Ico name="friends" size={15} />
+              {busy === 'anilist-sync' ? 'Syncing…' : 'Sync from AniList'}
+            </button>
+          )}
+          <button className="btn btn-primary" style={{ padding: '8px 14px' }}
+            onClick={() => { setAdding(true); setErr(null); }}>
+            <Ico name="add" size={15} /> Add friend
+          </button>
+        </div>
+      </div>
+
+      {syncMsg && (
+        <div style={{ background: 'rgba(74,222,128,0.1)', border: '1px solid rgba(74,222,128,0.25)',
+          borderRadius: 10, padding: '10px 14px', fontSize: 13, color: '#4ade80', marginBottom: 16 }}>
+          {syncMsg}
+        </div>
+      )}
+
+      {adding && (
+        <div style={{ background: 'var(--surface)', borderRadius: 12, padding: '16px 18px',
+          boxShadow: '0 0 0 1px var(--line) inset', marginBottom: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>AniList username</div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <input value={username} onChange={e => setUsername(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && doAdd()}
+              placeholder="e.g. kenji_watches"
+              style={{ flex: 1, background: 'var(--raised)', border: '1px solid var(--line)',
+                borderRadius: 9, padding: '9px 13px', color: 'var(--text)', fontSize: 14,
+                outline: 'none' }} autoFocus />
+            <button className="btn btn-primary" onClick={doAdd} disabled={busy === 'add'}>
+              {busy === 'add' ? 'Adding…' : 'Add'}
+            </button>
+            <button className="btn btn-ghost" onClick={() => { setAdding(false); setErr(null); setUsername(''); }}>
+              Cancel
+            </button>
+          </div>
+          {err && <div style={{ color: '#f87171', fontSize: 12, marginTop: 8 }}>{err}</div>}
+        </div>
+      )}
+
+      {err && !adding && (
+        <div style={{ color: '#f87171', fontSize: 13, marginBottom: 14 }}>{err}</div>
+      )}
+
+      {friends.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)', fontSize: 15 }}>
+          No friends added yet.{anilistConnected ? ' Use "Sync from AniList" to import who you follow, or add by username.' : ' Add a friend by AniList username to compare tastes.'}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {friends.map(f => {
+            const notFetched = !f.last_fetched;
+            return (
+              <div key={f.id} style={{ borderRadius: 14, overflow: 'hidden',
+                boxShadow: '0 0 0 1px var(--line) inset', position: 'relative' }}>
+                {f.banner_url && (
+                  <div style={{ position: 'absolute', inset: 0,
+                    backgroundImage: `url(${f.banner_url})`,
+                    backgroundSize: 'cover', backgroundPosition: 'center',
+                    opacity: 0.12, pointerEvents: 'none' }} />
+                )}
+                <div style={{ position: 'relative', display: 'flex', alignItems: 'center',
+                  gap: 14, padding: '14px 18px', background: f.banner_url ? 'transparent' : 'var(--surface)' }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 11, flexShrink: 0,
+                    overflow: 'hidden', background: 'var(--raised)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    boxShadow: '0 0 0 2px rgba(52,168,240,0.25)' }}>
+                    {f.avatar_url
+                      ? <img src={f.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      : <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--accent)' }}>{f.anilist_username[0].toUpperCase()}</span>
+                    }
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{f.anilist_username}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+                      {f.is_private ? (
+                        <span style={{ color: '#f87171' }}>List is private</span>
+                      ) : notFetched ? (
+                        <span style={{ color: '#fbbf24' }}>Anime list not fetched yet — click ↻ to pull</span>
+                      ) : (
+                        <span>{f.score_system.replace('POINT_', '')} scale · {f.entry_count ?? 0} entries · Fetched {f.last_fetched.slice(0,10)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                    {!f.is_private && !notFetched && (
+                      <button className="btn btn-ghost" style={{ padding: '7px 13px', fontSize: 13 }}
+                        onClick={() => navigate({ name: 'compare', friendId: f.id, friendName: f.anilist_username })}>
+                        <Ico name="compare" size={14} /> Compare
+                      </button>
+                    )}
+                    {!f.is_private && !notFetched && (
+                      <button className="btn btn-ghost" style={{ padding: '7px 13px', fontSize: 13 }}
+                        onClick={() => navigate({ name: 'larp', friendId: f.id, friendName: f.anilist_username })}>
+                        <Ico name="larp" size={14} /> LARP
+                      </button>
+                    )}
+                    <button className="btn btn-ghost" style={{ padding: '7px 13px', fontSize: 13 }}
+                      title={notFetched ? 'Pull anime list' : 'Refresh anime list'}
+                      onClick={() => doRefresh(f.id)} disabled={busy === f.id}>
+                      {busy === f.id ? '…' : '↻'}
+                    </button>
+                    <button className="btn btn-ghost" style={{ padding: '7px 13px', fontSize: 13, color: '#f87171' }}
+                      onClick={() => doDelete(f.id)} disabled={busy === 'del-' + f.id}>
+                      <Ico name="trash" size={14} color="#f87171" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Compare ──────────────────────────────────────────────────────────── */
+const MY_CRITERIA = [
+  { key: 'story',      label: 'Story' },
+  { key: 'characters', label: 'Characters' },
+  { key: 'animation',  label: 'Animation' },
+  { key: 'audio',      label: 'Audio' },
+  { key: 'enjoyment',  label: 'Enjoyment' },
+];
+
+function ScoreBreakdownPanel({ e, friendName }) {
+  const myBreakdown = e.my_breakdown || {};
+  const friendAdv   = e.friend_adv_scores || {};
+  const friendHasAdv = Object.keys(friendAdv).length > 0;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24,
+      padding: '14px 16px 16px', background: 'var(--raised)',
+      borderTop: '1px solid var(--line)' }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)',
+          textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>
+          Your breakdown
+        </div>
+        {MY_CRITERIA.map(({ key, label }) => (
+          <div key={key} style={{ display: 'flex', justifyContent: 'space-between',
+            alignItems: 'center', marginBottom: 5 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{label}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-1)',
+              minWidth: 30, textAlign: 'right' }}>
+              {myBreakdown[key] != null ? fmt(myBreakdown[key]) : '—'}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)',
+          textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>
+          {friendName}'s breakdown
+        </div>
+        {friendHasAdv ? (
+          Object.entries(friendAdv).map(([cat, val]) => (
+            <div key={cat} style={{ display: 'flex', justifyContent: 'space-between',
+              alignItems: 'center', marginBottom: 5 }}>
+              <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{cat}</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-1)',
+                minWidth: 30, textAlign: 'right' }}>{fmt(val)}</span>
+            </div>
+          ))
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--text-4)', fontStyle: 'italic', marginTop: 4 }}>
+            Doesn't use advanced scoring on AniList
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompareRow({ e, friendName, deltaColor, isExpanded, onToggle, borderTop }) {
+  return (
+    <div style={{ borderTop: borderTop ? '1px solid var(--line)' : 'none' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12,
+        padding: '10px 16px', cursor: 'pointer', userSelect: 'none' }}
+        onClick={onToggle}>
+        <div style={{ flex: 1, fontWeight: 600, fontSize: 13 }}>{e.title}</div>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)', width: 50, textAlign: 'right' }}>
+          {fmt(e.my_score)}
+        </span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-3)', width: 50, textAlign: 'right' }}>
+          {fmt(e.friend_score)}
+        </span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, width: 46, textAlign: 'right',
+          color: deltaColor(e.delta) }}>
+          {e.delta > 0 ? '+' : ''}{e.delta.toFixed(1)}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--text-4)', width: 14, textAlign: 'center' }}>
+          {isExpanded ? '▲' : '▼'}
+        </span>
+      </div>
+      {isExpanded && <ScoreBreakdownPanel e={e} friendName={friendName} />}
+    </div>
+  );
+}
+
+function CompareQuickRow({ e, friendName, accentColor }) {
+  const [expanded, setExpanded] = React.useState(false);
+  return (
+    <div style={{ background: 'var(--surface)', borderRadius: 10,
+      boxShadow: '0 0 0 1px var(--line) inset', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12,
+        padding: '10px 14px', cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setExpanded(x => !x)}>
+        <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{e.title}</div>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-2)' }}>You {fmt(e.my_score)}</span>
+        <span style={{ color: 'var(--text-4)' }}>·</span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text-2)' }}>{friendName} {fmt(e.friend_score)}</span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: accentColor, minWidth: 36, textAlign: 'right' }}>
+          Δ {Math.abs(e.delta).toFixed(1)}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--text-4)', width: 14, textAlign: 'center' }}>
+          {expanded ? '▲' : '▼'}
+        </span>
+      </div>
+      {expanded && <ScoreBreakdownPanel e={e} friendName={friendName} />}
+    </div>
+  );
+}
+
+function Compare({ friendId, friendName, navigate }) {
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/compare/${friendId}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [friendId]);
+
+  const deltaColor = (d) => {
+    if (d > 1) return '#4ade80';
+    if (d < -1) return '#f87171';
+    return 'var(--text-3)';
+  };
+
+  const toggleRow = (id) => setExpanded(x => x === id ? null : id);
+
+  if (loading) return <div style={{ padding: 38, color: 'var(--text-3)' }}>Loading comparison…</div>;
+  if (!data) return <div style={{ padding: 38, color: '#f87171' }}>Failed to load comparison.</div>;
+
+  return (
+    <div style={{ padding: '32px 38px', maxWidth: 820 }} className="fade-up">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
+        <button className="btn btn-ghost" style={{ padding: '7px 11px' }}
+          onClick={() => navigate({ name: 'friends' })}>
+          <Ico name="back" size={16} />
+        </button>
+        <Ico name="compare" size={20} color="var(--accent)" />
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: '-0.02em' }}>
+          You vs {friendName}
+        </h2>
+      </div>
+
+      {data.overlap_count === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)', fontSize: 14 }}>
+          {data.friend_entry_count === 0
+            ? `${data.friend?.anilist_username || 'This friend'} has no anime in their list yet, or hasn't scored any titles.`
+            : `No scored titles in common yet — ${data.friend?.anilist_username || 'your friend'} has ${data.friend_entry_count} entries but none overlap with your rated anime.`
+          }
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 14, marginBottom: 28 }}>
+            {[
+              { label: 'Shared titles', value: data.overlap_count },
+              { label: 'Your avg skew', value: (data.aggregate_skew > 0 ? '+' : '') + data.aggregate_skew.toFixed(2),
+                note: data.aggregate_skew > 0.2 ? 'You score higher' : data.aggregate_skew < -0.2 ? 'You score lower' : 'Similar avg' },
+            ].map(({ label, value, note }) => (
+              <div key={label} style={{ flex: 1, background: 'var(--surface)', borderRadius: 12,
+                padding: '16px 18px', boxShadow: '0 0 0 1px var(--line) inset' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 26, marginTop: 4 }}>{value}</div>
+                {note && <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>{note}</div>}
+              </div>
+            ))}
+          </div>
+
+          {data.most_agreement.length > 0 && (
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#4ade80', marginBottom: 10, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                Most agreement
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {data.most_agreement.map(e => (
+                  <CompareQuickRow key={e.anilist_id} e={e} friendName={friendName} accentColor="#4ade80" />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {data.most_disagreement.length > 0 && (
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#f87171', marginBottom: 10, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                Biggest disagreements
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {data.most_disagreement.map(e => (
+                  <CompareQuickRow key={e.anilist_id} e={e} friendName={friendName} accentColor="#f87171" />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-3)', marginBottom: 10,
+              letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+              All shared titles ({data.shared.length})
+            </div>
+            <div style={{ background: 'var(--surface)', borderRadius: 12,
+              boxShadow: '0 0 0 1px var(--line) inset', overflow: 'hidden' }}>
+              {data.shared.map((e, i) => (
+                <CompareRow key={e.anilist_id} e={e} friendName={friendName}
+                  deltaColor={deltaColor}
+                  isExpanded={expanded === e.anilist_id}
+                  onToggle={() => toggleRow(e.anilist_id)}
+                  borderTop={i > 0} />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ─── LARP Meter ───────────────────────────────────────────────────────── */
+function LarpMeter({ friendId, friendName, navigate }) {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [ran, setRan] = useState(false);
+
+  const run = () => {
+    setLoading(true); setRan(true);
+    const url = friendId ? `/larp?subject=friend&friend_id=${friendId}` : '/larp?subject=self';
+    fetch(url)
+      .then(r => r.json())
+      .then(d => { setResult(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  };
+
+  const COMPONENT_LABELS = {
+    concurrent_watching: 'Concurrent watching',
+    score_inflation:     'Score inflation',
+    score_spread:        'Score spread',
+    breadth:             'Genre breadth',
+    backlog:             'Backlog honesty',
+  };
+
+  const larpColor = (v) => {
+    if (v == null) return 'var(--text-4)';
+    if (v <= 30) return '#4ade80';
+    if (v <= 55) return '#fbbf24';
+    return '#f87171';
+  };
+
+  const label = (v) => {
+    if (v == null) return 'N/A';
+    if (v <= 20) return 'Very authentic';
+    if (v <= 40) return 'Authentic';
+    if (v <= 60) return 'Mixed signals';
+    if (v <= 80) return 'Questionable';
+    return 'Full LARP';
+  };
+
+  return (
+    <div style={{ padding: '32px 38px', maxWidth: 680 }} className="fade-up">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
+        {friendId && (
+          <button className="btn btn-ghost" style={{ padding: '7px 11px' }}
+            onClick={() => navigate({ name: 'friends' })}>
+            <Ico name="back" size={16} />
+          </button>
+        )}
+        <Ico name="larp" size={20} color="var(--accent)" />
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: '-0.02em' }}>
+          LARP Meter{friendName ? ` — ${friendName}` : ''}
+        </h2>
+      </div>
+
+      {!ran ? (
+        <div style={{ textAlign: 'center', padding: '50px 0' }}>
+          <div style={{ fontSize: 15, color: 'var(--text-2)', marginBottom: 20, lineHeight: 1.6 }}>
+            {friendId
+              ? `Compute how much ${friendName}'s public list reflects earned taste vs posturing.`
+              : 'Compute how much your list reflects earned taste vs posturing.'}
+          </div>
+          <button className="btn btn-primary" onClick={run} style={{ fontSize: 15, padding: '12px 28px' }}>
+            <Ico name="larp" size={16} /> Run LARP meter
+          </button>
+          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-4)' }}>
+            Score is 0–100 · Higher = more LARP · Always shows component breakdown
+          </div>
+        </div>
+      ) : loading ? (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)' }}>Computing…</div>
+      ) : !result || !result.composite ? (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: '#f87171' }}>
+          Not enough data to compute. Try syncing your library first.
+        </div>
+      ) : (
+        <>
+          <div style={{ textAlign: 'center', marginBottom: 32 }}>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 72, fontWeight: 800, lineHeight: 1,
+              color: larpColor(result.composite) }}>{result.composite}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: larpColor(result.composite), marginTop: 6 }}>
+              {label(result.composite)}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-4)', marginTop: 8 }}>
+              Based on {result.rated_count} rated titles · out of {result.entry_count} entries
+            </div>
+            {friendId && (
+              <div style={{ fontSize: 12, color: 'var(--text-4)', marginTop: 4 }}>
+                Based on public data only — for fun, not a verdict
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: 'var(--surface)', borderRadius: 14, padding: '18px 20px',
+            boxShadow: '0 0 0 1px var(--line) inset', marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.06em',
+              textTransform: 'uppercase', marginBottom: 14 }}>Component breakdown</div>
+            {Object.entries(COMPONENT_LABELS).map(([key, label]) => {
+              const val = result.components[key];
+              const w = result.weights[key];
+              const desc = result.descriptions?.[key] || '';
+              const isNA = val == null;
+              return (
+                <div key={key} style={{ marginBottom: 14 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{label}</span>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 13,
+                      color: isNA ? 'var(--text-4)' : larpColor(val) }}>
+                      {isNA ? 'N/A' : val.toFixed(0)}
+                      <span style={{ color: 'var(--text-4)', fontSize: 11, marginLeft: 4 }}>
+                        ×{(w * 100).toFixed(0)}%
+                      </span>
+                    </span>
+                  </div>
+                  <div style={{ height: 6, background: 'var(--raised)', borderRadius: 4, overflow: 'hidden' }}>
+                    {!isNA && (
+                      <div style={{ height: '100%', width: `${val}%`, borderRadius: 4,
+                        background: larpColor(val), transition: 'width .6s ease' }} />
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-4)', marginTop: 3 }}>{desc}
+                    {isNA && ' — no community scores cached'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setResult(null); setRan(false); }}>
+            Run again
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ─── Reconcile ────────────────────────────────────────────────────────── */
+function Reconcile({ navigate }) {
+  const [entries, setEntries] = useState(null);
+  const [busy, setBusy] = useState(null);
+
+  const reload = () =>
+    fetch('/reconcile').then(r => r.json()).then(d => setEntries(d.entries || [])).catch(() => setEntries([]));
+
+  useEffect(() => { reload(); }, []);
+
+  const resolve = async (id, action) => {
+    setBusy(id);
+    await fetch(`/reconcile/${id}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    }).catch(() => {});
+    reload(); setBusy(null);
+  };
+
+  return (
+    <div style={{ padding: '32px 38px', maxWidth: 720 }} className="fade-up">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
+        <Ico name="reconcile" size={20} color="var(--accent)" />
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: '-0.02em' }}>Reconcile</h2>
+      </div>
+
+      {entries === null ? (
+        <div style={{ color: 'var(--text-3)', padding: '40px 0', textAlign: 'center' }}>Loading…</div>
+      ) : entries.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-3)', fontSize: 15 }}>
+          No conflicts — your local scores match AniList.
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 14, color: 'var(--text-2)', marginBottom: 18 }}>
+            {entries.length} {entries.length === 1 ? 'entry has' : 'entries have'} a score mismatch between local and AniList.
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {entries.map(e => (
+              <div key={e.id} style={{ background: 'var(--surface)', borderRadius: 12, padding: '14px 18px',
+                boxShadow: '0 0 0 1px var(--line) inset', display: 'flex', alignItems: 'center', gap: 14 }}>
+                {e.cover_url && (
+                  <img src={e.cover_url} alt="" style={{ width: 36, height: 51, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4, whiteSpace: 'nowrap',
+                    overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                  <div style={{ display: 'flex', gap: 14, fontSize: 13 }}>
+                    <span>Local: <span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: scoreColor(e.local_score) }}>{fmt(e.local_score)}</span></span>
+                    <span>AniList: <span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: scoreColor(e.anilist_score_override) }}>{fmt(e.anilist_score_override)}</span></span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }}
+                    onClick={() => resolve(e.id, 'keep_local')} disabled={busy === e.id}>
+                    Keep mine
+                  </button>
+                  <button className="btn btn-primary" style={{ fontSize: 12, padding: '7px 12px' }}
+                    onClick={() => resolve(e.id, 'accept_anilist')} disabled={busy === e.id}>
+                    Use AniList
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RankingsSkeleton() {
   return (
     <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
@@ -3733,6 +4342,14 @@ const animeFor  = (id) => library.find(a => a.id===id);
     screen = <Seasonal navigate={navigate} importAnime={importAnime} addToList={addToList} library={library} englishTitles={et} />;
   } else if (view.name==='lists') {
     screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} />;
+  } else if (view.name==='friends') {
+    screen = <Friends navigate={navigate} anilistConnected={!!anilistStatus?.connected} />;
+  } else if (view.name==='compare') {
+    screen = <Compare friendId={view.friendId} friendName={view.friendName} navigate={navigate} />;
+  } else if (view.name==='larp') {
+    screen = <LarpMeter friendId={view.friendId || null} friendName={view.friendName || null} navigate={navigate} />;
+  } else if (view.name==='reconcile') {
+    screen = <Reconcile navigate={navigate} />;
   }
 
   const ratedCount = library.filter(a=>a.rating).length;
@@ -3761,6 +4378,21 @@ const animeFor  = (id) => library.find(a => a.id===id);
             className={'nav-item' + (view.name==='seasonal' ? ' active' : '')}
             onClick={()=>navigate({name:'seasonal'})}>
             <Ico name="seasonal" size={18} /> This Season <span className="nav-dot" />
+          </button>
+          <button
+            className={'nav-item' + (view.name==='friends'||view.name==='compare' ? ' active' : '')}
+            onClick={()=>navigate({name:'friends'})}>
+            <Ico name="friends" size={18} /> Friends <span className="nav-dot" />
+          </button>
+          <button
+            className={'nav-item' + (view.name==='larp' ? ' active' : '')}
+            onClick={()=>navigate({name:'larp'})}>
+            <Ico name="larp" size={18} /> LARP Meter <span className="nav-dot" />
+          </button>
+          <button
+            className={'nav-item' + (view.name==='reconcile' ? ' active' : '')}
+            onClick={()=>navigate({name:'reconcile'})}>
+            <Ico name="reconcile" size={18} /> Reconcile <span className="nav-dot" />
           </button>
         </div>
         <div style={{ marginTop:'auto', display:'flex', flexDirection:'column', gap:14 }}>

@@ -47,6 +47,45 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS friend (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    anilist_username  TEXT UNIQUE NOT NULL,
+    anilist_user_id   INTEGER,
+    score_system      TEXT NOT NULL DEFAULT 'POINT_10_DECIMAL',
+    is_private        INTEGER NOT NULL DEFAULT 0,
+    last_fetched      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS friend_entry (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    friend_id        INTEGER NOT NULL REFERENCES friend(id) ON DELETE CASCADE,
+    anilist_id       INTEGER NOT NULL,
+    raw_score        REAL,
+    normalized_score REAL,
+    status           TEXT,
+    progress         INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(friend_id, anilist_id)
+);
+
+CREATE TABLE IF NOT EXISTS larp_result (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL,
+    friend_id    INTEGER REFERENCES friend(id) ON DELETE CASCADE,
+    composite    REAL NOT NULL,
+    components   TEXT NOT NULL,
+    computed_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    anime_id  INTEGER REFERENCES anime(id) ON DELETE CASCADE,
+    field     TEXT NOT NULL,
+    source    TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    timestamp TEXT NOT NULL
+);
 """
 
 
@@ -91,6 +130,13 @@ def _migrate_db() -> None:
         ("anime", "is_airing",         "INTEGER"),
         ("anime", "episodes_aired",    "INTEGER"),
         ("anime", "next_episode_at",   "INTEGER"),
+        ("rating",  "anilist_score_override", "REAL"),
+        ("rating",  "needs_reconcile",        "INTEGER"),
+        ("friend",       "avatar_url",        "TEXT"),
+        ("friend",       "banner_url",        "TEXT"),
+        ("friend_entry", "community_score",   "REAL"),
+        ("friend_entry", "genres",            "TEXT"),
+        ("friend_entry", "adv_scores",        "TEXT"),
     ]
     with get_conn() as conn:
         for table, col, col_type in additions:

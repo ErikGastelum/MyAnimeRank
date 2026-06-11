@@ -18,6 +18,9 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel as _BaseModel
 
+from compare import normalize_score, compare_friend
+from larp import compute_larp_self, compute_larp_friend, WEIGHTS as _LARP_WEIGHTS
+
 _log = logging.getLogger("myanimrank")
 
 
@@ -513,6 +516,16 @@ def anilist_profile_stats():
     }
 
 
+def _log_sync(conn, anime_id: int, field: str, source: str, old_value, new_value) -> None:
+    if str(old_value) == str(new_value):
+        return
+    conn.execute(
+        "INSERT INTO sync_log (anime_id, field, source, old_value, new_value, timestamp) VALUES (?,?,?,?,?,?)",
+        (anime_id, field, source, str(old_value) if old_value is not None else None,
+         str(new_value) if new_value is not None else None, datetime.now().isoformat()),
+    )
+
+
 def _auto_backup() -> None:
     try:
         with get_conn() as conn:
@@ -648,10 +661,10 @@ def _pull_anilist_library() -> dict:
                         "UPDATE anime SET anilist_id=? WHERE id=? AND (anilist_id IS NULL OR anilist_id='')",
                         (str(al_id), anime_id),
                     )
-                has_rating = conn.execute(
-                    "SELECT 1 FROM rating WHERE anime_id=?", (anime_id,)
+                existing_rating = conn.execute(
+                    "SELECT overall, needs_reconcile FROM rating WHERE anime_id=?", (anime_id,)
                 ).fetchone()
-                if not has_rating and score is not None:
+                if not existing_rating and score is not None:
                     conn.execute(
                         "INSERT OR REPLACE INTO rating "
                         "(anime_id,story,characters,animation,audio,enjoyment,overall,updated_at) "
@@ -667,7 +680,7 @@ def _pull_anilist_library() -> dict:
                             today,
                         ),
                     )
-                elif has_rating and adv:
+                elif existing_rating and adv:
                     conn.execute(
                         "UPDATE rating SET "
                         "story=COALESCE(?,story), characters=COALESCE(?,characters), "
@@ -685,6 +698,15 @@ def _pull_anilist_library() -> dict:
                             anime_id,
                         ),
                     )
+                elif (existing_rating and score is not None
+                      and existing_rating["overall"] is not None
+                      and abs(existing_rating["overall"] - score) > 0.1
+                      and not existing_rating["needs_reconcile"]):
+                    conn.execute(
+                        "UPDATE rating SET anilist_score_override=?, needs_reconcile=1 WHERE anime_id=?",
+                        (score, anime_id),
+                    )
+                    _log_sync(conn, anime_id, "score", "anilist", existing_rating["overall"], score)
                 updated += 1
             else:
                 title_ro = titles.get("romaji")
@@ -1353,3 +1375,378 @@ def export_mal_xml():
             "Access-Control-Expose-Headers": "X-Entry-Count, X-Excluded-Count",
         },
     )
+
+
+# ── Friends ────────────────────────────────────────────────────────────────
+
+_AL_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
+
+_FRIEND_USER_QUERY = """
+query($name:String){
+  User(name:$name){
+    id
+    avatar{ large }
+    bannerImage
+    mediaListOptions{ scoreFormat }
+  }
+}"""
+
+_FRIEND_LIST_QUERY = """
+query($name:String){
+  MediaListCollection(userName:$name,type:ANIME){
+    lists{entries{score advancedScores status progress media{id averageScore genres}}}
+  }
+}"""
+
+
+class _FriendAdd(_BaseModel):
+    username: str
+
+
+def _fetch_friend_list(username: str) -> tuple[int | None, str, str | None, str | None, list[dict], bool]:
+    """Returns (anilist_user_id, score_format, avatar_url, banner_url, raw_entries, is_private)."""
+    try:
+        ur = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": _FRIEND_USER_QUERY, "variables": {"name": username}},
+            headers=_AL_HEADERS, timeout=10.0,
+        )
+        ur.raise_for_status()
+        user = (ur.json().get("data") or {}).get("User")
+        if not user:
+            return None, "POINT_10_DECIMAL", None, None, [], False
+        user_id     = user["id"]
+        score_format = (user.get("mediaListOptions") or {}).get("scoreFormat") or "POINT_10_DECIMAL"
+        avatar_url  = (user.get("avatar") or {}).get("large") or None
+        banner_url  = user.get("bannerImage") or None
+    except Exception:
+        return None, "POINT_10_DECIMAL", None, None, [], False
+
+    try:
+        lr = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": _FRIEND_LIST_QUERY, "variables": {"name": username}},
+            headers=_AL_HEADERS, timeout=20.0,
+        )
+        lr.raise_for_status()
+        data = lr.json()
+        errors = data.get("errors") or []
+        is_private = any("private" in (e.get("message") or "").lower() for e in errors)
+        lists = ((data.get("data") or {}).get("MediaListCollection") or {}).get("lists") or []
+        entries = [e for lst in lists for e in (lst.get("entries") or [])]
+        if not is_private and not entries and not lists:
+            # MediaListCollection returned null — list is private (AniList omits it silently)
+            is_private = True
+    except Exception:
+        # Transient error — return None so callers know NOT to wipe existing cached data
+        return user_id, score_format, avatar_url, banner_url, None, False
+
+    return user_id, score_format, avatar_url, banner_url, entries, is_private
+
+
+@app.post("/friends", status_code=201)
+def add_friend(body: _FriendAdd):
+    username = body.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+
+    user_id, score_format, avatar_url, banner_url, raw_entries, is_private = _fetch_friend_list(username)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="AniList user not found")
+    if raw_entries is None:
+        raise HTTPException(status_code=502, detail="Could not fetch anime list from AniList — try again")
+
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM friend WHERE anilist_username=?", (username,)
+        ).fetchone()
+        if existing:
+            friend_id = existing["id"]
+            conn.execute(
+                "UPDATE friend SET anilist_user_id=?, score_system=?, is_private=?, last_fetched=?,"
+                " avatar_url=?, banner_url=? WHERE id=?",
+                (user_id, score_format, 1 if is_private else 0, now,
+                 avatar_url, banner_url, friend_id),
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO friend (anilist_username, anilist_user_id, score_system, is_private,"
+                " last_fetched, avatar_url, banner_url) VALUES (?,?,?,?,?,?,?)",
+                (username, user_id, score_format, 1 if is_private else 0, now,
+                 avatar_url, banner_url),
+            )
+            friend_id = cur.lastrowid
+
+        conn.execute("DELETE FROM friend_entry WHERE friend_id=?", (friend_id,))
+        for e in raw_entries:
+            media = e.get("media") or {}
+            al_id = media.get("id")
+            if not al_id:
+                continue
+            raw_score = e.get("score") or 0
+            norm = normalize_score(raw_score, score_format) if raw_score > 0 else None
+            avg = media.get("averageScore")
+            community_score = round(avg / 10.0, 1) if avg else None
+            genres = json.dumps(media.get("genres") or [])
+            adv_scores = json.dumps(e.get("advancedScores") or {})
+            conn.execute(
+                "INSERT OR REPLACE INTO friend_entry "
+                "(friend_id, anilist_id, raw_score, normalized_score, status, progress, community_score, genres, adv_scores) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (friend_id, al_id, raw_score if raw_score > 0 else None, norm,
+                 e.get("status"), e.get("progress") or 0, community_score, genres, adv_scores),
+            )
+
+    return {"id": friend_id, "is_private": is_private, "entry_count": len(raw_entries)}
+
+
+@app.get("/friends")
+def list_friends():
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT f.*, COUNT(fe.id) AS entry_count
+            FROM friend f
+            LEFT JOIN friend_entry fe ON fe.friend_id = f.id
+            GROUP BY f.id
+            ORDER BY f.anilist_username
+            """
+        ).fetchall()
+    return {"friends": [dict(r) for r in rows]}
+
+
+@app.post("/friends/{friend_id}/refresh")
+def refresh_friend(friend_id: int):
+    with get_conn() as conn:
+        friend = conn.execute("SELECT * FROM friend WHERE id=?", (friend_id,)).fetchone()
+    if not friend:
+        raise HTTPException(status_code=404, detail="Friend not found")
+
+    username = friend["anilist_username"]
+    user_id, score_format, avatar_url, banner_url, raw_entries, is_private = _fetch_friend_list(username)
+    if user_id is None:
+        raise HTTPException(status_code=502, detail="Could not reach AniList")
+    if raw_entries is None:
+        raise HTTPException(status_code=502, detail="Could not fetch anime list — AniList may be rate-limiting, try again")
+
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE friend SET score_system=?, is_private=?, last_fetched=?,"
+            " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
+            (score_format, 1 if is_private else 0, now, avatar_url, banner_url, friend_id),
+        )
+        conn.execute("DELETE FROM friend_entry WHERE friend_id=?", (friend_id,))
+        for e in raw_entries:
+            media = e.get("media") or {}
+            al_id = media.get("id")
+            if not al_id:
+                continue
+            raw_score = e.get("score") or 0
+            norm = normalize_score(raw_score, score_format) if raw_score > 0 else None
+            avg = media.get("averageScore")
+            community_score = round(avg / 10.0, 1) if avg else None
+            genres = json.dumps(media.get("genres") or [])
+            adv_scores = json.dumps(e.get("advancedScores") or {})
+            conn.execute(
+                "INSERT OR REPLACE INTO friend_entry "
+                "(friend_id, anilist_id, raw_score, normalized_score, status, progress, community_score, genres, adv_scores) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (friend_id, al_id, raw_score if raw_score > 0 else None, norm,
+                 e.get("status"), e.get("progress") or 0, community_score, genres, adv_scores),
+            )
+
+    return {"is_private": is_private, "entry_count": len(raw_entries)}
+
+
+@app.delete("/friends/{friend_id}", status_code=204)
+def delete_friend(friend_id: int):
+    with get_conn() as conn:
+        if not conn.execute("SELECT id FROM friend WHERE id=?", (friend_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Friend not found")
+        conn.execute("DELETE FROM friend WHERE id=?", (friend_id,))
+
+
+_FOLLOWING_QUERY = """
+query($userId:Int,$page:Int){
+  Page(page:$page,perPage:50){
+    pageInfo{ hasNextPage }
+    following(userId:$userId){
+      id name
+      avatar{ large }
+      bannerImage
+      mediaListOptions{ scoreFormat }
+    }
+  }
+}"""
+
+
+@app.post("/friends/sync-from-anilist")
+def sync_friends_from_anilist():
+    token = _get_setting("anilist_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="Not connected to AniList")
+    user_id_str = _get_setting("anilist_user_id")
+    if not user_id_str:
+        raise HTTPException(status_code=400, detail="AniList user ID not cached — re-sync first")
+
+    headers = {**_AL_HEADERS, "Authorization": f"Bearer {token}"}
+    following: list[dict] = []
+    page = 1
+    while page <= 10:
+        try:
+            resp = httpx.post(
+                "https://graphql.anilist.co",
+                json={"query": _FOLLOWING_QUERY, "variables": {"userId": int(user_id_str), "page": page}},
+                headers=headers, timeout=15.0,
+            )
+            resp.raise_for_status()
+            page_data = (resp.json().get("data") or {}).get("Page") or {}
+            following.extend(page_data.get("following") or [])
+            if not (page_data.get("pageInfo") or {}).get("hasNextPage"):
+                break
+        except Exception:
+            break
+        page += 1
+        time.sleep(0.4)
+
+    added = already_existed = 0
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        for u in following:
+            uname = u.get("name")
+            if not uname:
+                continue
+            uid         = u.get("id")
+            score_fmt   = (u.get("mediaListOptions") or {}).get("scoreFormat") or "POINT_10_DECIMAL"
+            avatar_url  = (u.get("avatar") or {}).get("large") or None
+            banner_url  = u.get("bannerImage") or None
+            existing = conn.execute(
+                "SELECT id FROM friend WHERE anilist_username=?", (uname,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE friend SET anilist_user_id=?, score_system=?,"
+                    " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
+                    (uid, score_fmt, avatar_url, banner_url, existing["id"]),
+                )
+                already_existed += 1
+            else:
+                conn.execute(
+                    "INSERT INTO friend (anilist_username, anilist_user_id, score_system,"
+                    " is_private, last_fetched, avatar_url, banner_url) VALUES (?,?,?,0,NULL,?,?)",
+                    (uname, uid, score_fmt, avatar_url, banner_url),
+                )
+                added += 1
+
+    return {"added": added, "already_existed": already_existed, "total": len(following)}
+
+
+@app.get("/compare/{friend_id}")
+def compare(friend_id: int):
+    result = compare_friend(friend_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Friend not found")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM friend_entry WHERE friend_id=?", (friend_id,)
+        ).fetchone()
+    result["friend_entry_count"] = row["cnt"] if row else 0
+    return result
+
+
+# ── LARP meter ─────────────────────────────────────────────────────────────
+
+@app.get("/larp")
+def larp(subject: str = Query("self"), friend_id: int = Query(None)):
+    if subject == "friend":
+        if not friend_id:
+            raise HTTPException(status_code=400, detail="friend_id required for subject=friend")
+        result = compute_larp_friend(friend_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Friend not found")
+        subject_type = "friend"
+    else:
+        result = compute_larp_self()
+        subject_type = "self"
+
+    if not result:
+        raise HTTPException(status_code=422, detail="Not enough data to compute LARP score")
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO larp_result (subject_type, friend_id, composite, components, computed_at) VALUES (?,?,?,?,?)",
+            (subject_type, friend_id if subject == "friend" else None,
+             result["composite"], json.dumps(result["components"]), datetime.now().isoformat()),
+        )
+
+    return result
+
+
+# ── Reconciliation ─────────────────────────────────────────────────────────
+
+@app.get("/reconcile")
+def list_reconcile():
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.title, a.cover_url,
+                   r.overall AS local_score, r.anilist_score_override
+            FROM rating r
+            JOIN anime a ON a.id = r.anime_id
+            WHERE r.needs_reconcile = 1
+            ORDER BY a.title
+            """,
+        ).fetchall()
+    return {"entries": [dict(r) for r in rows]}
+
+
+class _ReconcileAction(_BaseModel):
+    action: str  # "keep_local" | "accept_anilist"
+
+
+@app.post("/reconcile/{anime_id}")
+def resolve_reconcile(anime_id: int, body: _ReconcileAction):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT overall, anilist_score_override FROM rating WHERE anime_id=? AND needs_reconcile=1",
+            (anime_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="No pending reconciliation for this entry")
+
+        if body.action == "accept_anilist":
+            override = row["anilist_score_override"]
+            conn.execute(
+                "UPDATE rating SET overall=?, anilist_score_override=NULL, needs_reconcile=0, updated_at=? WHERE anime_id=?",
+                (override, date.today().isoformat(), anime_id),
+            )
+            _log_sync(conn, anime_id, "score", "reconcile:anilist", row["overall"], override)
+        else:
+            conn.execute(
+                "UPDATE rating SET anilist_score_override=NULL, needs_reconcile=0 WHERE anime_id=?",
+                (anime_id,),
+            )
+            _log_sync(conn, anime_id, "score", "reconcile:local", row["anilist_score_override"], row["overall"])
+
+    return {"ok": True}
+
+
+# ── Sync log ───────────────────────────────────────────────────────────────
+
+@app.get("/sync/log")
+def sync_log(limit: int = Query(100), offset: int = Query(0)):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT sl.id, sl.field, sl.source, sl.old_value, sl.new_value, sl.timestamp,
+                   a.title, a.cover_url
+            FROM sync_log sl
+            LEFT JOIN anime a ON a.id = sl.anime_id
+            ORDER BY sl.id DESC LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM sync_log").fetchone()[0]
+    return {"entries": [dict(r) for r in rows], "total": total}
