@@ -51,7 +51,17 @@ def _fetch_seasonal() -> list[dict]:
         with httpx.Client(timeout=10.0) as client:
             resp = client.get(_JIKAN_SEASONAL, params={"limit": 25})
             resp.raise_for_status()
-        return [_normalise(item) for item in resp.json().get("data", [])]
+        seen_ids: set[str] = set()
+        seen_titles: set[str] = set()
+        results: list[dict] = []
+        for item in resp.json().get("data", []):
+            norm = _normalise(item)
+            title_key = norm["title"].lower().strip()
+            if norm["api_id"] not in seen_ids and title_key not in seen_titles:
+                seen_ids.add(norm["api_id"])
+                seen_titles.add(title_key)
+                results.append(norm)
+        return results
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError):
         return []
 

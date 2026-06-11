@@ -15,6 +15,7 @@ class AnimeCreate(BaseModel):
     format: Optional[str] = None
     synopsis: Optional[str] = None
     mal_score: Optional[float] = None
+    status: Optional[Literal["completed","watching","planning","dropped","paused","rewatching"]] = None
 
 
 class RatingIn(BaseModel):

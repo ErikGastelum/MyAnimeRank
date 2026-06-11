@@ -461,12 +461,14 @@ function RankCard({ anime, rank, onOpen, sortKey, englishTitles, variant='grid' 
               {anime.genres.length > 0 && <><span style={{opacity:.4}}> · </span>
                 <span style={{color:'var(--text-2)'}}>{anime.genres.slice(0,2).join(', ')}</span></>}
             </div>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:4 }}>
-              <div style={{ display:'flex', gap:0 }}>
-                {CRITERIA.map(c => <MiniScore key={c.key} label={c.label.slice(0,3)} value={anime.rating[c.key]} active={sortKey===c.key} />)}
+            {anime.rating && (
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:4 }}>
+                <div style={{ display:'flex', gap:0 }}>
+                  {CRITERIA.map(c => <MiniScore key={c.key} label={c.label.slice(0,3)} value={anime.rating[c.key]} active={sortKey===c.key} />)}
+                </div>
+                <ScoreBadge value={ov} size='sm' />
               </div>
-              <ScoreBadge value={ov} size='sm' />
-            </div>
+            )}
           </div>
         ) : (
           <div style={{ padding:'8px 10px 10px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
@@ -529,7 +531,7 @@ function DiscoverPanelCard({ item, inLibrary, onImport }) {
       </div>
       {showPreview && (
         <SeasonalPreviewModal item={item} inLibrary={inLibrary}
-          onImport={onImport} onClose={() => setShowPreview(false)} />
+          onImport={onImport} onAddToList={onAddToList} onClose={() => setShowPreview(false)} />
       )}
     </>
   );
@@ -561,6 +563,23 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
   const seasons = useMemo(() => {
     const s = new Set(); rated.forEach(a => a.season && s.add(a.season));
     return ['All', ...[...s].sort((a,b) => b.localeCompare(a))];
+  }, [library]);
+
+  const { statusCounts, activeStatuses } = useMemo(() => {
+    const STATUS_TABS = [
+      ['all','All'], ['watching','Watching'], ['rewatching','Rewatching'],
+      ['completed','Completed'], ['paused','Paused'], ['dropped','Dropped'], ['planning','Planning'],
+    ];
+    const counts = { all: rated.length };
+    rated.forEach(a => {
+      const raw = a.status || 'completed';
+      const s = raw==='on_hold' ? 'paused' : raw==='plan_to_watch' ? 'planning' : raw;
+      counts[s] = (counts[s] || 0) + 1;
+    });
+    return {
+      statusCounts: counts,
+      activeStatuses: STATUS_TABS.filter(([k]) => k==='all' || counts[k]),
+    };
   }, [library]);
 
   const list = useMemo(() => {
@@ -615,60 +634,12 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
                 </button>
               ))}
             </div>
-            {rated.length > 0 && (
-              <button className="btn btn-ghost" onClick={exportMAL} title="Export as MyAnimeList XML">
-                <Ico name="back" size={16} sw={2.2} style={{transform:'rotate(90deg)'}} /> Export XML
-              </button>
-            )}
             <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
               <Ico name="add" size={17} sw={2.2} /> Add anime
             </button>
           </div>
         </div>
         {headerSlot}
-
-        {(() => {
-          const STATUS_TABS = [
-            ['all','All'], ['watching','Watching'], ['rewatching','Rewatching'],
-            ['completed','Completed'], ['paused','Paused'], ['dropped','Dropped'], ['planning','Planning'],
-          ];
-          const statusCounts = { all: rated.length };
-          rated.forEach(a => {
-            const raw = a.status || 'completed';
-            const s = raw==='on_hold' ? 'paused' : raw==='plan_to_watch' ? 'planning' : raw;
-            statusCounts[s] = (statusCounts[s] || 0) + 1;
-          });
-          const activeTabs = STATUS_TABS.filter(([k]) => k==='all' || statusCounts[k]);
-          if (activeTabs.length <= 2) return null;
-          return (
-            <div style={{ display:'flex', gap:2, marginBottom:8, overflowX:'auto' }}>
-              {activeTabs.map(([key, label]) => (
-                <button key={key} onClick={() => setStatusFilter(key)}
-                  style={{ padding:'6px 14px', borderRadius:8, border:'none', cursor:'pointer',
-                    fontFamily:'inherit', fontWeight:600, fontSize:12.5,
-                    background: statusFilter===key ? 'var(--accent)' : 'var(--surface)',
-                    color: statusFilter===key ? '#fff' : 'var(--text-3)',
-                    boxShadow: statusFilter===key ? 'none' : '0 0 0 1px var(--line) inset',
-                    transition:'all .12s', whiteSpace:'nowrap', flexShrink:0 }}>
-                  {label}
-                  <span style={{ marginLeft:6, fontFamily:'var(--mono)', fontSize:11,
-                    opacity: statusFilter===key ? 0.75 : 0.5 }}>
-                    {statusCounts[key] || 0}
-                  </span>
-                </button>
-              ))}
-            </div>
-          );
-        })()}
-
-        <div style={{ display:'flex', gap:2, marginBottom:4, overflowX:'auto',
-          borderBottom:'1px solid var(--line)', paddingBottom:2 }}>
-          {formats.map(f => (
-            <FormatTab key={f} active={fmtFilter===f} onClick={()=>setFmt(f)} count={fmtCounts[f]}>
-              {f}
-            </FormatTab>
-          ))}
-        </div>
 
         <div style={{ display:'flex', alignItems:'center', gap:14, flexWrap:'wrap',
           padding:'14px 16px', borderRadius:14, background:'var(--surface)',
@@ -679,6 +650,8 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
               style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontSize:14 }} />
           </div>
           <div style={{ width:1, height:22, background:'var(--line)' }} />
+          {activeStatuses.length > 2 && <DropdownSelect label="Status" value={statusFilter} onChange={setStatusFilter} options={activeStatuses.map(([k])=>k)} render={k=>activeStatuses.find(([key])=>key===k)?.[1]} />}
+          {formats.length > 2 && <DropdownSelect label="Format" value={fmtFilter} onChange={setFmt} options={formats} />}
           {seasons.length > 2 && <DropdownSelect label="Season" value={season} onChange={setSeason} options={seasons} />}
           <DropdownSelect label="Sort" value={sortKey} onChange={setSortKey}
             options={sortOpts.map(o=>o.key)} render={k => sortOpts.find(o=>o.key===k).label} />
@@ -1017,10 +990,18 @@ function AniListProfilePanel({ profile, username, onClose, onDisconnect, onProfi
     const blob = await r.blob();
     const total = parseInt(r.headers.get('X-Entry-Count') || '0', 10);
     const excluded = parseInt(r.headers.get('X-Excluded-Count') || '0', 10);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'myanimelist.xml';
-    a.click();
+    if (window.pywebview?.api?.save_file) {
+      const buf = await blob.arrayBuffer();
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+      await window.pywebview.api.save_file('myanimelist.xml', b64);
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'myanimelist.xml';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
     setXmlResult({ total, excluded });
   };
 
@@ -1142,6 +1123,10 @@ function BackupPanel({ onClose }) {
   const [backups, setBackups] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [deleting, setDeleting] = React.useState(null);
+  const [justDownloaded, setJustDownloaded] = React.useState(false);
+  const [restoring, setRestoring] = React.useState(false);
+  const [restoreMsg, setRestoreMsg] = React.useState(null);
+  const fileInputRef = React.useRef(null);
   const lastDownloaded = localStorage.getItem('lastBackupDate');
   const daysSince = lastDownloaded
     ? Math.floor((Date.now() - new Date(lastDownloaded).getTime()) / 86400000)
@@ -1152,23 +1137,36 @@ function BackupPanel({ onClose }) {
     fetch('/backups').then(r => r.json()).then(d => { setBackups(d.backups || []); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
+  const triggerDownload = async (filename, blob) => {
+    if (window.pywebview?.api?.save_file) {
+      const buf = await blob.arrayBuffer();
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+      const result = await window.pywebview.api.save_file(filename, b64);
+      return result?.path || null;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return null;
+  };
+
   const downloadCurrent = async () => {
     const d = await fetch('/backup').then(r => r.json());
     const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `myanimrank_backup_${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
+    const filename = `myanimrank_backup_${new Date().toISOString().slice(0,10)}.json`;
+    await triggerDownload(filename, blob);
     localStorage.setItem('lastBackupDate', new Date().toISOString().slice(0,10));
+    setJustDownloaded(true);
+    setTimeout(() => setJustDownloaded(false), 4000);
   };
 
   const downloadAutoBackup = async (filename) => {
     const r = await fetch(`/backups/${encodeURIComponent(filename)}`);
     const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
+    await triggerDownload(filename, blob);
   };
 
   const deleteAutoBackup = async (filename) => {
@@ -1176,6 +1174,34 @@ function BackupPanel({ onClose }) {
     await fetch(`/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' });
     setBackups(b => b.filter(x => x.filename !== filename));
     setDeleting(null);
+  };
+
+  const handleRestoreFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    if (!window.confirm(`Restore from "${file.name}"?\n\nThis will overwrite your current library with the backup data. Auto-backup will be taken first.`)) return;
+    setRestoring(true);
+    setRestoreMsg(null);
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const resp = await fetch('/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+      const result = await resp.json();
+      const syncPart = result.sync
+        ? ` Pushed to AniList: ${result.sync.synced} synced, ${result.sync.errors} errors.`
+        : '';
+      setRestoreMsg({ ok: true, text: `Restored ${result.restored} entries.${syncPart} Reload the page to see your library.` });
+    } catch (err) {
+      setRestoreMsg({ ok: false, text: `Restore failed: ${err.message}` });
+    } finally {
+      setRestoring(false);
+    }
   };
 
   return (
@@ -1211,15 +1237,51 @@ function BackupPanel({ onClose }) {
             fontFamily:'inherit', marginBottom:6 }}>
           Download backup now
         </button>
-        {!overdue && (
-          <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:18 }}>
+        {justDownloaded && (
+          <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:6 }}>
+            Saved to your <strong style={{color:'var(--text-2)'}}>Downloads folder</strong>
+          </div>
+        )}
+        {!overdue && !justDownloaded && (
+          <div style={{ fontSize:12, color:'var(--text-3)', textAlign:'center', marginBottom:6 }}>
             Last downloaded {daysSince === 0 ? 'today' : `${daysSince} day${daysSince === 1 ? '' : 's'} ago`}
+          </div>
+        )}
+
+        <div style={{ height:1, background:'var(--line)', margin:'16px 0 14px' }} />
+
+        <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:700, textTransform:'uppercase',
+          letterSpacing:'0.06em', marginBottom:10 }}>
+          Restore
+        </div>
+        <input ref={fileInputRef} type="file" accept=".json" style={{ display:'none' }} onChange={handleRestoreFile} />
+        <button onClick={() => fileInputRef.current.click()} disabled={restoring}
+          style={{ width:'100%', padding:'11px 0', borderRadius:12, border:'none', cursor: restoring ? 'default' : 'pointer',
+            background:'rgba(248,113,113,0.08)', boxShadow:'0 0 0 1px rgba(248,113,113,0.2) inset',
+            color:'#f87171', fontWeight:700, fontSize:13, fontFamily:'inherit',
+            opacity: restoring ? 0.6 : 1 }}>
+          {restoring ? 'Restoring…' : 'Restore from backup file…'}
+        </button>
+        {restoreMsg && (
+          <div style={{ marginTop:8, padding:'10px 14px', borderRadius:10, fontSize:13,
+            background: restoreMsg.ok ? 'rgba(52,211,153,0.08)' : 'rgba(248,113,113,0.08)',
+            boxShadow: `0 0 0 1px ${restoreMsg.ok ? 'rgba(52,211,153,0.25)' : 'rgba(248,113,113,0.25)'} inset`,
+            color: restoreMsg.ok ? '#34d399' : '#f87171' }}>
+            {restoreMsg.text}
+            {restoreMsg.ok && (
+              <button onClick={() => window.location.reload()}
+                style={{ display:'block', marginTop:8, padding:'6px 12px', borderRadius:8, border:'none',
+                  cursor:'pointer', background:'rgba(52,211,153,0.15)', color:'#34d399',
+                  fontWeight:700, fontSize:12, fontFamily:'inherit' }}>
+                Reload now
+              </button>
+            )}
           </div>
         )}
 
         {backups.length > 0 && (
           <>
-            <div style={{ height:1, background:'var(--line)', margin:'18px 0 14px' }} />
+            <div style={{ height:1, background:'var(--line)', margin:'16px 0 14px' }} />
             <div style={{ fontSize:11, color:'var(--text-3)', fontWeight:700, textTransform:'uppercase',
               letterSpacing:'0.06em', marginBottom:10 }}>
               Auto-backups ({backups.length})
@@ -1937,7 +1999,7 @@ function AniListImport({ onClose, library, setLibrary, initialUsername = '', aut
 }
 
 /* ─── Seasonal browser ─────────────────────────────────────────────────── */
-function Seasonal({ navigate, importAnime, library, englishTitles }) {
+function Seasonal({ navigate, importAnime, addToList, library, englishTitles }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr]         = useState(null);
@@ -1959,7 +2021,7 @@ function Seasonal({ navigate, importAnime, library, englishTitles }) {
         </p>
       </div>
       {loading && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:16 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(320px, 1fr))', gap:16 }}>
           {Array.from({length:12}).map((_,i) => (
             <div key={i} style={{ borderRadius:12, background:'var(--surface)',
               boxShadow:'0 0 0 1px var(--line) inset', overflow:'hidden' }}>
@@ -1980,11 +2042,11 @@ function Seasonal({ navigate, importAnime, library, englishTitles }) {
         <div style={{ textAlign:'center', padding:'60px 0', color:'var(--text-3)' }}>No seasonal data available.</div>
       )}
       {!loading && !err && results.length > 0 && (
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:16 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(320px, 1fr))', gap:16 }}>
           {results.map(item => (
             <ResultCard key={item.api_id || item.title} item={item}
               inLibrary={have.has(item.title.toLowerCase())}
-              onImport={importAnime} englishTitles={englishTitles} />
+              onImport={importAnime} onAddToList={addToList} englishTitles={englishTitles} />
           ))}
         </div>
       )}
@@ -1993,7 +2055,8 @@ function Seasonal({ navigate, importAnime, library, englishTitles }) {
 }
 
 /* ─── Search / import screen ───────────────────────────────────────────── */
-function SeasonalPreviewModal({ item, inLibrary, onImport, onClose }) {
+function SeasonalPreviewModal({ item, inLibrary, onImport, onAddToList, onClose }) {
+  const [dropOpen, setDropOpen] = useState(false);
   return (
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} className="fade-in"
       style={{ position:'fixed', inset:0, background:'rgba(4,5,8,0.78)', backdropFilter:'blur(5px)',
@@ -2036,16 +2099,41 @@ function SeasonalPreviewModal({ item, inLibrary, onImport, onClose }) {
             ? <span className="btn btn-ghost" style={{opacity:.6, cursor:'default'}}>
                 <Ico name="check" size={16} sw={2.2} color="var(--accent-2)" /> In library
               </span>
-            : <button className="btn btn-primary" onClick={() => { onImport(item); onClose(); }}>
-                Import &amp; rate
-              </button>}
+            : <>
+                <div style={{ position:'relative' }}>
+                  <button className="btn btn-ghost" onClick={() => setDropOpen(v => !v)}>
+                    Add to list <Ico name="chevron" size={13} sw={2} style={{ marginLeft:2, transform: dropOpen ? 'rotate(270deg)' : 'rotate(90deg)', transition:'transform .15s' }} />
+                  </button>
+                  {dropOpen && (
+                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', right:0,
+                      background:'var(--surface-2)', borderRadius:10,
+                      boxShadow:'0 0 0 1px var(--line-2) inset, 0 12px 32px rgba(0,0,0,0.5)',
+                      padding:'4px', zIndex:10, minWidth:160 }}>
+                      {[['completed','Completed'],['watching','Watching'],['rewatching','Rewatching'],['planning','Planning'],['paused','Paused'],['dropped','Dropped']].map(([key, label]) => (
+                        <button key={key} onClick={() => { onAddToList(item, key); onClose(); }}
+                          style={{ display:'block', width:'100%', textAlign:'left', padding:'8px 14px',
+                            borderRadius:7, border:'none', cursor:'pointer', fontFamily:'inherit',
+                            fontSize:13, fontWeight:600, color:'var(--text-2)', background:'transparent',
+                            transition:'background .1s' }}
+                          onMouseEnter={e => e.currentTarget.style.background='var(--hover)'}
+                          onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button className="btn btn-primary" onClick={() => { onImport(item); onClose(); }}>
+                  Import &amp; rate
+                </button>
+              </>}
         </div>
       </div>
     </div>
   );
 }
 
-function ResultCard({ item, inLibrary, onImport, englishTitles }) {
+function ResultCard({ item, inLibrary, onImport, onAddToList, englishTitles }) {
   const [hover, setHover] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   return (
@@ -2079,7 +2167,7 @@ function ResultCard({ item, inLibrary, onImport, englishTitles }) {
       </div>
       {showPreview && (
         <SeasonalPreviewModal item={item} inLibrary={inLibrary}
-          onImport={onImport} onClose={() => setShowPreview(false)} />
+          onImport={onImport} onAddToList={onAddToList} onClose={() => setShowPreview(false)} />
       )}
     </>
   );
@@ -2137,10 +2225,8 @@ function ManualAdd({ onClose, onAdd }) {
   );
 }
 
-function Search({ library, navigate, importAnime, setLibrary, englishTitles }) {
+function Search({ library, navigate, importAnime, addToList, setLibrary, englishTitles }) {
   const [q, setQ]             = useState('');
-  const [manual, setManual]   = useState(false);
-  const [aniList, setAniList]   = useState(false);
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const have = new Set(library.map(a => a.title.toLowerCase()));
@@ -2184,24 +2270,16 @@ function Search({ library, navigate, importAnime, setLibrary, englishTitles }) {
         <span className="mono">
           {loading ? 'Searching…' : `${results.length} result${results.length!==1?'s':''}`}
         </span>
-        <div style={{ display:'flex', gap:8 }}>
-          <button className="btn-quiet" onClick={()=>setManual(true)} style={{fontSize:12.5}}>Can&rsquo;t find it? Add manually</button>
-          <button className="btn-quiet" onClick={()=>setAniList(true)}
-            style={{ fontSize:12.5, display:'flex', alignItems:'center', gap:5 }}>
-            <Ico name="upload" size={13} /> Import from AniList
-          </button>
-        </div>
       </div>
 
       <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
         {results.map(item => (
           <ResultCard key={item.api_id || item.title} item={item}
-            inLibrary={have.has(item.title.toLowerCase())} onImport={importAnime} englishTitles={englishTitles} />
+            inLibrary={have.has(item.title.toLowerCase())} onImport={importAnime} onAddToList={addToList} englishTitles={englishTitles} />
         ))}
         {!loading && q.trim() && results.length===0 && (
           <div style={{ textAlign:'center', padding:'40px 0', color:'var(--text-3)' }}>
-            No matches found.{' '}
-            <button className="btn-quiet" onClick={()=>setManual(true)} style={{color:'var(--accent-2)'}}>Add it manually &rarr;</button>
+            No matches found.
           </div>
         )}
         {!q.trim() && (
@@ -2210,9 +2288,6 @@ function Search({ library, navigate, importAnime, setLibrary, englishTitles }) {
           </div>
         )}
       </div>
-      {manual && <ManualAdd onClose={()=>setManual(false)}
-        onAdd={(item) => { setManual(false); importAnime(item); }} />}
-      {aniList && <AniListImport onClose={()=>setAniList(false)} library={library} setLibrary={setLibrary} />}
     </div>
   );
 }
@@ -2275,6 +2350,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
     return init;
   });
   const [broaden, setBroaden] = useState(false);
+  const [status, setStatus]   = useState(anime.status || 'completed');
 
   const crit  = CRITERIA[step];
   const value = scores[crit.key];
@@ -2301,7 +2377,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
   const runningOverall = overall(scores);
   const finish         = async () => {
     setSaving(true); setSaveErr(null);
-    try { await saveRating(anime, { ...scores }); }
+    try { await saveRating(anime, { ...scores }, status); }
     catch { setSaving(false); setSaveErr('Save failed — check the server and try again.'); }
   };
 
@@ -2392,7 +2468,22 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
               : (nearestAbove && <div style={{color:'var(--text-2)'}}>Your lowest {crit.label.toLowerCase()} so far.</div>)}
           </div>
 
-          <div style={{ marginTop:'auto', paddingTop:22, display:'flex', gap:10 }}>
+          <div style={{ marginTop:'auto', paddingTop:16 }}>
+            <div style={{ fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--text-4)', marginBottom:8 }}>Status</div>
+            <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
+              {[['completed','Completed'],['watching','Watching'],['rewatching','Rewatching'],['planning','Planning'],['paused','Paused'],['dropped','Dropped']].map(([key,label]) => (
+                <button key={key} onClick={()=>setStatus(key)}
+                  style={{ padding:'5px 11px', borderRadius:7, border:'none', cursor:'pointer', fontFamily:'inherit',
+                    fontSize:12, fontWeight:600, transition:'all .12s',
+                    background: status===key ? 'var(--accent)' : 'var(--raised)',
+                    color: status===key ? '#fff' : 'var(--text-3)',
+                    boxShadow: status===key ? 'none' : '0 0 0 1px var(--line) inset' }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{ paddingTop:14, display:'flex', gap:10 }}>
             {step>0 && <button className="btn btn-ghost" onClick={()=>setStep(step-1)}><Ico name="back" size={16} /> Back</button>}
             {!done
               ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>setStep(step+1)}>
@@ -3171,7 +3262,7 @@ const normaliseStatus = (s) => {
 
 const FMT_ORDER = ['TV','Movie','OVA','ONA','TV Short','Special'];
 
-function ListSection({ status, label, color, items, navigate, englishTitles, onEpisodeUpdate, epErrors }) {
+function ListSection({ status, label, color, items, navigate, englishTitles, onEpisodeUpdate, epErrors, rankView='list' }) {
   const [open, setOpen] = useState(true);
   const [sortByFmt, setSortByFmt] = useState(false);
   if (items.length === 0) return null;
@@ -3306,17 +3397,26 @@ function ListSection({ status, label, color, items, navigate, englishTitles, onE
         </span>
       </button>
       {open && (
-        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: rankView==='list' ? '1fr' : rankView==='card' ? 'repeat(3, 1fr)' : 'repeat(6, 1fr)',
+          gap: rankView==='list' ? 6 : 16 }}>
           {fmtGroups ? fmtGroups.map(({ fmt, items: grpItems }) => (
             <React.Fragment key={fmt || '__none__'}>
-              <div style={{ fontSize:10.5, fontWeight:700, textTransform:'uppercase',
+              <div style={{ gridColumn:'1 / -1', fontSize:10.5, fontWeight:700, textTransform:'uppercase',
                 letterSpacing:'0.07em', color:'var(--text-4)', padding:'6px 2px 2px',
                 marginTop:4 }}>
                 {fmt || 'Unknown'} <span style={{ fontFamily:'var(--mono)', opacity:0.6 }}>{grpItems.length}</span>
               </div>
-              {grpItems.map(anime => <AnimeRow key={anime.id} anime={anime} />)}
+              {grpItems.map(anime => rankView === 'list'
+                ? <AnimeRow key={anime.id} anime={anime} />
+                : <RankCard key={anime.id} anime={anime} onOpen={()=>navigate({name:'detail',animeId:anime.id})} englishTitles={englishTitles} variant={rankView} />
+              )}
             </React.Fragment>
-          )) : items.map(anime => <AnimeRow key={anime.id} anime={anime} />)}
+          )) : items.map(anime => rankView === 'list'
+            ? <AnimeRow key={anime.id} anime={anime} />
+            : <RankCard key={anime.id} anime={anime} onOpen={()=>navigate({name:'detail',animeId:anime.id})} englishTitles={englishTitles} variant={rankView} />
+          )}
         </div>
       )}
     </div>
@@ -3391,10 +3491,36 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
 
   return (
     <div style={{ padding:'30px 38px 60px', position:'relative', zIndex:1 }}>
-      <h1 style={{ margin:'0 0 6px', fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Lists</h1>
-      <p style={{ margin:'0 0 20px', color:'var(--text-3)', fontSize:13.5 }}>
-        <span className="mono" style={{color:'var(--text-2)'}}>{total}</span> titles across all lists
-      </p>
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:20 }}>
+        <div>
+          <h1 style={{ margin:'0 0 6px', fontSize:30, fontWeight:800, letterSpacing:'-0.02em' }}>Lists</h1>
+          <p style={{ margin:0, color:'var(--text-3)', fontSize:13.5 }}>
+            <span className="mono" style={{color:'var(--text-2)'}}>{total}</span> titles across all lists
+          </p>
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
+            background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
+            {[
+              { key:'list', icon:'viewList', title:'List' },
+              { key:'card', icon:'viewCard', title:'Cards' },
+              { key:'grid', icon:'viewGrid', title:'Grid' },
+            ].map(({ key, icon, title }) => (
+              <button key={key} title={title} onClick={()=>setRankView(key)}
+                style={{ padding:'5px 8px', borderRadius:7, border:'none', cursor:'pointer',
+                  background: rankView===key ? 'var(--raised)' : 'transparent',
+                  color: rankView===key ? 'var(--accent-2)' : 'var(--text-3)',
+                  boxShadow: rankView===key ? '0 0 0 1px var(--line) inset' : 'none',
+                  transition:'all .12s ease', display:'flex', alignItems:'center' }}>
+                <Ico name={icon} size={15} sw={1.6} />
+              </button>
+            ))}
+          </div>
+          <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
+            <Ico name="add" size={17} sw={2.2} /> Add anime
+          </button>
+        </div>
+      </div>
       {modeToggle}
       {total === 0 && (
         <div style={{ color:'var(--text-3)', textAlign:'center', paddingTop:60 }}>
@@ -3404,7 +3530,7 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
       {LIST_STATUSES.map(({ key, label, color }) => (
         <ListSection key={key} status={key} label={label} color={color}
           items={grouped[key] || []} navigate={navigate} englishTitles={englishTitles}
-          onEpisodeUpdate={handleEpisodeUpdate} epErrors={epErrors} />
+          onEpisodeUpdate={handleEpisodeUpdate} epErrors={epErrors} rankView={rankView} />
       ))}
     </div>
   );
@@ -3498,7 +3624,22 @@ function App() {
   const navigate = (v) => { setView(v); document.querySelector('.mar-content')?.scrollTo(0,0); };
   const importAnime = (item) => navigate({ name:'rate', draft:{ ...item, id:null, rating:null } });
 
-  const saveRating = async (anime, scores) => {
+  const addToList = async (item, status) => {
+    const { id } = await fetch('/anime', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_id: item.api_id, title: item.title, title_ro: item.title_ro, cover_url: item.cover_url,
+        genres: item.genres, year: item.year, season: item.season,
+        episodes: item.episodes, format: item.format, synopsis: item.synopsis, status,
+      }),
+    }).then(r => r.json());
+    setLibrary(lib => {
+      if (lib.some(a => a.id === id)) return lib;
+      return [...lib, { ...item, id, rating: null, status }];
+    });
+  };
+
+  const saveRating = async (anime, scores, status = 'completed') => {
     const rating = { ...scores, overall: overall(scores), updated_at: new Date().toISOString().slice(0,10) };
     if (anime.id != null) {
       await fetch(`/anime/${anime.id}/rating`, {
@@ -3514,13 +3655,14 @@ function App() {
           api_id: anime.api_id, title: anime.title, title_ro: anime.title_ro, cover_url: anime.cover_url,
           genres: anime.genres, year: anime.year, season: anime.season,
           episodes: anime.episodes, format: anime.format, synopsis: anime.synopsis,
+          status,
         }),
       }).then(r => r.json());
       await fetch(`/anime/${id}/rating`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(scores),
       });
-      setLibrary(lib => [...lib, { ...anime, id, rating }]);
+      setLibrary(lib => [...lib, { ...anime, id, rating, status }]);
       navigate({ name:'detail', animeId: id });
     }
   };
@@ -3570,7 +3712,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
   if (view.name==='rankings') {
     screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' />;
   } else if (view.name==='search') {
-    screen = <Search library={library} navigate={navigate} importAnime={importAnime} setLibrary={setLibrary} englishTitles={et} />;
+    screen = <Search library={library} navigate={navigate} importAnime={importAnime} addToList={addToList} setLibrary={setLibrary} englishTitles={et} />;
   } else if (view.name==='rate') {
     const anime = view.draft || animeFor(view.animeId);
     screen = anime ? <RatingFlow anime={anime} library={library} navigate={navigate}
@@ -3583,7 +3725,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;
   } else if (view.name==='seasonal') {
-    screen = <Seasonal navigate={navigate} importAnime={importAnime} library={library} englishTitles={et} />;
+    screen = <Seasonal navigate={navigate} importAnime={importAnime} addToList={addToList} library={library} englishTitles={et} />;
   } else if (view.name==='lists') {
     screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} />;
   }

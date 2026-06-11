@@ -533,7 +533,7 @@ def _auto_backup() -> None:
 def _pull_anilist_library() -> dict:
     token = _get_setting("anilist_token")
     if not token:
-        return {"added": 0, "updated": 0}
+        return {"added": 0, "updated": 0, "deleted": 0}
 
     user_id_str = _get_setting("anilist_user_id")
     if not user_id_str:
@@ -549,13 +549,13 @@ def _pull_anilist_library() -> dict:
             uid = viewer.get("id")
             uname = viewer.get("name", "")
             if not uid:
-                return {"added": 0, "updated": 0}
+                return {"added": 0, "updated": 0, "deleted": 0}
             user_id_str = str(uid)
             _set_setting("anilist_user_id", user_id_str)
             if uname and not _get_setting("anilist_username"):
                 _set_setting("anilist_username", uname)
         except Exception:
-            return {"added": 0, "updated": 0}
+            return {"added": 0, "updated": 0, "deleted": 0}
 
     query = """
     query($userId:Int){
@@ -583,25 +583,28 @@ def _pull_anilist_library() -> dict:
             timeout=30.0,
         )
         if not resp.is_success:
-            return {"added": 0, "updated": 0}
+            return {"added": 0, "updated": 0, "deleted": 0}
         raw_entries = [
             e
             for lst in (resp.json().get("data", {}).get("MediaListCollection") or {}).get("lists", [])
             for e in lst.get("entries", [])
         ]
     except Exception:
-        return {"added": 0, "updated": 0}
+        return {"added": 0, "updated": 0, "deleted": 0}
 
     scores = [e["score"] for e in raw_entries if e.get("score", 0) > 0]
     use100 = any(s > 10 for s in scores)
 
-    added = updated = 0
+    added = updated = deleted = 0
+    seen_al_ids: set[str] = set()
     today = date.today().isoformat()
     with get_conn() as conn:
         for e in raw_entries:
             media = e.get("media") or {}
             mal_id = media.get("idMal")
             al_id  = media.get("id")
+            if al_id:
+                seen_al_ids.add(str(al_id))
             titles = media.get("title") or {}
             title  = titles.get("english") or titles.get("romaji") or titles.get("native") or ""
             if not title:
@@ -711,7 +714,15 @@ def _pull_anilist_library() -> dict:
                     )
                 added += 1
 
-    return {"added": added, "updated": updated}
+        linked = conn.execute(
+            "SELECT id, anilist_id FROM anime WHERE anilist_id IS NOT NULL AND anilist_id != ''"
+        ).fetchall()
+        for row in linked:
+            if row["anilist_id"] not in seen_al_ids:
+                conn.execute("DELETE FROM anime WHERE id=?", (row["id"],))
+                deleted += 1
+
+    return {"added": added, "updated": updated, "deleted": deleted}
 
 
 @app.post("/anilist/pull")
@@ -722,15 +733,12 @@ def anilist_pull():
     return _pull_anilist_library()
 
 
-@app.post("/anilist/push")
-def anilist_push():
+def _push_anilist_library() -> dict:
     token = _get_setting("anilist_token")
     if not token:
-        raise HTTPException(status_code=400, detail="Not connected to AniList")
+        return {"synced": 0, "skipped": 0, "errors": 0}
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT a.id, a.anilist_id FROM anime a INNER JOIN rating r ON a.id = r.anime_id"
-        ).fetchall()
+        rows = conn.execute("SELECT id, anilist_id FROM anime").fetchall()
     synced = skipped = errors = 0
     for row in rows:
         if not row["anilist_id"]:
@@ -745,6 +753,13 @@ def anilist_push():
         time.sleep(0.4)
     _set_setting("anilist_last_push", date.today().isoformat())
     return {"synced": synced, "skipped": skipped, "errors": errors}
+
+
+@app.post("/anilist/push")
+def anilist_push():
+    if not _get_setting("anilist_token"):
+        raise HTTPException(status_code=400, detail="Not connected to AniList")
+    return _push_anilist_library()
 
 
 @app.get("/backups")
@@ -795,17 +810,18 @@ def search(q: str = Query("", description="Title search query")):
 
 
 @app.post("/anime", status_code=201)
-def import_anime(body: AnimeCreate):
+def import_anime(body: AnimeCreate, bg: BackgroundTasks):
     with get_conn() as conn:
         if body.api_id:
             existing = conn.execute(
                 "SELECT id FROM anime WHERE api_id=?", (body.api_id,)
             ).fetchone()
             if existing:
+                bg.add_task(_anilist_sync, existing["id"])
                 return {"id": existing["id"]}
         cur = conn.execute(
-            "INSERT INTO anime (api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO anime (api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 body.api_id,
                 body.title,
@@ -818,9 +834,11 @@ def import_anime(body: AnimeCreate):
                 body.format,
                 body.synopsis,
                 body.mal_score,
+                body.status or "completed",
             ),
         )
-        return {"id": cur.lastrowid}
+    bg.add_task(_anilist_sync, cur.lastrowid)
+    return {"id": cur.lastrowid}
 
 
 @app.put("/anime/{anime_id}/rating")
@@ -1115,7 +1133,7 @@ def backup():
     return {"version": 1, "entries": entries}
 
 
-@app.post("/restore", status_code=204)
+@app.post("/restore")
 def restore(body: dict):
     _auto_backup()
     entries = body.get("entries", [])
@@ -1149,6 +1167,8 @@ def restore(body: dict):
                         e.get("updated_at") or updated_at,
                     ),
                 )
+    sync = _push_anilist_library() if _get_setting("anilist_token") else None
+    return {"restored": len(entries), "sync": sync}
 
 
 @app.get("/seasonal")

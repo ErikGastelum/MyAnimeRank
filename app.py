@@ -49,6 +49,19 @@ class WindowApi:
     def __init__(self):
         self._win = None
 
+    def save_file(self, filename: str, content: str) -> dict:
+        import pathlib, base64
+        downloads = pathlib.Path.home() / "Downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        dest = downloads / filename
+        # content is base64-encoded so binary files (xml, json) both work
+        try:
+            data = base64.b64decode(content)
+        except Exception:
+            data = content.encode("utf-8")
+        dest.write_bytes(data)
+        return {"path": str(dest)}
+
     def close(self):
         if self._win:
             self._win.destroy()
