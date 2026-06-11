@@ -34,6 +34,9 @@ hiddenimports += [
     'h11',
     'multipart',
     'multipart.multipart',
+    'httptools',
+    'uvicorn.protocols.http.httptools_impl',
+    '_secrets',
 ]
 
 a = Analysis(
@@ -61,7 +64,7 @@ exe = EXE(
     name='MyAnimeRank',
     debug=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

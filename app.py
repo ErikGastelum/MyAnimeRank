@@ -77,27 +77,38 @@ class WindowApi:
 
 if __name__ == "__main__":
     import multiprocessing
+    import traceback
     multiprocessing.freeze_support()
-    port = _PORT
-    if not _port_available(port):
-        raise SystemExit(
-            f"Port {port} is already in use. "
-            f"Set MAR_PORT=<number> to use a different port, "
-            f"then update your AniList app's redirect URI to http://localhost:<number>/anilist/callback"
+
+    try:
+        port = _PORT
+        if not _port_available(port):
+            raise SystemExit(
+                f"Port {port} is already in use. "
+                f"Set MAR_PORT=<number> to use a different port, "
+                f"then update your AniList app's redirect URI to http://localhost:<number>/anilist/callback"
+            )
+        server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
+        server_thread.start()
+        _wait_for_server(port)
+        api = WindowApi()
+        win = webview.create_window(
+            "MyAnimeRank",
+            f"http://{_HOST}:{port}",
+            width=1400,
+            height=900,
+            min_size=(900, 600),
+            frameless=True,
+            easy_drag=False,
+            js_api=api,
         )
-    server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
-    server_thread.start()
-    _wait_for_server(port)
-    api = WindowApi()
-    win = webview.create_window(
-        "MyAnimeRank",
-        f"http://{_HOST}:{port}",
-        width=1400,
-        height=900,
-        min_size=(900, 600),
-        frameless=True,
-        easy_drag=False,
-        js_api=api,
-    )
-    api._win = win
-    webview.start()
+        api._win = win
+        webview.start()
+    except SystemExit:
+        raise
+    except Exception:
+        import pathlib
+        log_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "crash.log").write_text(traceback.format_exc())
+        raise
