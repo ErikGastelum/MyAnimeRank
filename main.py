@@ -250,7 +250,7 @@ def _fetch_and_cache_viewer(token: str) -> None:
         _log.exception("Failed to refresh AniList Viewer profile")
 
 
-def _anilist_sync(anime_id: int) -> None:
+def _anilist_sync(anime_id: int, _retry: bool = False) -> None:
     token = _get_setting("anilist_token")
     if not token:
         return
@@ -290,11 +290,6 @@ def _anilist_sync(anime_id: int) -> None:
             categories = json.loads(_get_setting("anilist_adv_scoring") or "[]")
             if categories:
                 variables["advancedScores"] = [_match_adv_score(cat, row) for cat in categories]
-            else:
-                variables["advancedScores"] = [
-                    float(row["story"]), float(row["characters"]),
-                    float(row["animation"]), float(row["audio"]), float(row["enjoyment"]),
-                ]
 
     mutation = (
         "mutation($mediaId:Int,$score:Float,$status:MediaListStatus,$advancedScores:[Float],$progress:Int,$repeat:Int){"
@@ -302,7 +297,7 @@ def _anilist_sync(anime_id: int) -> None:
         "{id score advancedScores progress repeat}}"
     )
     try:
-        httpx.post(
+        resp = httpx.post(
             "https://graphql.anilist.co",
             json={"query": mutation, "variables": variables},
             headers={
@@ -311,13 +306,18 @@ def _anilist_sync(anime_id: int) -> None:
                 "Accept": "application/json",
             },
             timeout=10.0,
-        ).raise_for_status()
+        )
+        if not resp.is_success:
+            if resp.status_code == 400 and not _retry:
+                # Stale advancedScores settings (user changed categories on AniList) — refresh and retry once.
+                _fetch_and_cache_viewer(token)
+                _anilist_sync(anime_id, _retry=True)
+                return
+            _set_setting("anilist_sync_error", "token_expired" if resp.status_code == 401 else f"http_{resp.status_code}")
+            _log.error("AniList sync failed for anime_id=%s (HTTP %s): %s", anime_id, resp.status_code, resp.text[:500])
+            return
         _set_setting("anilist_stats_fetched_at", "0")
         _set_setting("anilist_sync_error", None)
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        _set_setting("anilist_sync_error", "token_expired" if code == 401 else f"http_{code}")
-        _log.exception("AniList sync failed for anime_id=%s (HTTP %s)", anime_id, code)
     except Exception:
         _set_setting("anilist_sync_error", "network_error")
         _log.exception("AniList sync failed for anime_id=%s", anime_id)
