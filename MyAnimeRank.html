@@ -3691,17 +3691,6 @@ const animeFor  = (id) => library.find(a => a.id===id);
               {backupDaysSince === null ? 'Never downloaded' : backupDaysSince === 0 ? 'Downloaded today' : `${backupDaysSince}d ago`}
             </div>
           </div>
-          {ratedCount > 0 && (
-            <button onClick={() => setShowDeleteLib(true)}
-              style={{ width:'100%', padding:'8px 12px', borderRadius:9, border:'none', cursor:'pointer',
-                background:'rgba(248,113,113,0.07)', color:'var(--text-4)', fontWeight:600, fontSize:12,
-                fontFamily:'inherit', boxShadow:'0 0 0 1px rgba(248,113,113,0.18) inset',
-                transition:'all .14s ease', textAlign:'center' }}
-              onMouseEnter={e => { e.target.style.background='rgba(248,113,113,0.14)'; e.target.style.color='#f87171'; }}
-              onMouseLeave={e => { e.target.style.background='rgba(248,113,113,0.07)'; e.target.style.color='var(--text-4)'; }}>
-              Delete library
-            </button>
-          )}
         </div>
       </nav>
       <main className="mar-content">
