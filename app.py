@@ -107,8 +107,17 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception:
+        import ctypes
         import pathlib
+        tb = traceback.format_exc()
         log_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank"
         log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "crash.log").write_text(traceback.format_exc(), encoding="utf-8")
+        log_path = log_dir / "crash.log"
+        log_path.write_text(tb, encoding="utf-8")
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"MyAnimeRank failed to start.\n\n{tb[:800]}\n\nFull log saved to:\n{log_path}",
+            "MyAnimeRank — Startup Error",
+            0x10,  # MB_ICONERROR
+        )
         raise

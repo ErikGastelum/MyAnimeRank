@@ -38,23 +38,18 @@ jobs:
       - name: Build executable
         run: pyinstaller MyAnimeRank.spec
 
-      - name: Package for distribution
-        shell: pwsh
-        run: Compress-Archive -Path dist/MyAnimeRank -DestinationPath dist/MyAnimeRank-windows.zip
-
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MyAnimeRank-windows.zip
+          files: dist/MyAnimeRank.exe
           body: |
             ## MyAnimeRank ${{ github.ref_name }}
 
             A local-first desktop app for ranking anime through anchored relative scoring.
 
             ### Install
-            1. Download **MyAnimeRank-windows.zip** below
-            2. Extract the ZIP anywhere (e.g. `C:\MyAnimeRank\`)
-            3. Run **MyAnimeRank.exe** inside the extracted folder — no installation needed
+            1. Download **MyAnimeRank.exe** below
+            2. Double-click to run — no installation needed
 
             > **Requires Windows 10 or 11** (Edge WebView2 is pre-installed on both)
 

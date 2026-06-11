@@ -54,13 +54,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data)
 
-# One-directory mode: exe + DLLs all in dist/MyAnimeRank/
-# DLLs sit beside the exe so Windows DLL search finds them without temp-dir tricks.
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    [],
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
     name='MyAnimeRank',
     debug=False,
@@ -69,14 +68,4 @@ exe = EXE(
     upx_exclude=[],
     console=False,
     icon=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    name='MyAnimeRank',
 )
