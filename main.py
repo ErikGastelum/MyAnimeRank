@@ -1622,7 +1622,7 @@ def delete_friend(friend_id: int):
 
 
 _FOLLOWING_QUERY = """
-query($userId:Int,$page:Int){
+query($userId:Int!,$page:Int){
   Page(page:$page,perPage:50){
     pageInfo{ hasNextPage }
     following(userId:$userId){
