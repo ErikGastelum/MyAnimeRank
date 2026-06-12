@@ -45,7 +45,7 @@ _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
 _SORT_COLS = {c: f"r.{c}" for c in _VALID_CRITERIA}
 _SORT_COLS["overall"] = "r.overall"
 
-__version__ = "2.1.2-beta"
+__version__ = "2.1.3-beta"
 
 ANILIST_CLIENT_ID = 43290
 try:
