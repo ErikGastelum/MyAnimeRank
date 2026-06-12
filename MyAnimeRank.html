@@ -540,8 +540,7 @@ function DiscoverPanelCard({ item, inLibrary, onImport }) {
   );
 }
 
-function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime, headerSlot }) {
-  const [q, setQ]             = useState('');
+function Rankings({ library, navigate, englishTitles, rankView, setRankView, importAnime, headerSlot, q='', setQ }) {
   const [genre, setGenre]     = useState('All');
   const [fmtFilter, setFmt]   = useState('All');
   const [season, setSeason]   = useState('All');
@@ -649,7 +648,7 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
           boxShadow:'0 0 0 1px var(--line) inset', marginBottom:20 }}>
           <div style={{ display:'flex', alignItems:'center', gap:9, flex:1, minWidth:200 }}>
             <Ico name="search" size={16} color="var(--text-3)" />
-            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Filter your library…"
+            <input value={q} onChange={e=>setQ && setQ(e.target.value)} placeholder="Filter your library…"
               style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontSize:14 }} />
           </div>
           <div style={{ width:1, height:22, background:'var(--line)' }} />
@@ -2300,6 +2299,57 @@ function Search({ library, navigate, importAnime, addToList, setLibrary, english
   );
 }
 
+/* ─── Rerate whole list ────────────────────────────────────────────────── */
+function Rerate({ library, navigate, saveRating, setAnchorScore, englishTitles }) {
+  const queue = useMemo(
+    () => library.filter(a => a.rating).sort((a,b) => a.title.localeCompare(b.title)),
+    [],
+  );
+  const [cursor, setCursor] = useState(0);
+
+  if (queue.length === 0) {
+    return (
+      <div style={{ padding:'80px 38px', textAlign:'center', color:'var(--text-3)' }}>
+        <p style={{ marginBottom:20 }}>No rated anime to re-rate.</p>
+        <button className="btn btn-ghost" onClick={()=>navigate({name:'lists'})}>Back to Lists</button>
+      </div>
+    );
+  }
+
+  if (cursor >= queue.length) {
+    return (
+      <div style={{ padding:'80px 38px', textAlign:'center' }}>
+        <div style={{ fontSize:26, fontWeight:800, marginBottom:12 }}>All done!</div>
+        <p style={{ color:'var(--text-3)', marginBottom:24 }}>You re-rated all {queue.length} anime.</p>
+        <button className="btn btn-primary" onClick={()=>navigate({name:'lists'})}>Back to Lists</button>
+      </div>
+    );
+  }
+
+  const anime = library.find(a => a.id === queue[cursor].id) || queue[cursor];
+  const advance = () => setCursor(c => c + 1);
+
+  const rerateRating = async (an, scores, status) => {
+    await saveRating(an, scores, status);
+    advance();
+  };
+
+  return (
+    <RatingFlow
+      key={anime.id}
+      anime={anime}
+      library={library}
+      navigate={(t) => { if (t.name==='detail') advance(); else navigate(t); }}
+      saveRating={rerateRating}
+      setAnchorScore={setAnchorScore}
+      englishTitles={englishTitles}
+      onSkip={advance}
+      backTarget={{name:'lists'}}
+      rerateProgress={{ current: cursor + 1, total: queue.length }}
+    />
+  );
+}
+
 /* ─── Rating flow ──────────────────────────────────────────────────────── */
 function CompCard({ anime, critKey, setAnchorScore, englishTitles }) {
   const [editing, setEditing] = useState(false);
@@ -2323,8 +2373,8 @@ function CompCard({ anime, critKey, setAnchorScore, englishTitles }) {
       </div>
       {editing && (
         <div className="fade-in" style={{marginTop:4}}>
-          <input className="mar-slider mar-slider-sm" type="range" min={10} max={100} step={1}
-            value={Math.round(v*10)}
+          <input className="mar-slider mar-slider-sm" type="range" min={10} max={100} step={5}
+            value={v*10}
             onChange={e=>setAnchorScore(anime.id, critKey, parseInt(e.target.value)/10)}
             style={{ '--fill':`${((v-1)/9)*100}%`, '--thumb':scoreColor(v) }} />
         </div>
@@ -2350,7 +2400,7 @@ function Bucket({ dir, label, items, critKey, setAnchorScore, englishTitles }) {
   );
 }
 
-function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, englishTitles }) {
+function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, englishTitles, onSkip, backTarget, rerateProgress }) {
   const [step, setStep]   = useState(0);
   const [scores, setScores] = useState(() => {
     const init = {};
@@ -2393,7 +2443,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
     <div style={{ position:'relative', zIndex:1, height:'100%', display:'flex', flexDirection:'column' }}>
       {/* top bar */}
       <div style={{ display:'flex', alignItems:'center', gap:16, padding:'18px 36px', borderBottom:'1px solid var(--line)' }}>
-        <button className="btn-quiet" onClick={()=>navigate({name:'search'})} style={{padding:7}}><Ico name="back" size={18} /></button>
+        <button className="btn-quiet" onClick={()=>navigate(backTarget||{name:'search'})} style={{padding:7}}><Ico name="back" size={18} /></button>
         <Poster anime={anime} w={38} radius={7} />
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontWeight:700, fontSize:16.5, letterSpacing:'-0.01em' }}>{displayTitle(anime, englishTitles)}</div>
@@ -2401,6 +2451,11 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
             {anime.genres.join(' · ')} &middot; <span className="mono">{anime.year}</span>
           </div>
         </div>
+        {rerateProgress && (
+          <div style={{ fontFamily:'var(--mono)', fontSize:13, color:'var(--text-3)', fontWeight:600, whiteSpace:'nowrap' }}>
+            {rerateProgress.current} / {rerateProgress.total}
+          </div>
+        )}
         <div style={{ textAlign:'right' }}>
           <div style={{ fontSize:10, letterSpacing:'0.07em', textTransform:'uppercase', fontWeight:700, color:'var(--text-3)', marginBottom:2 }}>Overall so far</div>
           <div style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:21, color:scoreColor(runningOverall) }}>{runningOverall.toFixed(1)}</div>
@@ -2457,9 +2512,9 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
             </div>
           </div>
 
-          <input className="mar-slider" type="range" min={10} max={100} step={1}
+          <input className="mar-slider" type="range" min={10} max={100} step={5}
             style={{ marginTop:24, '--fill':`${((value-1)/9)*100}%`, '--thumb':scoreColor(value) }}
-            value={Math.round(value*10)} onChange={e=>setValue(parseInt(e.target.value)/10)} />
+            value={value*10} onChange={e=>setValue(parseInt(e.target.value)/10)} />
           <div style={{ display:'flex', justifyContent:'space-between', fontFamily:'var(--mono)', fontSize:11, color:'var(--text-4)', marginTop:8 }}>
             <span>1.0</span><span>5.0</span><span>10.0</span>
           </div>
@@ -2493,6 +2548,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
           </div>
           <div style={{ paddingTop:14, display:'flex', gap:10 }}>
             {step>0 && <button className="btn btn-ghost" onClick={()=>setStep(step-1)}><Ico name="back" size={16} /> Back</button>}
+            {onSkip && <button className="btn btn-ghost" onClick={onSkip}>Skip</button>}
             {!done
               ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>setStep(step+1)}>
                   Next: {CRITERIA[step+1].label} <Ico name="chevron" size={16} sw={2.2} /></button>
@@ -2796,7 +2852,7 @@ function CriterionBar({ label, ckey, value, rank, total }) {
   );
 }
 
-function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTitles }) {
+function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTitles, importAnime, addToList }) {
   const [confirm, setConfirm]       = useState(false);
   const [showEdit, setShowEdit]     = useState(false);
   const [showCompare, setShowCompare] = useState(false);
@@ -2804,6 +2860,16 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
   const [notesText, setNotesText]   = useState(anime.notes || '');
   const [notesEdit, setNotesEdit]   = useState(false);
   const [notesSaving, setNotesSaving] = useState(false);
+  const [seasons, setSeasons] = useState({ sequel: null, prequel: null });
+  const [seasonPreview, setSeasonPreview] = useState(null);
+  const [seasonAdding, setSeasonAdding] = useState(false);
+
+  useEffect(() => {
+    fetch(`/anime/${anime.id}/next-season`)
+      .then(r => r.json())
+      .then(d => { if (d.found) setSeasons({ sequel: d.sequel, prequel: d.prequel }); })
+      .catch(() => {});
+  }, [anime.id]);
   const rated = library.filter(a => a.rating);
   const ov    = overall(anime.rating);
 
@@ -2945,6 +3011,45 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
         </div>
         )}
 
+        {(seasons.prequel || seasons.sequel) && (
+          <div style={{ marginTop:28 }}>
+            <h2 style={{ margin:'0 0 14px', fontSize:14, fontWeight:800, letterSpacing:'0.06em',
+              textTransform:'uppercase', color:'var(--text-3)' }}>Series</h2>
+            <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
+              {[['prequel','Previous Season',seasons.prequel], ['sequel','Next Season',seasons.sequel]].map(([key, label, s]) => {
+                if (!s) return null;
+                const onClick = () => s.local_id
+                  ? navigate({name:'detail', animeId: s.local_id})
+                  : setSeasonPreview({ ...s, label });
+                return (
+                  <div key={key} onClick={onClick}
+                    style={{ width:120, cursor:'pointer', flexShrink:0 }}
+                    title={s.title}>
+                    <div style={{ position:'relative', borderRadius:10, overflow:'hidden',
+                      boxShadow:'0 4px 18px rgba(0,0,0,0.4)', transition:'transform .15s ease' }}
+                      onMouseEnter={e=>e.currentTarget.style.transform='scale(1.03)'}
+                      onMouseLeave={e=>e.currentTarget.style.transform=''}>
+                      {s.cover_url
+                        ? <img src={s.cover_url} alt={s.title}
+                            style={{ width:120, height:170, objectFit:'cover', display:'block' }} />
+                        : <div style={{ width:120, height:170, background:'var(--raised)',
+                            display:'grid', placeItems:'center', color:'var(--text-4)', fontSize:12 }}>
+                            No cover
+                          </div>
+                      }
+                    </div>
+                    <div style={{ marginTop:7, fontSize:11, fontWeight:700, letterSpacing:'0.05em',
+                      textTransform:'uppercase', color:'var(--accent)', marginBottom:3 }}>{label}</div>
+                    <div style={{ fontSize:12.5, fontWeight:600, color:'var(--text-2)',
+                      lineHeight:1.3, overflow:'hidden', display:'-webkit-box',
+                      WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>{s.title}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div style={{ marginTop:32 }}>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
             <h2 style={{ margin:0, fontSize:14, fontWeight:800, letterSpacing:'0.06em',
@@ -3017,6 +3122,76 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
       {showCompare && (
         <CompareModal anime={anime} library={library} englishTitles={englishTitles}
           onClose={() => setShowCompare(false)} />
+      )}
+      {seasonPreview && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.72)',
+          display:'flex', alignItems:'center', justifyContent:'center', zIndex:9000,
+          backdropFilter:'blur(4px)' }}
+          onClick={()=>setSeasonPreview(null)}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{ background:'var(--surface-2)', borderRadius:18, padding:'28px 28px 24px',
+              boxShadow:'var(--shadow)', display:'flex', gap:20, maxWidth:480, width:'90%',
+              boxShadow:'0 0 0 1px var(--line) inset, 0 30px 60px -12px rgba(0,0,0,0.8)' }}>
+            {seasonPreview.cover_url && (
+              <img src={seasonPreview.cover_url} alt={seasonPreview.title}
+                style={{ width:110, height:158, objectFit:'cover', borderRadius:10, flexShrink:0 }} />
+            )}
+            <div style={{ flex:1, minWidth:0, display:'flex', flexDirection:'column', gap:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em',
+                textTransform:'uppercase', color:'var(--accent)' }}>{seasonPreview.label}</div>
+              <div style={{ fontSize:18, fontWeight:800, letterSpacing:'-0.01em',
+                lineHeight:1.25, color:'var(--text)' }}>{seasonPreview.title}</div>
+              <div style={{ marginTop:'auto', display:'flex', flexDirection:'column', gap:8 }}>
+                <button className="btn btn-primary" disabled={seasonAdding}
+                  style={{ justifyContent:'center', opacity: seasonAdding ? 0.6 : 1 }}
+                  onClick={async () => {
+                    setSeasonAdding(true);
+                    const item = {
+                      title: seasonPreview.title, api_id: seasonPreview.mal_id ? String(seasonPreview.mal_id) : null,
+                      cover_url: seasonPreview.cover_url, genres: [], title_ro: null,
+                      year: null, season: null, episodes: null, format: null, synopsis: null,
+                    };
+                    if (seasonPreview.mal_id) {
+                      try {
+                        const d = await fetch(`/jikan/anime/${seasonPreview.mal_id}`).then(r=>r.json());
+                        Object.assign(item, d);
+                      } catch {}
+                    }
+                    importAnime(item);
+                    setSeasonPreview(null);
+                    setSeasonAdding(false);
+                  }}>
+                  <Ico name="star" size={16} sw={1.9} /> Rate it
+                </button>
+                <button className="btn btn-ghost" disabled={seasonAdding}
+                  style={{ justifyContent:'center', opacity: seasonAdding ? 0.6 : 1 }}
+                  onClick={async () => {
+                    setSeasonAdding(true);
+                    const item = {
+                      title: seasonPreview.title, api_id: seasonPreview.mal_id ? String(seasonPreview.mal_id) : null,
+                      cover_url: seasonPreview.cover_url, genres: [], title_ro: null,
+                      year: null, season: null, episodes: null, format: null, synopsis: null,
+                    };
+                    if (seasonPreview.mal_id) {
+                      try {
+                        const d = await fetch(`/jikan/anime/${seasonPreview.mal_id}`).then(r=>r.json());
+                        Object.assign(item, d);
+                      } catch {}
+                    }
+                    await addToList(item, 'planning');
+                    setSeasonPreview(null);
+                    setSeasonAdding(false);
+                  }}>
+                  <Ico name="add" size={16} sw={2.2} /> Add to Planning
+                </button>
+                <button className="btn btn-ghost" style={{ justifyContent:'center' }}
+                  onClick={()=>setSeasonPreview(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -3273,7 +3448,6 @@ const FMT_ORDER = ['TV','Movie','OVA','ONA','TV Short','Special'];
 function ListSection({ status, label, color, items, navigate, englishTitles, onEpisodeUpdate, epErrors, rankView='list' }) {
   const [open, setOpen] = useState(true);
   const [sortByFmt, setSortByFmt] = useState(false);
-  if (items.length === 0) return null;
 
   const isCompleted = status === 'completed';
 
@@ -3291,6 +3465,8 @@ function ListSection({ status, label, color, items, navigate, englishTitles, onE
     const noFmt = byFmt[''] ? [''] : [];
     return [...known, ...other, ...noFmt].map(f => ({ fmt: f, items: byFmt[f] }));
   }, [items, sortByFmt]);
+
+  if (items.length === 0) return null;
 
   const AnimeRow = ({ anime }) => {
     const ov = overall(anime.rating);
@@ -3433,6 +3609,7 @@ function ListSection({ status, label, color, items, navigate, englishTitles, onE
 
 function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRankView, importAnime, initialMode }) {
   const [listMode, setListMode] = useState(initialMode || 'status');
+  const [q, setQ] = useState('');
 
   const grouped = useMemo(() => {
     const map = {};
@@ -3444,6 +3621,18 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
     });
     return map;
   }, [library]);
+
+  const filteredGrouped = useMemo(() => {
+    const lq = q.trim().toLowerCase();
+    if (!lq) return grouped;
+    const out = {};
+    Object.entries(grouped).forEach(([k, arr]) => {
+      out[k] = arr.filter(a =>
+        a.title.toLowerCase().includes(lq) || (a.title_ro||'').toLowerCase().includes(lq)
+      );
+    });
+    return out;
+  }, [grouped, q]);
 
   const total = library.length;
 
@@ -3493,7 +3682,7 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
     return (
       <Rankings library={library} navigate={navigate} englishTitles={englishTitles}
         rankView={rankView} setRankView={setRankView} importAnime={importAnime}
-        headerSlot={modeToggle} />
+        headerSlot={modeToggle} q={q} setQ={setQ} />
     );
   }
 
@@ -3506,7 +3695,7 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
             <span className="mono" style={{color:'var(--text-2)'}}>{total}</span> titles across all lists
           </p>
         </div>
-        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
           <div style={{ display:'flex', gap:2, padding:'3px', borderRadius:10,
             background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
             {[
@@ -3524,12 +3713,25 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
               </button>
             ))}
           </div>
+          <button className="btn btn-ghost" onClick={()=>navigate({name:'rerate'})}
+            title="Re-rate every anime one by one">
+            <Ico name="star" size={16} sw={1.9} /> Re-rate all
+          </button>
           <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
             <Ico name="add" size={17} sw={2.2} /> Add anime
           </button>
         </div>
       </div>
       {modeToggle}
+      <div style={{ display:'flex', alignItems:'center', gap:9,
+        padding:'11px 16px', borderRadius:14, background:'var(--surface)',
+        boxShadow:'0 0 0 1px var(--line) inset', marginBottom:20, maxWidth:420 }}>
+        <Ico name="search" size={16} color="var(--text-3)" />
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Filter your library…"
+          style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontSize:14 }} />
+        {q && <button onClick={()=>setQ('')} style={{ background:'none', border:'none', cursor:'pointer',
+          color:'var(--text-3)', padding:0, display:'flex', alignItems:'center', fontSize:16 }}>×</button>}
+      </div>
       {total === 0 && (
         <div style={{ color:'var(--text-3)', textAlign:'center', paddingTop:60 }}>
           No anime in your library yet.
@@ -3537,7 +3739,7 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
       )}
       {LIST_STATUSES.map(({ key, label, color }) => (
         <ListSection key={key} status={key} label={label} color={color}
-          items={grouped[key] || []} navigate={navigate} englishTitles={englishTitles}
+          items={filteredGrouped[key] || []} navigate={navigate} englishTitles={englishTitles}
           onEpisodeUpdate={handleEpisodeUpdate} epErrors={epErrors} rankView={rankView} />
       ))}
     </div>
@@ -4327,6 +4529,9 @@ const animeFor  = (id) => library.find(a => a.id===id);
     screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' />;
   } else if (view.name==='search') {
     screen = <Search library={library} navigate={navigate} importAnime={importAnime} addToList={addToList} setLibrary={setLibrary} englishTitles={et} />;
+  } else if (view.name==='rerate') {
+    screen = <Rerate library={library} navigate={navigate} saveRating={saveRating}
+      setAnchorScore={setAnchorScore} englishTitles={et} />;
   } else if (view.name==='rate') {
     const anime = view.draft || animeFor(view.animeId);
     screen = anime ? <RatingFlow anime={anime} library={library} navigate={navigate}
@@ -4334,7 +4539,7 @@ const animeFor  = (id) => library.find(a => a.id===id);
   } else if (view.name==='detail') {
     const anime = animeFor(view.animeId);
     screen = anime
-      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} updateAnime={updateAnime} englishTitles={et} />
+      ? <Detail anime={anime} library={library} navigate={navigate} deleteAnime={deleteAnime} updateAnime={updateAnime} englishTitles={et} importAnime={importAnime} addToList={addToList} />
       : <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' />;
   } else if (view.name==='insights') {
     screen = <Insights library={library} />;

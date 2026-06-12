@@ -1093,6 +1093,59 @@ def delete_anime(anime_id: int):
         conn.execute("DELETE FROM anime WHERE id=?", (anime_id,))
 
 
+@app.get("/anime/{anime_id}/next-season")
+def anime_next_season(anime_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT anilist_id FROM anime WHERE id=?", (anime_id,)).fetchone()
+    if not row or not row["anilist_id"]:
+        return {"found": False}
+    try:
+        al_id = int(row["anilist_id"])
+    except (ValueError, TypeError):
+        return {"found": False}
+
+    query = """
+    query($id:Int){
+      Media(id:$id,type:ANIME){
+        relations{ edges{ relationType node{ id idMal title{english romaji} coverImage{large} } } }
+      }
+    }"""
+    try:
+        resp = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": {"id": al_id}},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        edges = (((resp.json().get("data") or {}).get("Media") or {}).get("relations") or {}).get("edges") or []
+    except Exception:
+        return {"found": False}
+
+    def _node_info(node):
+        if not node:
+            return None
+        titles = node.get("title") or {}
+        al_id  = node["id"]
+        with get_conn() as conn:
+            local = conn.execute("SELECT id FROM anime WHERE anilist_id=?", (str(al_id),)).fetchone()
+        return {
+            "anilist_id": al_id,
+            "mal_id":     node.get("idMal"),
+            "local_id":   local["id"] if local else None,
+            "title":      titles.get("english") or titles.get("romaji") or "",
+            "cover_url":  (node.get("coverImage") or {}).get("large") or None,
+        }
+
+    sequel  = next((e["node"] for e in edges if e.get("relationType") == "SEQUEL"),  None)
+    prequel = next((e["node"] for e in edges if e.get("relationType") == "PREQUEL"), None)
+
+    result = {"found": bool(sequel or prequel),
+              "sequel":  _node_info(sequel),
+              "prequel": _node_info(prequel)}
+    return result
+
+
 @app.delete("/library", status_code=204)
 def delete_library():
     with get_conn() as conn:
@@ -1613,6 +1666,7 @@ def sync_friends_from_anilist():
 
     added = already_existed = 0
     now = datetime.now().isoformat()
+    new_usernames: list[str] = []
     with get_conn() as conn:
         for u in following:
             uname = u.get("name")
@@ -1638,7 +1692,51 @@ def sync_friends_from_anilist():
                     " is_private, last_fetched, avatar_url, banner_url) VALUES (?,?,?,0,NULL,?,?)",
                     (uname, uid, score_fmt, avatar_url, banner_url),
                 )
+                new_usernames.append(uname)
                 added += 1
+
+    # Fetch anime entries for newly added friends (cap at 15 to respect rate limits)
+    for uname in new_usernames[:15]:
+        time.sleep(0.5)
+        try:
+            with get_conn() as conn:
+                friend_row = conn.execute(
+                    "SELECT id, score_system FROM friend WHERE anilist_username=?", (uname,)
+                ).fetchone()
+            if not friend_row:
+                continue
+            friend_id = friend_row["id"]
+            _, score_format, avatar_url, banner_url, raw_entries, is_private = _fetch_friend_list(uname)
+            if not raw_entries:
+                continue
+            fetch_now = datetime.now().isoformat()
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE friend SET is_private=?, last_fetched=?,"
+                    " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
+                    (1 if is_private else 0, fetch_now, avatar_url, banner_url, friend_id),
+                )
+                conn.execute("DELETE FROM friend_entry WHERE friend_id=?", (friend_id,))
+                for e in raw_entries:
+                    media = e.get("media") or {}
+                    al_id = media.get("id")
+                    if not al_id:
+                        continue
+                    raw_score = e.get("score") or 0
+                    norm = normalize_score(raw_score, score_format) if raw_score > 0 else None
+                    avg = media.get("averageScore")
+                    community_score = round(avg / 10.0, 1) if avg else None
+                    genres = json.dumps(media.get("genres") or [])
+                    adv_scores = json.dumps(e.get("advancedScores") or {})
+                    conn.execute(
+                        "INSERT OR REPLACE INTO friend_entry "
+                        "(friend_id, anilist_id, raw_score, normalized_score, status, progress, community_score, genres, adv_scores) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (friend_id, al_id, raw_score if raw_score > 0 else None, norm,
+                         e.get("status"), e.get("progress") or 0, community_score, genres, adv_scores),
+                    )
+        except Exception:
+            _log.exception("sync_friends: failed to fetch entries for %s", uname)
 
     return {"added": added, "already_existed": already_existed, "total": len(following)}
 
