@@ -1,4 +1,5 @@
 import os
+import pathlib
 import socket
 import threading
 import time
@@ -143,7 +144,9 @@ if __name__ == "__main__":
             js_api=api,
         )
         api._win = win
-        webview.start()
+        webview_data = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank" / "webview"
+        webview_data.mkdir(parents=True, exist_ok=True)
+        webview.start(storage_path=str(webview_data))
     except SystemExit:
         raise
     except Exception:
