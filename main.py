@@ -4,6 +4,7 @@ import os
 import json
 import re
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
@@ -45,7 +46,7 @@ _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
 _SORT_COLS = {c: f"r.{c}" for c in _VALID_CRITERIA}
 _SORT_COLS["overall"] = "r.overall"
 
-__version__ = "2.1.3-beta"
+__version__ = "2.2.0-beta"
 
 ANILIST_CLIENT_ID = 43290
 try:
@@ -253,6 +254,31 @@ def _fetch_and_cache_viewer(token: str) -> None:
             _set_setting("anilist_username", viewer["name"])
     except Exception:
         _log.exception("Failed to refresh AniList Viewer profile")
+
+
+# Deduplication for background syncs — prevents rapid-fire SaveMediaListEntry calls
+# that cause AniList to create duplicate list entries when the same anime is synced
+# twice before the first mutation completes on AniList's side.
+_sync_pending: set[int] = set()
+_sync_pending_lock = threading.Lock()
+
+
+def _queue_anilist_sync(bg: BackgroundTasks, anime_id: int) -> None:
+    """Queue a deferred sync for anime_id, skipping if one is already pending."""
+    with _sync_pending_lock:
+        if anime_id in _sync_pending:
+            return
+        _sync_pending.add(anime_id)
+    bg.add_task(_anilist_sync_deferred, anime_id)
+
+
+def _anilist_sync_deferred(anime_id: int) -> None:
+    """Wait briefly so rapid follow-up writes (e.g. import then rate) land in DB first,
+    then run a single sync with the freshest state."""
+    time.sleep(1.5)
+    with _sync_pending_lock:
+        _sync_pending.discard(anime_id)
+    _anilist_sync(anime_id)
 
 
 def _anilist_sync(anime_id: int, _retry: bool = False) -> None:
@@ -865,7 +891,7 @@ def import_anime(body: AnimeCreate, bg: BackgroundTasks):
                 "SELECT id FROM anime WHERE api_id=?", (body.api_id,)
             ).fetchone()
             if existing:
-                bg.add_task(_anilist_sync, existing["id"])
+                _queue_anilist_sync(bg, existing["id"])
                 return {"id": existing["id"]}
         cur = conn.execute(
             "INSERT INTO anime (api_id, title, title_ro, cover_url, genres, year, season, episodes, format, synopsis, mal_score, status) "
@@ -885,7 +911,7 @@ def import_anime(body: AnimeCreate, bg: BackgroundTasks):
                 body.status or "completed",
             ),
         )
-    bg.add_task(_anilist_sync, cur.lastrowid)
+    _queue_anilist_sync(bg, cur.lastrowid)
     return {"id": cur.lastrowid}
 
 
@@ -909,7 +935,7 @@ def set_rating(anime_id: int, body: RatingIn, bg: BackgroundTasks):
             (anime_id, body.story, body.characters, body.animation,
              body.audio, body.enjoyment, computed_overall, updated_at),
         )
-    bg.add_task(_anilist_sync, anime_id)
+    _queue_anilist_sync(bg, anime_id)
     return {"anime_id": anime_id, "overall": computed_overall}
 
 
@@ -1153,6 +1179,100 @@ def anime_next_season(anime_id: int):
     return result
 
 
+_SERIES_CHAIN_QUERY = """
+query($id:Int){
+  Media(id:$id,type:ANIME){
+    id idMal title{english romaji} coverImage{large}
+    relations{ edges{ relationType node{ id idMal title{english romaji} coverImage{large} } } }
+  }
+}"""
+
+
+@app.get("/anime/{anime_id}/series-chain")
+async def anime_series_chain(anime_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT anilist_id FROM anime WHERE id=?", (anime_id,)).fetchone()
+    if not row or not row["anilist_id"]:
+        return {"chain": []}
+    try:
+        start_al_id = int(row["anilist_id"])
+    except (ValueError, TypeError):
+        return {"chain": []}
+
+    async def _fetch_media(client: httpx.AsyncClient, al_id: int) -> dict | None:
+        try:
+            resp = await client.post(
+                "https://graphql.anilist.co",
+                json={"query": _SERIES_CHAIN_QUERY, "variables": {"id": al_id}},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return (resp.json().get("data") or {}).get("Media")
+        except Exception:
+            return None
+
+    # Walk prequels to find series start, then build chain forward.
+    # All AniList fetches share one AsyncClient; DB lookup is batched at the end.
+    raw_chain: list[dict] = []
+    visited: set[int] = set()
+    current_id = start_al_id
+
+    async with httpx.AsyncClient() as client:
+        for _ in range(20):
+            if current_id in visited:
+                break
+            visited.add(current_id)
+            media = await _fetch_media(client, current_id)
+            if not media:
+                break
+            edges = (media.get("relations") or {}).get("edges") or []
+            prequel_node = next((e["node"] for e in edges if e.get("relationType") == "PREQUEL"), None)
+            if not prequel_node or prequel_node["id"] in visited:
+                raw_chain = [media]
+                seen_in_chain: set[int] = {media["id"]}
+                for _ in range(19):
+                    sequel_node = next((e["node"] for e in edges if e.get("relationType") == "SEQUEL"), None)
+                    if not sequel_node or sequel_node["id"] in seen_in_chain:
+                        break
+                    seen_in_chain.add(sequel_node["id"])
+                    next_media = await _fetch_media(client, sequel_node["id"])
+                    if not next_media:
+                        raw_chain.append(sequel_node)
+                        break
+                    raw_chain.append(next_media)
+                    edges = (next_media.get("relations") or {}).get("edges") or []
+                break
+            current_id = prequel_node["id"]
+
+    if not raw_chain:
+        return {"chain": []}
+
+    # One batch query to resolve all anilist_ids → local ids
+    al_ids = [str(n["id"]) for n in raw_chain]
+    placeholders = ",".join("?" * len(al_ids))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, anilist_id FROM anime WHERE anilist_id IN ({placeholders})",
+            al_ids,
+        ).fetchall()
+    local_map: dict[int, int] = {int(r["anilist_id"]): r["id"] for r in rows}
+
+    def _node_to_entry(node: dict) -> dict:
+        titles = node.get("title") or {}
+        lid = local_map.get(node["id"])
+        return {
+            "anilist_id": node["id"],
+            "mal_id":     node.get("idMal"),
+            "local_id":   lid,
+            "in_library": lid is not None,
+            "title":      titles.get("english") or titles.get("romaji") or "",
+            "cover_url":  (node.get("coverImage") or {}).get("large") or None,
+        }
+
+    return {"chain": [_node_to_entry(n) for n in raw_chain]}
+
+
 @app.delete("/library", status_code=204)
 def delete_library():
     with get_conn() as conn:
@@ -1215,7 +1335,7 @@ def update_anime(anime_id: int, body: AnimeUpdate, bg: BackgroundTasks):
         conn.execute(f"UPDATE anime SET {cols} WHERE id=?", (*updates.values(), anime_id))
     changed = body.model_dump(exclude_none=True)
     if "status" in changed or "episodes_watched" in changed or "rewatch_count" in changed:
-        bg.add_task(_anilist_sync, anime_id)
+        _queue_anilist_sync(bg, anime_id)
 
 
 @app.get("/backup")

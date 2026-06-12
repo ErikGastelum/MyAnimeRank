@@ -546,8 +546,14 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
   const [season, setSeason]   = useState('All');
   const [sortKey, setSortKey]           = useState('overall');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [rerateOpen, setRerateOpen] = useState(false);
 
   const rated  = library.filter(a => a.rating);
+  const FMT_ORDER = ['TV','Movie','OVA','ONA','Special','Music'];
+  const rerateFmts = useMemo(() => {
+    const s = new Set(); rated.forEach(a => { if (a.format) s.add(a.format); });
+    return [...FMT_ORDER.filter(f => s.has(f)), ...[...s].filter(f => !FMT_ORDER.includes(f)).sort()];
+  }, [library]);
   const genres = useMemo(() => {
     const s = new Set(); rated.forEach(a => a.genres.forEach(g => s.add(g)));
     return ['All', ...[...s].sort()];
@@ -624,6 +630,41 @@ function Rankings({ library, navigate, englishTitles, rankView, setRankView, imp
                   <Ico name={icon} size={15} sw={1.6} />
                 </button>
               ))}
+            </div>
+            <div style={{ position:'relative' }}>
+              <button className="btn btn-ghost"
+                onClick={() => setRerateOpen(o => !o)}
+                title="Re-rate your library one by one">
+                <Ico name="star" size={16} sw={1.9} /> Re-rate All
+                <span style={{ fontSize:10, marginLeft:4, opacity:.6 }}>▾</span>
+              </button>
+              {rerateOpen && (
+                <>
+                  <div style={{ position:'fixed', inset:0, zIndex:99 }}
+                    onClick={() => setRerateOpen(false)} />
+                  <div style={{
+                    position:'absolute', top:'calc(100% + 6px)', right:0, zIndex:100,
+                    background:'var(--surface-2)', border:'1px solid var(--line-2)',
+                    borderRadius:10, padding:'4px 0', minWidth:150,
+                    boxShadow:'0 8px 28px rgba(0,0,0,0.55)',
+                  }}>
+                    {[{ label:'All', fmt: null }, ...rerateFmts.map(f => ({ label: f, fmt: f }))].map(({ label, fmt }) => (
+                      <button key={label}
+                        onClick={() => { setRerateOpen(false); navigate({ name:'rerate', format: fmt }); }}
+                        style={{
+                          display:'block', width:'100%', textAlign:'left',
+                          padding:'8px 14px', background:'none', border:'none',
+                          color:'var(--text)', fontSize:13.5, fontWeight:500,
+                          cursor:'pointer', borderRadius:0,
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background='var(--hover)'}
+                        onMouseLeave={e => e.currentTarget.style.background='none'}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
             <button className="btn btn-primary" onClick={()=>navigate({name:'search'})}>
               <Ico name="add" size={17} sw={2.2} /> Add anime
@@ -2317,18 +2358,171 @@ function Search({ library, navigate, importAnime, addToList, setLibrary, english
   );
 }
 
+/* ─── Rate Series ──────────────────────────────────────────────────────── */
+function RateSeries({ animeId, library, navigate, setAnchorScore, englishTitles, formatPool=false, updateAnime, setLibrary }) {
+  const [chain,   setChain]   = useState(null);  // null = loading
+  const [cursor,  setCursor]  = useState(0);
+  const [adding,  setAdding]  = useState(false);
+  const [addErr,  setAddErr]  = useState('');
+  const [rated,   setRated]   = useState(0);
+
+  useEffect(() => {
+    fetch(`/anime/${animeId}/series-chain`)
+      .then(r => r.json())
+      .then(d => setChain(d.chain || []))
+      .catch(() => setChain([]));
+  }, [animeId]);
+
+  if (chain === null) {
+    return (
+      <div style={{ padding:'80px 38px', textAlign:'center', color:'var(--text-3)' }}>
+        Loading series…
+      </div>
+    );
+  }
+
+  if (chain.length === 0) {
+    return (
+      <div style={{ padding:'80px 38px', textAlign:'center', color:'var(--text-3)' }}>
+        <p style={{ marginBottom:20 }}>No series data found for this anime.</p>
+        <button className="btn btn-ghost" onClick={()=>navigate({name:'detail',animeId})}>Back</button>
+      </div>
+    );
+  }
+
+  if (cursor >= chain.length) {
+    return (
+      <div style={{ padding:'80px 38px', textAlign:'center' }}>
+        <div style={{ fontSize:26, fontWeight:800, marginBottom:12 }}>Series complete!</div>
+        <p style={{ color:'var(--text-3)', marginBottom:24 }}>
+          You rated {rated} of {chain.length} {chain.length === 1 ? 'entry' : 'entries'} in this series.
+        </p>
+        <button className="btn btn-primary" onClick={()=>navigate({name:'detail',animeId})}>Back to anime</button>
+      </div>
+    );
+  }
+
+  const entry = chain[cursor];
+  const advance = () => { setCursor(c => c + 1); setAddErr(''); };
+
+  // Entry is already in library — go straight to RatingFlow
+  if (entry.in_library) {
+    const anime = library.find(a => a.id === entry.local_id) || { id: entry.local_id, title: entry.title, cover_url: entry.cover_url, rating: null, genres: [], format: null, status: 'completed', episodes_watched: 0 };
+    const seriesRating = async (an, scores) => {
+      await fetch(`/anime/${an.id}/rating`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(scores),
+      });
+      const rating = { ...scores, overall: overall(scores), updated_at: new Date().toISOString().slice(0,10) };
+      updateAnime(an.id, { rating });
+      setRated(r => r + 1);
+      advance();
+    };
+    return (
+      <RatingFlow
+        key={entry.anilist_id}
+        anime={anime}
+        library={library}
+        navigate={navigate}
+        saveRating={seriesRating}
+        setAnchorScore={setAnchorScore}
+        englishTitles={englishTitles}
+        formatPool={formatPool}
+        onSkip={advance}
+        backTarget={{name:'detail', animeId}}
+        rerateProgress={{ current: cursor + 1, total: chain.length }}
+      />
+    );
+  }
+
+  // Entry not in library — offer Add & Rate or stop
+  const addAndRate = async () => {
+    setAdding(true);
+    setAddErr('');
+    try {
+      const res = await fetch('/anime', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title:     entry.title,
+          api_id:    entry.mal_id ? String(entry.mal_id) : null,
+          cover_url: entry.cover_url,
+          genres:    [],
+          status:    'completed',
+        }),
+      });
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      const { id } = await res.json();
+      const newAnime = {
+        id, title: entry.title, title_ro: null,
+        cover_url: entry.cover_url, api_id: entry.mal_id ? String(entry.mal_id) : null,
+        anilist_id: String(entry.anilist_id), genres: [], status: 'completed', format: null,
+        rating: null, episodes: null, episodes_watched: 0, rewatch_count: 0,
+        year: null, season: null, synopsis: null, mal_score: null,
+        is_airing: false, episodes_aired: null, next_episode_at: null, notes: null,
+      };
+      setLibrary(lib => lib.some(a => a.id === id) ? lib : [...lib, newAnime]);
+      setChain(ch => ch.map((e, i) => i === cursor ? { ...e, in_library: true, local_id: id } : e));
+    } catch (e) {
+      setAddErr(e.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <div style={{ padding:'40px 38px', maxWidth:520, margin:'0 auto' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:28 }}>
+        <button className="btn-quiet" onClick={()=>navigate({name:'detail',animeId})} style={{padding:7}}>
+          <Ico name="back" size={18} />
+        </button>
+        <span style={{ fontSize:13, color:'var(--text-3)', fontFamily:'var(--mono)' }}>
+          {cursor + 1} / {chain.length}
+        </span>
+      </div>
+
+      <div style={{ display:'flex', gap:20, alignItems:'flex-start', marginBottom:28 }}>
+        {entry.cover_url
+          ? <img src={entry.cover_url} alt={entry.title}
+              style={{ width:110, height:156, objectFit:'cover', borderRadius:10, flexShrink:0,
+                boxShadow:'0 6px 24px rgba(0,0,0,0.5)' }} />
+          : <div style={{ width:110, height:156, borderRadius:10, background:'var(--raised)', flexShrink:0,
+              display:'grid', placeItems:'center', color:'var(--text-4)', fontSize:12 }}>No cover</div>
+        }
+        <div>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.07em', textTransform:'uppercase',
+            color:'var(--text-3)', marginBottom:6 }}>Not in your library</div>
+          <div style={{ fontSize:20, fontWeight:800, letterSpacing:'-0.02em', lineHeight:1.2,
+            marginBottom:18 }}>{entry.title}</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            <button className="btn btn-primary" onClick={addAndRate} disabled={adding}>
+              <Ico name="star" size={16} sw={1.9} /> {adding ? 'Adding…' : 'Add & Rate'}
+            </button>
+            <button className="btn btn-ghost" onClick={advance}>
+              Haven't watched — skip
+            </button>
+          </div>
+          {addErr && <p style={{ color:'var(--text-3)', fontSize:12, marginTop:10 }}>{addErr}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Rerate whole list ────────────────────────────────────────────────── */
-function Rerate({ library, navigate, saveRating, setAnchorScore, englishTitles, formatPool=false }) {
+function Rerate({ library, navigate, updateAnime, setAnchorScore, englishTitles, formatPool=false, format=null }) {
   const queue = useMemo(
-    () => library.filter(a => a.rating).sort((a,b) => a.title.localeCompare(b.title)),
-    [],
+    () => library.filter(a => a.rating && (!format || a.format === format)).sort((a,b) => a.title.localeCompare(b.title)),
+    [library, format],
   );
   const [cursor, setCursor] = useState(0);
+  const formatLabel = format ? ` ${format}` : '';
 
   if (queue.length === 0) {
     return (
       <div style={{ padding:'80px 38px', textAlign:'center', color:'var(--text-3)' }}>
-        <p style={{ marginBottom:20 }}>No rated anime to re-rate.</p>
+        <p style={{ marginBottom:20 }}>No rated{formatLabel} anime to re-rate.</p>
         <button className="btn btn-ghost" onClick={()=>navigate({name:'lists'})}>Back to Lists</button>
       </div>
     );
@@ -2338,7 +2532,7 @@ function Rerate({ library, navigate, saveRating, setAnchorScore, englishTitles, 
     return (
       <div style={{ padding:'80px 38px', textAlign:'center' }}>
         <div style={{ fontSize:26, fontWeight:800, marginBottom:12 }}>All done!</div>
-        <p style={{ color:'var(--text-3)', marginBottom:24 }}>You re-rated all {queue.length} anime.</p>
+        <p style={{ color:'var(--text-3)', marginBottom:24 }}>You re-rated all {queue.length}{formatLabel} anime.</p>
         <button className="btn btn-primary" onClick={()=>navigate({name:'lists'})}>Back to Lists</button>
       </div>
     );
@@ -2347,8 +2541,14 @@ function Rerate({ library, navigate, saveRating, setAnchorScore, englishTitles, 
   const anime = library.find(a => a.id === queue[cursor].id) || queue[cursor];
   const advance = () => setCursor(c => c + 1);
 
-  const rerateRating = async (an, scores, status) => {
-    await saveRating(an, scores, status);
+  const rerateRating = async (an, scores) => {
+    await fetch(`/anime/${an.id}/rating`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(scores),
+    });
+    const rating = { ...scores, overall: overall(scores), updated_at: new Date().toISOString().slice(0,10) };
+    updateAnime(an.id, { rating });
     advance();
   };
 
@@ -2999,6 +3199,11 @@ function Detail({ anime, library, navigate, deleteAnime, updateAnime, englishTit
               {anime.rating && <button className="btn btn-ghost" onClick={onRewatch} disabled={rewatching}>
                 <Ico name="check" size={15} /> {rewatching ? '…' : '+ Rewatch'}
               </button>}
+              {(seasons.prequel || seasons.sequel) && (
+                <button className="btn btn-ghost" onClick={()=>navigate({name:'rateSeries',animeId:anime.id})}>
+                  <Ico name="star" size={16} sw={1.9} /> Rate Series
+                </button>
+              )}
               {anime.rating && <button className="btn btn-ghost" onClick={()=>setShowCompare(true)}>
                 <Ico name="compare" size={16} /> Compare
               </button>}
@@ -3706,7 +3911,6 @@ function Lists({ library, navigate, englishTitles, updateAnime, rankView, setRan
             background:'var(--surface)', boxShadow:'0 0 0 1px var(--line) inset' }}>
             {[
               { key:'list', icon:'viewList', title:'List' },
-              { key:'card', icon:'viewCard', title:'Cards' },
               { key:'grid', icon:'viewGrid', title:'Grid' },
             ].map(({ key, icon, title }) => (
               <button key={key} title={title} onClick={()=>setRankView(key)}
@@ -4665,9 +4869,12 @@ const animeFor  = (id) => library.find(a => a.id===id);
     screen = <Lists library={library} navigate={navigate} englishTitles={et} updateAnime={updateAnime} rankView={t.rankView} setRankView={v=>setTweak('rankView',v)} importAnime={importAnime} initialMode='rankings' fmtFilter={t.fmtFilter} rankGroupByFormat={t.rankGroupByFormat} listGroupByFormat={t.listGroupByFormat} />;
   } else if (view.name==='search') {
     screen = <Search library={library} navigate={navigate} importAnime={importAnime} addToList={addToList} setLibrary={setLibrary} englishTitles={et} />;
+  } else if (view.name==='rateSeries') {
+    screen = <RateSeries animeId={view.animeId} library={library} navigate={navigate}
+      setAnchorScore={setAnchorScore} englishTitles={et} formatPool={t.formatPool} updateAnime={updateAnime} setLibrary={setLibrary} />;
   } else if (view.name==='rerate') {
-    screen = <Rerate library={library} navigate={navigate} saveRating={saveRating}
-      setAnchorScore={setAnchorScore} englishTitles={et} formatPool={t.formatPool} />;
+    screen = <Rerate library={library} navigate={navigate} updateAnime={updateAnime}
+      setAnchorScore={setAnchorScore} englishTitles={et} formatPool={t.formatPool} format={view.format||null} />;
   } else if (view.name==='rate') {
     const anime = view.draft || animeFor(view.animeId);
     screen = anime ? <RatingFlow anime={anime} library={library} navigate={navigate}
