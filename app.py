@@ -72,6 +72,10 @@ class WindowApi:
         dest.write_bytes(data)
         return {"path": str(dest)}
 
+    def open_url(self, url: str) -> None:
+        import webbrowser
+        webbrowser.open(url)
+
     def close(self):
         if self._win:
             self._win.destroy()

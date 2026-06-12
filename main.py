@@ -45,6 +45,8 @@ _VALID_CRITERIA = {"story", "characters", "animation", "audio", "enjoyment"}
 _SORT_COLS = {c: f"r.{c}" for c in _VALID_CRITERIA}
 _SORT_COLS["overall"] = "r.overall"
 
+__version__ = "2.1.2-beta"
+
 ANILIST_CLIENT_ID = 43290
 try:
     from _secrets import ANILIST_CLIENT_SECRET  # type: ignore[import]  # git-ignored, set before release
@@ -338,6 +340,11 @@ app = FastAPI(title="MyAnimeRank", lifespan=lifespan)
 @app.get("/")
 def index():
     return FileResponse(HTML_FILE)
+
+
+@app.get("/version")
+def version():
+    return {"version": __version__}
 
 
 class _AniListAuthStartIn(_BaseModel):

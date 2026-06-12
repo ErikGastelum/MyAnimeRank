@@ -4390,6 +4390,7 @@ function App() {
   const [showAnilistConnect, setShowAnilistConnect] = useState(false);
   const [showAnilistProfile, setShowAnilistProfile] = useState(false);
   const [syncState, setSyncState] = useState(null); // null | 'syncing' | { added, updated }
+  const [updateInfo, setUpdateInfo] = useState(null); // null | { version, url }
   const [showBackupPanel, setShowBackupPanel] = useState(false);
   const lastBackupDate = localStorage.getItem('lastBackupDate');
   const backupDaysSince = lastBackupDate ? Math.floor((Date.now() - new Date(lastBackupDate).getTime()) / 86400000) : null;
@@ -4429,6 +4430,20 @@ function App() {
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(d => { setLibrary((d.results || []).map(normaliseRanked)); setAppLoading(false); })
       .catch(() => { setLoadErr('Could not load rankings — is the server running?'); setAppLoading(false); });
+  }, []);
+
+  useEffect(() => {
+    let local = null;
+    fetch('/version').then(r => r.json()).then(d => { local = d.version; }).catch(() => {});
+    fetch('https://api.github.com/repos/ErikGastelum/MyAnimeRank/releases?per_page=1')
+      .then(r => r.ok ? r.json() : null)
+      .then(rels => {
+        const rel = Array.isArray(rels) ? rels[0] : null;
+        if (!rel || !local) return;
+        const remote = rel.tag_name.replace(/^v/, '');
+        if (remote !== local) setUpdateInfo({ version: rel.tag_name, url: rel.html_url });
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -4674,6 +4689,21 @@ const animeFor  = (id) => library.find(a => a.id===id);
               {backupDaysSince === null ? 'Never downloaded' : backupDaysSince === 0 ? 'Downloaded today' : `${backupDaysSince}d ago`}
             </div>
           </div>
+        {updateInfo && (
+          <button
+            onClick={() => {
+              if (window.pywebview?.api?.open_url) window.pywebview.api.open_url(updateInfo.url);
+              else window.open(updateInfo.url, '_blank');
+            }}
+            style={{ display:'block', width:'100%', textAlign:'left', background:'rgba(251,191,36,0.1)',
+              border:'1px solid rgba(251,191,36,0.3)', borderRadius:11, padding:'10px 13px',
+              cursor:'pointer', color:'var(--text)', marginTop:6 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'#fbbf24' }}>Update available</div>
+            <div style={{ fontSize:12, color:'var(--text-3)', marginTop:2 }}>
+              {updateInfo.version} — click to download
+            </div>
+          </button>
+        )}
         </div>
       </nav>
       <main className="mar-content">
