@@ -1629,7 +1629,6 @@ query($userId:Int,$page:Int){
       id name
       avatar{ large }
       bannerImage
-      mediaListOptions{ scoreFormat }
     }
   }
 }"""
@@ -1694,22 +1693,32 @@ def sync_friends_from_anilist(bg: BackgroundTasks):
     if not user_id_str:
         raise HTTPException(status_code=400, detail="AniList user ID not cached — re-sync first")
 
+    try:
+        user_id_int = int(user_id_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Cached AniList user ID is invalid — disconnect and reconnect AniList")
+
     headers = {**_AL_HEADERS, "Authorization": f"Bearer {token}"}
     following: list[dict] = []
     page = 1
     while page <= 10:
-        try:
-            resp = httpx.post(
-                "https://graphql.anilist.co",
-                json={"query": _FOLLOWING_QUERY, "variables": {"userId": int(user_id_str), "page": page}},
-                headers=headers, timeout=15.0,
-            )
-            resp.raise_for_status()
-            page_data = (resp.json().get("data") or {}).get("Page") or {}
-            following.extend(page_data.get("following") or [])
-            if not (page_data.get("pageInfo") or {}).get("hasNextPage"):
-                break
-        except Exception:
+        resp = httpx.post(
+            "https://graphql.anilist.co",
+            json={"query": _FOLLOWING_QUERY, "variables": {"userId": user_id_int, "page": page}},
+            headers=headers, timeout=15.0,
+        )
+        if resp.status_code == 401:
+            raise HTTPException(status_code=401, detail="AniList token expired — please reconnect AniList")
+        if not resp.is_success:
+            raise HTTPException(status_code=502, detail=f"AniList API error ({resp.status_code})")
+        body = resp.json()
+        gql_errors = body.get("errors") or []
+        if gql_errors:
+            msg = (gql_errors[0].get("message") or "unknown error")
+            raise HTTPException(status_code=502, detail=f"AniList GraphQL error: {msg}")
+        page_data = (body.get("data") or {}).get("Page") or {}
+        following.extend(page_data.get("following") or [])
+        if not (page_data.get("pageInfo") or {}).get("hasNextPage"):
             break
         page += 1
         time.sleep(0.4)
@@ -1722,9 +1731,8 @@ def sync_friends_from_anilist(bg: BackgroundTasks):
             uname = u.get("name")
             if not uname:
                 continue
-            uid         = u.get("id")
-            score_fmt   = (u.get("mediaListOptions") or {}).get("scoreFormat") or "POINT_10_DECIMAL"
-            avatar_url  = (u.get("avatar") or {}).get("large") or None
+            uid        = u.get("id")
+            avatar_url = (u.get("avatar") or {}).get("large") or None
             banner_url  = u.get("bannerImage") or None
             existing = conn.execute(
                 "SELECT id FROM friend WHERE anilist_username=?", (uname,)
@@ -1733,14 +1741,14 @@ def sync_friends_from_anilist(bg: BackgroundTasks):
                 conn.execute(
                     "UPDATE friend SET anilist_user_id=?, score_system=?,"
                     " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
-                    (uid, score_fmt, avatar_url, banner_url, existing["id"]),
+                    (uid, "POINT_10_DECIMAL", avatar_url, banner_url, existing["id"]),
                 )
                 already_existed += 1
             else:
                 conn.execute(
                     "INSERT INTO friend (anilist_username, anilist_user_id, score_system,"
                     " is_private, last_fetched, avatar_url, banner_url) VALUES (?,?,?,0,NULL,?,?)",
-                    (uname, uid, score_fmt, avatar_url, banner_url),
+                    (uname, uid, "POINT_10_DECIMAL", avatar_url, banner_url),
                 )
                 new_usernames.append(uname)
                 added += 1
