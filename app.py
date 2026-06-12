@@ -146,7 +146,7 @@ if __name__ == "__main__":
         api._win = win
         webview_data = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "MyAnimeRank" / "webview"
         webview_data.mkdir(parents=True, exist_ok=True)
-        webview.start(storage_path=str(webview_data))
+        webview.start(storage_path=str(webview_data), private_mode=False)
     except SystemExit:
         raise
     except Exception:
