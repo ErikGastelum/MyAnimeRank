@@ -1635,8 +1635,58 @@ query($userId:Int,$page:Int){
 }"""
 
 
+def _sync_new_friend_entries(usernames: list[str]) -> None:
+    for uname in usernames:
+        time.sleep(0.5)
+        try:
+            with get_conn() as conn:
+                friend_row = conn.execute(
+                    "SELECT id, score_system FROM friend WHERE anilist_username=?", (uname,)
+                ).fetchone()
+            if not friend_row:
+                continue
+            friend_id = friend_row["id"]
+            _, score_format, avatar_url, banner_url, raw_entries, is_private = _fetch_friend_list(uname)
+            fetch_now = datetime.now().isoformat()
+            with get_conn() as conn:
+                if raw_entries is None:
+                    # Transient error — update avatar/banner but leave entries untouched
+                    conn.execute(
+                        "UPDATE friend SET avatar_url=COALESCE(?,avatar_url),"
+                        " banner_url=COALESCE(?,banner_url) WHERE id=?",
+                        (avatar_url, banner_url, friend_id),
+                    )
+                    continue
+                conn.execute(
+                    "UPDATE friend SET is_private=?, last_fetched=?,"
+                    " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
+                    (1 if is_private else 0, fetch_now, avatar_url, banner_url, friend_id),
+                )
+                conn.execute("DELETE FROM friend_entry WHERE friend_id=?", (friend_id,))
+                for e in raw_entries:
+                    media = e.get("media") or {}
+                    al_id = media.get("id")
+                    if not al_id:
+                        continue
+                    raw_score = e.get("score") or 0
+                    norm = normalize_score(raw_score, score_format) if raw_score > 0 else None
+                    avg = media.get("averageScore")
+                    community_score = round(avg / 10.0, 1) if avg else None
+                    genres = json.dumps(media.get("genres") or [])
+                    adv_scores = json.dumps(e.get("advancedScores") or {})
+                    conn.execute(
+                        "INSERT OR REPLACE INTO friend_entry "
+                        "(friend_id, anilist_id, raw_score, normalized_score, status, progress, community_score, genres, adv_scores) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (friend_id, al_id, raw_score if raw_score > 0 else None, norm,
+                         e.get("status"), e.get("progress") or 0, community_score, genres, adv_scores),
+                    )
+        except Exception:
+            _log.exception("sync_friends: failed to fetch entries for %s", uname)
+
+
 @app.post("/friends/sync-from-anilist")
-def sync_friends_from_anilist():
+def sync_friends_from_anilist(bg: BackgroundTasks):
     token = _get_setting("anilist_token")
     if not token:
         raise HTTPException(status_code=400, detail="Not connected to AniList")
@@ -1695,48 +1745,8 @@ def sync_friends_from_anilist():
                 new_usernames.append(uname)
                 added += 1
 
-    # Fetch anime entries for newly added friends (cap at 15 to respect rate limits)
-    for uname in new_usernames[:15]:
-        time.sleep(0.5)
-        try:
-            with get_conn() as conn:
-                friend_row = conn.execute(
-                    "SELECT id, score_system FROM friend WHERE anilist_username=?", (uname,)
-                ).fetchone()
-            if not friend_row:
-                continue
-            friend_id = friend_row["id"]
-            _, score_format, avatar_url, banner_url, raw_entries, is_private = _fetch_friend_list(uname)
-            if not raw_entries:
-                continue
-            fetch_now = datetime.now().isoformat()
-            with get_conn() as conn:
-                conn.execute(
-                    "UPDATE friend SET is_private=?, last_fetched=?,"
-                    " avatar_url=COALESCE(?,avatar_url), banner_url=COALESCE(?,banner_url) WHERE id=?",
-                    (1 if is_private else 0, fetch_now, avatar_url, banner_url, friend_id),
-                )
-                conn.execute("DELETE FROM friend_entry WHERE friend_id=?", (friend_id,))
-                for e in raw_entries:
-                    media = e.get("media") or {}
-                    al_id = media.get("id")
-                    if not al_id:
-                        continue
-                    raw_score = e.get("score") or 0
-                    norm = normalize_score(raw_score, score_format) if raw_score > 0 else None
-                    avg = media.get("averageScore")
-                    community_score = round(avg / 10.0, 1) if avg else None
-                    genres = json.dumps(media.get("genres") or [])
-                    adv_scores = json.dumps(e.get("advancedScores") or {})
-                    conn.execute(
-                        "INSERT OR REPLACE INTO friend_entry "
-                        "(friend_id, anilist_id, raw_score, normalized_score, status, progress, community_score, genres, adv_scores) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)",
-                        (friend_id, al_id, raw_score if raw_score > 0 else None, norm,
-                         e.get("status"), e.get("progress") or 0, community_score, genres, adv_scores),
-                    )
-        except Exception:
-            _log.exception("sync_friends: failed to fetch entries for %s", uname)
+    if new_usernames:
+        bg.add_task(_sync_new_friend_entries, new_usernames[:15])
 
     return {"added": added, "already_existed": already_existed, "total": len(following)}
 
