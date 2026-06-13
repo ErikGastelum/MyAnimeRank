@@ -2572,20 +2572,28 @@ function Rerate({ library, navigate, updateAnime, setAnchorScore, englishTitles,
 /* ─── Rating flow ──────────────────────────────────────────────────────── */
 function CompCard({ anime, critKey, setAnchorScore, englishTitles }) {
   const [editing, setEditing] = useState(false);
-  const v = anime.rating[critKey];
+  const [draft, setDraft] = useState(null); // non-null while dragging
+  const committed = anime.rating[critKey];
+  const display = draft ?? committed;
+
+  const toggleEditing = () => {
+    if (editing) setDraft(null); // discard uncommitted draft on close
+    setEditing(e => !e);
+  };
+
   return (
     <div className="fade-in" style={{ width:130, flexShrink:0 }}>
       <div style={{ position:'relative' }}>
         <Poster anime={anime} w={130} radius={9} />
         <div style={{
           position:'absolute', top:7, right:7, fontFamily:'var(--mono)', fontWeight:700, fontSize:13,
-          padding:'2px 7px', borderRadius:7, color:scoreColor(v),
+          padding:'2px 7px', borderRadius:7, color:scoreColor(display),
           background:'rgba(0,0,0,0.62)', backdropFilter:'blur(2px)',
-          boxShadow:`0 0 0 1px ${scoreColor(v).replace(')','/ 0.5)')} inset`,
-        }}>{v.toFixed(1)}</div>
+          boxShadow:`0 0 0 1px ${scoreColor(display).replace(')','/ 0.5)')} inset`,
+        }}>{display.toFixed(1)}</div>
       </div>
       <div style={{ marginTop:7, display:'flex', justifyContent:'center' }}>
-        <button onClick={()=>setEditing(e=>!e)} style={{
+        <button onClick={toggleEditing} style={{
           fontSize:11, fontWeight:700, color: editing ? 'var(--accent-2)' : 'var(--text-3)',
           padding:'3px 8px', borderRadius:7, transition:'color .12s ease',
         }}>{editing ? 'Done' : 'Change score'}</button>
@@ -2593,16 +2601,29 @@ function CompCard({ anime, critKey, setAnchorScore, englishTitles }) {
       {editing && (
         <div className="fade-in" style={{marginTop:4}}>
           <input className="mar-slider mar-slider-sm" type="range" min={10} max={100} step={5}
-            value={v*10}
-            onChange={e=>setAnchorScore(anime.id, critKey, parseInt(e.target.value)/10)}
-            style={{ '--fill':`${((v-1)/9)*100}%`, '--thumb':scoreColor(v) }} />
+            value={display*10}
+            onChange={e => setDraft(parseInt(e.target.value)/10)}
+            onPointerUp={e => {
+              const val = parseInt(e.target.value)/10;
+              setDraft(null);
+              setAnchorScore(anime.id, critKey, val);
+            }}
+            onPointerCancel={() => setDraft(null)}
+            onBlur={e => {
+              if (draft !== null) {
+                const val = parseInt(e.target.value)/10;
+                setDraft(null);
+                setAnchorScore(anime.id, critKey, val);
+              }
+            }}
+            style={{ '--fill':`${((display-1)/9)*100}%`, '--thumb':scoreColor(display) }} />
         </div>
       )}
     </div>
   );
 }
 
-function Bucket({ dir, label, items, critKey, setAnchorScore, englishTitles }) {
+const Bucket = React.memo(function Bucket({ dir, label, items, critKey, setAnchorScore, englishTitles }) {
   if (items.length===0) return null;
   const up = dir==='higher';
   return (
@@ -2617,7 +2638,7 @@ function Bucket({ dir, label, items, critKey, setAnchorScore, englishTitles }) {
       </div>
     </div>
   );
-}
+});
 
 function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, englishTitles, onSkip, backTarget, rerateProgress, formatPool=false }) {
   const [step, setStep]   = useState(0);
@@ -2633,6 +2654,16 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
   const value = scores[crit.key];
   const setValue = (v) => setScores(s => ({ ...s, [crit.key]: v }));
 
+  // Locked scores — snapshot at step entry. React 18 batches setLockedScores + setStep
+  // into one render so lockedValue never shifts while the slider is being dragged.
+  const [lockedScores, setLockedScores] = useState(() => {
+    const init = {};
+    CRITERIA.forEach(c => { init[c.key] = anime.rating ? anime.rating[c.key] : 7.0; });
+    return init;
+  });
+  const goToStep = (i) => { setLockedScores({ ...scores }); setStep(i); };
+  const lockedValue = lockedScores[crit.key];
+
   const basePool = useMemo(() => {
     const rated = library.filter(a => a.id!==anime.id && a.rating);
     return (formatPool && anime.format) ? rated.filter(a => a.format===anime.format) : rated;
@@ -2645,10 +2676,16 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
 
   const fewMatches = sharedAnchors.length < 2;
   const useAll     = broaden || fewMatches;
-  const pool       = (useAll ? allAnchors : sharedAnchors).map(a => ({ a, v: a.rating[crit.key] }));
-  const higher     = pool.filter(x => x.v > value+0.001).sort((a,b) => a.v-b.v);
-  const lower      = pool.filter(x => x.v < value-0.001).sort((a,b) => b.v-a.v);
-  const same       = pool.filter(x => Math.abs(x.v-value) <= 0.001).sort((a,b) => a.a.title.localeCompare(b.a.title));
+  const pool = useMemo(
+    () => (useAll ? allAnchors : sharedAnchors).map(a => ({ a, v: a.rating[crit.key] })),
+    [useAll, allAnchors, sharedAnchors, crit.key],
+  );
+  const { higher, lower, same } = useMemo(() => {
+    const h = pool.filter(x => x.v > lockedValue+0.001).sort((a,b) => a.v-b.v);
+    const l = pool.filter(x => x.v < lockedValue-0.001).sort((a,b) => b.v-a.v);
+    const s = pool.filter(x => Math.abs(x.v-lockedValue) <= 0.001).sort((a,b) => a.a.title.localeCompare(b.a.title));
+    return { higher: h.slice(0, 6), lower: l.slice(0, 6), same: s };
+  }, [pool, lockedValue]);
   const nearestAbove = higher[0];
   const nearestBelow = lower[0];
 
@@ -2690,7 +2727,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
         {CRITERIA.map((c,i) => {
           const cur = i===step, passed = i<step;
           return (
-            <button key={c.key} onClick={()=>setStep(i)} style={{
+            <button key={c.key} onClick={()=>goToStep(i)} style={{
               flex:1, padding:'9px 12px', borderRadius:10, textAlign:'left',
               background: cur ? 'var(--raised)' : 'transparent',
               boxShadow: cur ? '0 0 0 1px var(--accent) inset' : '0 0 0 1px var(--line) inset',
@@ -2770,10 +2807,10 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
             </div>
           </div>
           <div style={{ paddingTop:14, display:'flex', gap:10 }}>
-            {step>0 && <button className="btn btn-ghost" onClick={()=>setStep(step-1)}><Ico name="back" size={16} /> Back</button>}
+            {step>0 && <button className="btn btn-ghost" onClick={()=>goToStep(step-1)}><Ico name="back" size={16} /> Back</button>}
             {onSkip && <button className="btn btn-ghost" onClick={onSkip}>Skip</button>}
             {!done
-              ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>setStep(step+1)}>
+              ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>goToStep(step+1)}>
                   Next: {CRITERIA[step+1].label} <Ico name="chevron" size={16} sw={2.2} /></button>
               : <button className="btn btn-primary" style={{flex:1,justifyContent:'center',opacity:saving?0.6:1}}
                   onClick={finish} disabled={saving}>
@@ -2806,9 +2843,9 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
             </div>
           </div>
           <div style={{ flex:1, overflowY:'auto', padding:'8px 30px 30px' }}>
-            <Bucket dir="higher" label="You rated higher" items={higher.slice(0, 6)} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
+            <Bucket dir="higher" label="You rated higher" items={higher} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
             {same.length>0 && <Bucket dir="higher" label="Same score" items={same} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />}
-            <Bucket dir="lower"  label="You rated lower"  items={lower.slice(0, 6)}  critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
+            <Bucket dir="lower"  label="You rated lower"  items={lower} critKey={crit.key} setAnchorScore={setAnchorScore} englishTitles={englishTitles} />
             {pool.length===0 && (
               <div style={{ color:'var(--text-3)', padding:'40px 0', textAlign:'center' }}>
                 No rated titles to compare against yet &mdash; this becomes your anchor.
