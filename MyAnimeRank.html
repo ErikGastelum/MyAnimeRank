@@ -2654,16 +2654,6 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
   const value = scores[crit.key];
   const setValue = (v) => setScores(s => ({ ...s, [crit.key]: v }));
 
-  // Locked scores — snapshot at step entry. React 18 batches setLockedScores + setStep
-  // into one render so lockedValue never shifts while the slider is being dragged.
-  const [lockedScores, setLockedScores] = useState(() => {
-    const init = {};
-    CRITERIA.forEach(c => { init[c.key] = anime.rating ? anime.rating[c.key] : 7.0; });
-    return init;
-  });
-  const goToStep = (i) => { setLockedScores({ ...scores }); setStep(i); };
-  const lockedValue = lockedScores[crit.key];
-
   const basePool = useMemo(() => {
     const rated = library.filter(a => a.id!==anime.id && a.rating);
     return (formatPool && anime.format) ? rated.filter(a => a.format===anime.format) : rated;
@@ -2681,11 +2671,11 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
     [useAll, allAnchors, sharedAnchors, crit.key],
   );
   const { higher, lower, same } = useMemo(() => {
-    const h = pool.filter(x => x.v > lockedValue+0.001).sort((a,b) => a.v-b.v);
-    const l = pool.filter(x => x.v < lockedValue-0.001).sort((a,b) => b.v-a.v);
-    const s = pool.filter(x => Math.abs(x.v-lockedValue) <= 0.001).sort((a,b) => a.a.title.localeCompare(b.a.title));
+    const h = pool.filter(x => x.v > value+0.001).sort((a,b) => a.v-b.v);
+    const l = pool.filter(x => x.v < value-0.001).sort((a,b) => b.v-a.v);
+    const s = pool.filter(x => Math.abs(x.v-value) <= 0.001).sort((a,b) => a.a.title.localeCompare(b.a.title));
     return { higher: h.slice(0, 6), lower: l.slice(0, 6), same: s };
-  }, [pool, lockedValue]);
+  }, [pool, value]);
   const nearestAbove = higher[0];
   const nearestBelow = lower[0];
 
@@ -2727,7 +2717,7 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
         {CRITERIA.map((c,i) => {
           const cur = i===step, passed = i<step;
           return (
-            <button key={c.key} onClick={()=>goToStep(i)} style={{
+            <button key={c.key} onClick={()=>setStep(i)} style={{
               flex:1, padding:'9px 12px', borderRadius:10, textAlign:'left',
               background: cur ? 'var(--raised)' : 'transparent',
               boxShadow: cur ? '0 0 0 1px var(--accent) inset' : '0 0 0 1px var(--line) inset',
@@ -2807,10 +2797,10 @@ function RatingFlow({ anime, library, navigate, saveRating, setAnchorScore, engl
             </div>
           </div>
           <div style={{ paddingTop:14, display:'flex', gap:10 }}>
-            {step>0 && <button className="btn btn-ghost" onClick={()=>goToStep(step-1)}><Ico name="back" size={16} /> Back</button>}
+            {step>0 && <button className="btn btn-ghost" onClick={()=>setStep(step-1)}><Ico name="back" size={16} /> Back</button>}
             {onSkip && <button className="btn btn-ghost" onClick={onSkip}>Skip</button>}
             {!done
-              ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>goToStep(step+1)}>
+              ? <button className="btn btn-primary" style={{flex:1,justifyContent:'center'}} onClick={()=>setStep(step+1)}>
                   Next: {CRITERIA[step+1].label} <Ico name="chevron" size={16} sw={2.2} /></button>
               : <button className="btn btn-primary" style={{flex:1,justifyContent:'center',opacity:saving?0.6:1}}
                   onClick={finish} disabled={saving}>
