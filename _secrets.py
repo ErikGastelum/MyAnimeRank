@@ -1,0 +1,1 @@
+ANILIST_CLIENT_SECRET = "SKg1qQjBSQ9exNkmxVocrKvDnMvaxu95ccQhDyzM"

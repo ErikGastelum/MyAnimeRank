@@ -1,0 +1,47 @@
+{
+  "enabledPlugins": {
+    "ecc@ecc": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(uvicorn *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(npx *)",
+      "Bash(stat *)"
+    ],
+    "deny": [
+      "Bash(ssh *)",
+      "Bash(sudo *)",
+      "Bash(rm *)",
+      "Bash(chmod 7* *)",
+      "Bash(chmod 777 *)",
+      "Bash(* > /dev/*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/pre_bash.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/session_end.py"
+          }
+        ]
+      }
+    ]
+  }
+}
