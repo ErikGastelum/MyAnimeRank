@@ -7,8 +7,8 @@
 <!--
   MyAnimeRank v2 frontend — single-file HTML/JS shell (PRD milestone M1).
   Implemented from Claude Design project "MyAnimeRank" / Ranked.dc.html.
-  Data shapes follow PRD Section 7 (API Contract). Runs standalone on mock
-  fixtures; the real FastAPI backend drops in by replacing the api() layer.
+  Data shapes follow PRD Section 7 (API Contract). Served by main.py at GET /
+  and always talks to that same-origin backend -- there is no offline mode.
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -78,28 +78,19 @@ function mdLinks(s){
 // Primary displayed name is English when AniList has one; romaji title_native
 // and the romaji title itself stay untouched wherever they're already shown
 // as secondary/subtitle text -- this only picks what counts as the headline.
-// Accepts either a {title,title_english} object (real API data) or a bare
-// string (offline/demo mock data, which has no romaji/English distinction to
-// resolve) so callers don't need to know which shape they were handed.
+// Accepts a {title,title_english} object, or a bare string (returned as-is).
 function displayTitle(it){if(typeof it==='string')return it;return (it&&it.title_english)||(it&&it.title)||'';}
 function cover(seed){let h=0;seed=String(seed||'');for(let i=0;i<seed.length;i++)h=(h*31+seed.charCodeAt(i))>>>0;const a=h%360,b=(a+42)%360;return `linear-gradient(135deg,hsl(${a} 46% 30%),hsl(${b} 52% 17%))`;}
 function initials(t){t=String(t||'').trim();if(!t)return '?';const w=t.split(/\s+/).filter(Boolean);return ((w[0]||'')[0]+(w[1]?w[1][0]:'')).toUpperCase();}
 function fmtScore(n){return (n==null)?'—':Number(n).toFixed(1);}
 function pct(n,max){return Math.max(0,Math.min(100,(n/max)*100))+'%';}
 
-/* ============================================================= API layer (M6)
-   BACKEND_AVAILABLE is decided once at boot by pinging the real API. If it's
-   unreachable (backend not running -- e.g. this file opened standalone), the
-   whole app falls back to the existing mock-data experience, untouched --
-   nothing here changes what mock mode does, it only adds a real path
-   alongside it. Every api.* method below branches on BACKEND_AVAILABLE. */
-// Dynamic, not a fixed port: main.py now serves this file itself (GET /),
-// at whatever port it's actually running on -- a fixed 8420 broke as soon
-// as app.py started picking a different port per launch. Falls back to
-// mock mode the same as any other unreachable-backend case (window.location
-// .origin on file:// is non-fetchable, which is exactly the desired result).
+/* ============================================================= API layer
+   Same-origin only: main.py serves this file at GET / on whatever port it
+   runs on (dynamic under app.py), so API_BASE is just this page's origin.
+   There is no offline/mock mode -- if the backend can't be reached at boot,
+   boot() shows backendDownView() and nothing else (FR-47). */
 const API_BASE=window.location.origin;
-let BACKEND_AVAILABLE=false;
 
 async function apiFetch(path,opts){
   const resp=await fetch(API_BASE+path,{headers:{'Content-Type':'application/json'},...opts});
@@ -109,11 +100,6 @@ async function apiFetch(path,opts){
   }
   if(resp.status===204)return null;
   return resp.json();
-}
-
-async function detectBackend(){
-  try{ await fetch(API_BASE+'/auth/status'); BACKEND_AVAILABLE=true; }
-  catch(e){ BACKEND_AVAILABLE=false; }
 }
 
 const api={
@@ -166,7 +152,7 @@ async function loadFeed(type){
 let _insights=null;
 async function loadInsights(){
   try{ _insights=await api.getInsights(); }
-  catch(e){ console.error('insights fetch failed:',e); }
+  catch(e){ console.error('insights fetch failed:',e); _insights=false; }
   render();
 }
 function timeAgo(iso){
@@ -228,7 +214,6 @@ async function runSearch(kind,q,arg){
   render();
 }
 function triggerSearch(kind,q,arg){
-  if(!BACKEND_AVAILABLE)return;
   clearTimeout(_searchDebounce);
   _searchDebounce=setTimeout(()=>runSearch(kind,q,arg),350);
 }
@@ -246,7 +231,6 @@ function triggerCategorySearch(){
 // surfaced -- the backend's own retry queue (FR-26) is what actually recovers
 // a failed push; this is just the frontend's side of telling it what changed.
 function backgroundSync(fn){
-  if(!BACKEND_AVAILABLE)return;
   fn().catch(e=>console.error('backend sync failed:',e));
 }
 
@@ -287,272 +271,38 @@ const STATUS = {
 };
 const STATUS_LABEL = {watching:'Watching',rewatching:'Rewatching',reading:'Reading',rereading:'Rereading',completed:'Completed',paused:'Paused',dropped:'Dropped',planning:'Planning'};
 // Real AniList `format` values are raw enum strings (TV_SHORT, ONE_SHOT, ...),
-// not the Title-Case display strings the mock data used -- group by the raw
+// not Title-Case display strings -- group by the raw
 // key, display via FORMAT_LABEL, never by string identity.
 const FORMAT_ORDER = {anime:['TV','MOVIE','OVA','ONA','TV_SHORT','SPECIAL','MUSIC'],manga:['MANGA','NOVEL','ONE_SHOT']};
 const FORMAT_LABEL = {TV:'TV',TV_SHORT:'TV Short',MOVIE:'Movie',SPECIAL:'Special',OVA:'OVA',ONA:'ONA',MUSIC:'Music',MANGA:'Manga',NOVEL:'Novel',ONE_SHOT:'One Shot'};
 
-/* ============================================================= mock data */
-let _uid = 1000;
+/* ============================================================= library */
+// `library` is the in-memory copy of GET /library -- filled by loadRealLibrary()
+// at boot/login/pull and kept in sync by each mutation's background PUT. It is
+// never persisted client-side: library.db (via the API) is the only store.
+const library = [];
+// Earlier builds cached the whole library in localStorage['mar_library'];
+// clear any leftover copy so no cached data is reachable before login (FR-47).
+try{ localStorage.removeItem('mar_library'); }catch(e){}
+
+// Not-yet-imported titles (Discover, favorites, relations) get a synthetic
+// local id so they can key per-session caches like library rows do; only their
+// real anilist_id is ever sent to the server. loadRealLibrary() keeps _uid
+// above every real id so the two never collide.
+let _uid = 0;
 function mk(o){
-  const mt=o.media_type;
-  const r=o.rating?Object.assign({animation:0,audio:0},o.rating):null;
-  if(r)r.overall=computeOverall(mt,r);
   return Object.assign({
-    id:++_uid, anilist_id:_uid+9000, media_type:mt,
-    title_native:o.title, title_english:o.title,
-    genres:[], tags:[], producers:[], runtime_minutes:mt==='anime'?24:null,
-    season:'FALL', episodes:null, chapters:null, volumes:null,
-    synopsis:'A standout entry in its genre, followed closely by a dedicated community and known for its memorable cast and set-pieces.',
-    avg_score:7.8, status:'planning', progress:0, repeat_count:0,
-    anilist_list_entry_id:null, updated_at:'2026-06-20',
-  }, o, {rating:r});
+    id:++_uid, title_native:null, title_english:null,
+    genres:[], tags:[], producers:[],
+    status:'planning', progress:0, repeat_count:0,
+    anilist_list_entry_id:null, updated_at:null, rating:null,
+  }, o);
 }
 
-const library = [
-  mk({media_type:'anime',title:'Frieren: Beyond Journey\'s End',title_native:'葬送のフリーレン',genres:['Adventure','Drama','Fantasy'],tags:['Elf','Time Skip','Magic'],producers:['Madhouse'],year:2023,format:'TV',episodes:28,progress:28,status:'completed',repeat_count:1,avg_score:9.3,rating:{story:9.5,characters:9.5,animation:9,audio:8.5,enjoyment:10}}),
-  mk({media_type:'anime',title:'Vinland Saga',genres:['Action','Adventure','Drama'],tags:['Vikings','Revenge'],producers:['Wit Studio','MAPPA'],year:2019,format:'TV',episodes:48,progress:24,status:'watching',avg_score:8.8,rating:{story:9,characters:9.5,animation:8.5,audio:8,enjoyment:9}}),
-  mk({media_type:'anime',title:'Jujutsu Kaisen',genres:['Action','Supernatural'],tags:['Shounen','Curses'],producers:['MAPPA'],year:2020,format:'TV',episodes:24,progress:24,status:'completed',avg_score:8.6,rating:{story:8,characters:8.5,animation:9.5,audio:8.5,enjoyment:9}}),
-  mk({media_type:'anime',title:'A Silent Voice',genres:['Drama','Romance'],tags:['Bullying','School'],producers:['Kyoto Animation'],year:2016,format:'Movie',episodes:1,progress:1,status:'completed',avg_score:9,rating:{story:9,characters:9,animation:9,audio:8.5,enjoyment:9}}),
-  mk({media_type:'anime',title:'Cowboy Bebop',genres:['Action','Sci-Fi'],tags:['Space','Bounty Hunters'],producers:['Sunrise'],year:1998,format:'TV',episodes:26,progress:26,status:'completed',repeat_count:2,avg_score:8.8,rating:{story:8.5,characters:9,animation:8.5,audio:10,enjoyment:9}}),
-  mk({media_type:'anime',title:'Attack on Titan',genres:['Action','Drama','Fantasy'],tags:['Titans','Military'],producers:['Wit Studio','MAPPA'],year:2013,format:'TV',episodes:87,progress:60,status:'paused',avg_score:9,rating:{story:9.5,characters:8.5,animation:9,audio:9,enjoyment:8.5}}),
-  mk({media_type:'anime',title:'Bocchi the Rock!',genres:['Comedy','Music'],tags:['Band','CGDCT'],producers:['CloverWorks'],year:2022,format:'TV',episodes:12,progress:5,status:'watching',avg_score:8.7}),
-  mk({media_type:'anime',title:'Neon Genesis Evangelion',genres:['Drama','Mecha','Sci-Fi'],tags:['Mecha','Psychological'],producers:['Gainax'],year:1995,format:'TV',episodes:26,progress:0,status:'planning',avg_score:8.4}),
-  mk({media_type:'anime',title:'Your Name.',genres:['Drama','Romance'],tags:['Body Swap','Rural'],producers:['CoMix Wave'],year:2016,format:'Movie',episodes:1,progress:0,status:'planning',avg_score:8.9}),
-  mk({media_type:'anime',title:'Devilman Crybaby',genres:['Action','Horror'],tags:['Demons','Gore'],producers:['Science SARU'],year:2018,format:'ONA',episodes:10,progress:3,status:'dropped',avg_score:7.6,rating:{story:7,characters:7,animation:8,audio:8.5,enjoyment:6.5}}),
-
-  mk({media_type:'manga',title:'Berserk',genres:['Action','Adventure','Horror'],tags:['Dark Fantasy','Medieval'],producers:['Kentaro Miura'],year:1989,format:'Manga',chapters:null,volumes:null,progress:364,status:'reading',repeat_count:1,avg_score:9.4,rating:{story:9.5,characters:9.5,animation:10,enjoyment:9.5}}),
-  mk({media_type:'manga',title:'Vagabond',genres:['Action','Adventure','Drama'],tags:['Samurai','Historical'],producers:['Takehiko Inoue'],year:1998,format:'Manga',chapters:327,volumes:37,progress:327,status:'completed',avg_score:9.2,rating:{story:9,characters:9.5,animation:10,enjoyment:9}}),
-  mk({media_type:'manga',title:'Chainsaw Man',genres:['Action','Comedy','Supernatural'],tags:['Devils','Gore'],producers:['Tatsuki Fujimoto'],year:2018,format:'Manga',chapters:180,volumes:20,progress:97,status:'reading',avg_score:8.6,rating:{story:8.5,characters:8.5,animation:8.5,enjoyment:9}}),
-  mk({media_type:'manga',title:'Oyasumi Punpun',genres:['Drama','Slice of Life'],tags:['Coming of Age','Psychological'],producers:['Inio Asano'],year:2007,format:'Manga',chapters:147,volumes:13,progress:147,status:'completed',avg_score:9,rating:{story:9,characters:9.5,animation:9,enjoyment:8.5}}),
-  mk({media_type:'manga',title:'Solo Leveling',genres:['Action','Adventure'],tags:['Dungeons','OP MC'],producers:['Chugong'],year:2018,format:'Novel',chapters:270,volumes:14,progress:120,status:'paused',avg_score:8.2}),
-  mk({media_type:'manga',title:'Look Back',genres:['Drama','Slice of Life'],tags:['One Shot','Artists'],producers:['Tatsuki Fujimoto'],year:2021,format:'One Shot',chapters:1,volumes:1,progress:0,status:'planning',avg_score:8.9}),
-];
-
-/* -------- library persistence --------------------------------------------
-   `library` above is seed/mock data, rebuilt from the mk(...) literals every
-   time this module evaluates (i.e. on every page load / pywebview reload).
-   Without persistence, that re-seed silently reverts every user edit
-   (progress, status, rating, repeat, favorites) back to its seed value on the
-   next load — which is the "12/12 reverts shortly after" bug. So we treat the
-   seed as a first-run bootstrap only: once anything is persisted, the stored
-   library is the source of truth and the seed literals never overwrite it.
-   Bump SEED_VERSION to intentionally discard saved data after a schema change. */
-const LIB_KEY='mar_library', SEED_VERSION=1;
-function persistLibrary(){ try{ localStorage.setItem(LIB_KEY, JSON.stringify({v:SEED_VERSION, items:library})); }catch(e){} }
-function hydrateLibrary(){
-  let saved; try{ saved=JSON.parse(localStorage.getItem(LIB_KEY)||'null'); }catch(e){ saved=null; }
-  if(saved && saved.v===SEED_VERSION && Array.isArray(saved.items) && saved.items.length){
-    library.length=0; saved.items.forEach(x=>library.push(x));
-    // keep the runtime id counter ahead of any persisted ids so new imports don't collide
-    _uid=library.reduce((m,x)=>Math.max(m, x.id||0), _uid);
-  }
-}
-hydrateLibrary();
-
-// Real AniList cover images for the seed titles (fetched from graphql.anilist.co).
-// Applied by title as an overlay so it lands on both seed and hydrated-from-storage
-// items; kept out of mk() defaults so it stays static metadata, not per-session state.
-const A='https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/';
-const M='https://s4.anilist.co/file/anilistcdn/media/manga/cover/medium/';
-const COVERS={
-  "Frieren: Beyond Journey's End":A+'bx154587-qQTzQnEJJ3oB.jpg',
-  'Vinland Saga':A+'bx101348-2fhDFPCuMNiz.jpg',
-  'Jujutsu Kaisen':A+'bx113415-LHBAeoZDIsnF.jpg',
-  'A Silent Voice':A+'bx20954-sYRfE5jQRtSB.jpg',
-  'Cowboy Bebop':A+'bx1-GCsPm7waJ4kS.png',
-  'Attack on Titan':A+'bx16498-buvcRTBx4NSm.jpg',
-  'Bocchi the Rock!':A+'bx130003-HTDmeL4RGeJ4.png',
-  'Neon Genesis Evangelion':A+'bx30-AI1zr74Dh4ye.jpg',
-  'Your Name.':A+'bx21519-SUo3ZQuCbYhJ.png',
-  'Devilman Crybaby':A+'bx98460-bLtH2c3jd6sV.png',
-  'Berserk':M+'bx30002-Cul4OeN7bYtn.jpg',
-  'Vagabond':M+'bx30656-9mW113O7rDnA.png',
-  'Chainsaw Man':M+'bx105778-euxXZEIfDY2u.png',
-  'Oyasumi Punpun':M+'bx34632-5xMDkx3pXsEh.png',
-  'Solo Leveling':M+'bx105398-b673Vt5ZSuz3.jpg',
-  'Look Back':M+'bx136807-KNfQQTRD4HUK.jpg',
-};
-library.forEach(it=>{ if(!it.cover_url && COVERS[it.title]) it.cover_url=COVERS[it.title]; });
-
-// Real images for the non-library surfaces (Discover/Feed/Profile/Search shelves,
-// favorite characters/staff), fetched from AniList and keyed by the exact label
-// used in the mock data. coverFor/charImg/staffImg return null when unknown so the
-// gradient+initials block stays a genuine fallback.
-// FR-55: keyed by (media_type, title) — titles like One Piece / Jujutsu Kaisen /
-// Blue Lock exist as BOTH an anime and a manga with different covers, so a
-// title-only key collided and grabbed the wrong media type's art. coverFor(title,mt)
-// resolves the correct bucket for the active Discover toggle / item media_type.
-const IMG_MED={
-  anime:{
-    "Dandadan":A+'bx171018-60q1B6GK2Ghb.jpg',"Blue Box":A+'bx170942-KKcLfQzV57nG.jpg',"Ao no Hako":A+'bx170942-KKcLfQzV57nG.jpg',
-    "Ranma 1/2":A+'bx178533-b88OLxm50jcH.jpg',"Re:Zero S3":A+'bx21355-wRVUrGxpvIQQ.jpg',"Re:Zero":A+'bx21355-wRVUrGxpvIQQ.jpg',
-    "Dragon Ball Daima":A+'bx170083-GTwRrhTApcLR.png',"Bleach: TYBW":A+'bx116674-p3zK4PUX2Aag.jpg',"Uzumaki":A+'bx111314-ui2D6cvpNumy.jpg',
-    "Solo Leveling S2":A+'bx151807-it355ZgzquUd.png',"Sakamoto Days":A+'bx177709-e5Qx6RlsBgD5.png',"The Apothecary Diaries S2":A+'bx161645-QLbzHXiYRgV2.jpg',
-    "Wind Breaker S2":A+'bx163270-wboZJp0ybwVK.jpg',"Frieren":A+'bx154587-qQTzQnEJJ3oB.jpg',"Fullmetal Alchemist: B":A+'bx5114-nSWCgQlmOMtj.jpg',
-    "Steins;Gate":A+'bx9253-tIUXF2gfU8Sg.jpg',"Gintama":A+'bx918-iOaeBVUn4uK7.jpg',"Hunter x Hunter":A+'bx11061-y5gsT1hoHuHw.png',
-    "Clannad":A+'bx4181-zUKE7BZC62OF.png',"A Silent Voice":A+'bx20954-sYRfE5jQRtSB.jpg',"Your Name.":A+'bx21519-SUo3ZQuCbYhJ.png',
-    "Spirited Away":A+'bx199-sWefXJvXkDOb.jpg',"Suzume":A+'bx142770-dDaDIRnsv5jN.jpg',"The Wind Rises":A+'bx16662-HUI8irtoTdOJ.jpg',
-    "Attack on Titan":A+'bx16498-buvcRTBx4NSm.jpg',"Demon Slayer":A+'bx101922-WBsBl0ClmgYL.jpg',"Jujutsu Kaisen":A+'bx113415-LHBAeoZDIsnF.jpg',
-    "One Punch Man":A+'bx21087-B5DHjqZ3kW4b.jpg',"Death Note":A+'bx1535-kUgkcrfOrkUM.jpg',"Naruto":A+'bx20-dE6UHbFFg1A5.jpg',
-    "Oshi no Ko":A+'bx150672-WqmmwZ4nMzAy.png',"Monster":A+'bx19-gtMC64182sm4.jpg',"Twilight Out of Focus":A+'bx166700-znvKDTSCGl0n.jpg',
-    "Cowboy Bebop":A+'bx1-GCsPm7waJ4kS.png',"Berserk (1997)":A+'bx33-PSwfE5B0gejI.jpg',"Berserk: Golden Age Arc":A+'b12115-pslMEaGV6gpf.jpg',
-  },
-  manga:{
-    "Kagurabachi":M+'bx169355-5pqzh1Wb4NOQ.png',"Sakamoto Days":M+'bx125828-p78Z8SflkfmO.jpg',"Jujutsu Kaisen":M+'bx101517-H3TdM3g5ZUe9.jpg',
-    "One Piece":M+'bx30013-BeslEMqiPhlk.jpg',"Blue Lock":M+'bx106130-yPNeuSu75ey1.jpg',"Kaiju No. 8":M+'bx120760-MtXvMgujLBpe.jpg',
-    "Berserk":M+'bx30002-Cul4OeN7bYtn.jpg',"Vagabond":M+'bx30656-9mW113O7rDnA.png',"Chainsaw Man":M+'bx105778-euxXZEIfDY2u.png',
-    "Vinland Saga":M+'bx30642-0mjRDkf4THpo.jpg',"Slam Dunk":M+'bx30051-5KJyPlO7z5F4.png',"Oyasumi Punpun":M+'bx34632-5xMDkx3pXsEh.png',
-    "Grand Blue":M+'bx87395-axsA49kSZp72.jpg',"Real":M+'bx30657-AzyyUOWMJ6fd.png',"Fullmetal Alchemist":M+'bx30025-mpPVpCKFTowt.png',
-    "Ichi the Witch":M+'bx180752-13CVO310XiEs.jpg',"Two on Ice":M+'bx169354-Uj6NebUoMcrU.jpg',"Nue's Exorcist":M+'bx163497-HNrC3KDTVxW5.jpg',
-  },
-};
-const IMG_CH={"Guts":"https://s4.anilist.co/file/anilistcdn/character/large/b422-XTaiTuvRohsV.png","Frieren":"https://s4.anilist.co/file/anilistcdn/character/large/b176754-PCnpqIOkjhFk.png","Thorfinn":"https://s4.anilist.co/file/anilistcdn/character/large/b10138-zOPrka0ddZOR.png","Spike Spiegel":"https://s4.anilist.co/file/anilistcdn/character/large/b1-ChxaldmieFlQ.png"};
-const IMG_ST={"Kentaro Miura":"https://s4.anilist.co/file/anilistcdn/staff/large/n96868-R5aBOYlTExZR.jpg","Hayao Miyazaki":"https://s4.anilist.co/file/anilistcdn/staff/large/n96870-cM3pfPVIR8RW.png"};
-// FR-55: mt-scoped lookup wins first so dual-media titles resolve to the correct
-// cover; COVERS (single-media library seed) and the opposite bucket are fallbacks
-// for callers without a media_type (e.g. person appearances).
-function coverFor(t,mt){ if(!t)return null; return (mt&&IMG_MED[mt]&&IMG_MED[mt][t]) || COVERS[t] || IMG_MED.anime[t] || IMG_MED.manga[t] || null; }
-function charImg(n){ return (n&&IMG_CH[n])||null; }
-function staffImg(n){ return (n&&IMG_ST[n])||null; }
 // Poster/avatar overlay: a real <img> layered over a gradient+initials box. Sits
 // inside a position:relative;overflow:hidden box; onerror removes itself so the
 // placeholder underneath shows through on a null URL or a failed load.
 function povr(url,label){ return url?`<img src="${esc(url)}" alt="${esc(label||'')}" loading="lazy" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">`:''; }
-
-const CATALOG = [
-  {anilist_id:16498,media_type:'anime',title:'Attack on Titan',title_native:'進撃の巨人',year:2013,format:'TV',episodes:25,genres:['Action','Drama','Fantasy'],avg_score:9.0},
-  {anilist_id:101922,media_type:'anime',title:'Demon Slayer',title_native:'鬼滅の刃',year:2019,format:'TV',episodes:26,genres:['Action','Supernatural'],avg_score:8.5},
-  {anilist_id:21459,media_type:'anime',title:'My Hero Academia',title_native:'僕のヒーローアカデミア',year:2016,format:'TV',episodes:13,genres:['Action','Comedy'],avg_score:7.9},
-  {anilist_id:11061,media_type:'anime',title:'Hunter x Hunter',title_native:'ハンター×ハンター',year:2011,format:'TV',episodes:148,genres:['Action','Adventure'],avg_score:9.1},
-  {anilist_id:20958,media_type:'anime',title:'Steins;Gate',title_native:'シュタインズ・ゲート',year:2011,format:'TV',episodes:24,genres:['Sci-Fi','Thriller'],avg_score:9.0},
-  {anilist_id:9253,media_type:'anime',title:'Mob Psycho 100',title_native:'モブサイコ100',year:2016,format:'TV',episodes:12,genres:['Action','Comedy'],avg_score:8.6},
-  {anilist_id:30002,media_type:'manga',title:'One Piece',title_native:'ワンピース',year:1997,format:'Manga',chapters:1100,genres:['Action','Adventure'],avg_score:9.2},
-  {anilist_id:30013,media_type:'manga',title:'Naruto',title_native:'ナルト',year:1999,format:'Manga',chapters:700,genres:['Action','Adventure'],avg_score:7.9},
-  {anilist_id:105778,media_type:'manga',title:'Jujutsu Kaisen',title_native:'呪術廻戦',year:2018,format:'Manga',chapters:271,genres:['Action','Supernatural'],avg_score:8.6},
-  {anilist_id:87216,media_type:'manga',title:'Blue Lock',title_native:'ブルーロック',year:2018,format:'Manga',chapters:280,genres:['Sports','Drama'],avg_score:8.0},
-];
-
-const DISCOVER = {
-  anime:[
-    {label:'Currently Trending',items:['Dandadan','Blue Box','Ranma 1/2','Re:Zero S3','Dragon Ball Daima','Bleach: TYBW']},
-    {label:'Current Season',items:['Dandadan','Blue Box','Bleach: TYBW','Re:Zero S3','Ao no Hako','Uzumaki']},
-    {label:'Upcoming Season',items:['Solo Leveling S2','Sakamoto Days','The Apothecary Diaries S2','Wind Breaker S2'],unreleased:true},
-    {label:'Top Ranked Anime',items:['Frieren','Fullmetal Alchemist: B','Steins;Gate','Gintama','Hunter x Hunter','Clannad']},
-    {label:'Top Ranked Anime Movies',items:['A Silent Voice','Your Name.','Spirited Away','Suzume','The Wind Rises']},
-    {label:'Popular Anime',items:['Attack on Titan','Demon Slayer','Jujutsu Kaisen','One Punch Man','Death Note','Naruto']},
-  ],
-  manga:[
-    {label:'Currently Trending',items:['Kagurabachi','Sakamoto Days','Jujutsu Kaisen','One Piece','Blue Lock','Kaiju No. 8']},
-    {label:'Popular Manga',items:['Berserk','One Piece','Vagabond','Chainsaw Man','Vinland Saga','Slam Dunk']},
-    {label:'Top Ranked Manga',items:['Berserk','Vagabond','Oyasumi Punpun','Grand Blue','Real','Fullmetal Alchemist']},
-    {label:'New Releases',items:['Kagurabachi','Ichi the Witch','Two on Ice','Nue\'s Exorcist'],unreleased:true},
-  ],
-};
-
-const FEED = {
-  your:[
-    {user:'you',verb:'completed',title:'Frieren: Beyond Journey\'s End',mt:'anime',anilist_id:1,hasRange:false,tsLabel:'2 hours ago'},
-    {user:'you',verb:'watched',title:'Vinland Saga',mt:'anime',anilist_id:2,hasRange:true,range:'ep 23 – 24',tsLabel:'yesterday'},
-    {user:'you',verb:'read',title:'Chainsaw Man',mt:'manga',anilist_id:3,hasRange:true,range:'ch 96 – 97',tsLabel:'2 days ago'},
-  ],
-  following:[
-    {user:'kenji_r',verb:'rewatched',title:'Cowboy Bebop',mt:'anime',anilist_id:5,hasRange:true,range:'ep 1 – 3',tsLabel:'34 minutes ago'},
-    {user:'mira',verb:'completed',title:'Oshi no Ko',mt:'anime',anilist_id:7,hasRange:false,tsLabel:'3 hours ago'},
-    {user:'devon',verb:'watched',title:'Dandadan',mt:'anime',anilist_id:9,hasRange:true,range:'ep 8',tsLabel:'6 hours ago'},
-    {user:'sora88',verb:'plans to watch',title:'Monster',mt:'anime',anilist_id:11,hasRange:false,tsLabel:'yesterday'},
-  ],
-  global:[
-    {user:'tanaka',verb:'completed',title:'Bleach: TYBW',mt:'anime',anilist_id:13,hasRange:false,tsLabel:'1 minute ago'},
-    {user:'aria_v',verb:'read',title:'One Piece',mt:'manga',anilist_id:15,hasRange:true,range:'ch 1120',tsLabel:'4 minutes ago'},
-    {user:'noodle',verb:'dropped',title:'Twilight Out of Focus',mt:'anime',anilist_id:17,hasRange:false,tsLabel:'8 minutes ago'},
-    {user:'gwen',verb:'watched',title:'Re:Zero',mt:'anime',anilist_id:19,hasRange:true,range:'ep 14 – 15',tsLabel:'12 minutes ago'},
-  ],
-};
-
-const PROFILE = {
-  username:'lucio',
-  stats:[
-    {label:'Anime',value:'214'},{label:'Manga',value:'88'},{label:'Days Watched',value:'41.3'},
-    {label:'Chapters Read',value:'9,204'},{label:'Followers',value:'37'},{label:'Following',value:'52'},
-  ],
-  favorites:{
-    anime:['Frieren','Cowboy Bebop','Vinland Saga','Monster'],
-    manga:['Berserk','Vagabond','Oyasumi Punpun'],
-    characters:[['Guts','Berserk'],['Frieren','Frieren'],['Thorfinn','Vinland Saga'],['Spike Spiegel','Cowboy Bebop']],
-    staff:[['Kentaro Miura','Mangaka'],['Hayao Miyazaki','Director']],
-    studios:['Madhouse','MAPPA','Kyoto Animation'],
-  },
-};
-
-const PERSON = {
-  name:'Guts',
-  memberFavorites:'48,213',
-  kind:'character',
-  bio:'The Black Swordsman. A former mercenary marked by the Brand of Sacrifice, Guts wields the massive Dragonslayer in a relentless struggle against demons and fate itself. Defined by an iron will and a rare, hard-won capacity for connection.',
-  shelfLabel:'Voice Actors',
-  shelfItems:[['Nobutoshi Canna','Japanese'],['Marc Diraison','English']],
-  appearancesLabel:'Appearances',
-  appearances:['Berserk','Berserk (1997)','Berserk: Golden Age Arc'],
-};
-
-// Reshaped to match GET /insights (Section 7 / FR-60-63) exactly, so
-// insightsView() has one render path for both mock and real data.
-const INSIGHTS = {
-  by_genre:[
-    {genre:'Fantasy',media_type:'anime',avg_overall:8.9,count:12},
-    {genre:'Drama',media_type:'anime',avg_overall:8.6,count:15},
-    {genre:'Action',media_type:'anime',avg_overall:8.3,count:18},
-    {genre:'Adventure',media_type:'anime',avg_overall:8.7,count:9},
-    {genre:'Sci-Fi',media_type:'anime',avg_overall:8.1,count:6},
-    {genre:'Action',media_type:'manga',avg_overall:9.1,count:7},
-    {genre:'Drama',media_type:'manga',avg_overall:8.8,count:5},
-    {genre:'Adventure',media_type:'manga',avg_overall:8.6,count:4},
-  ],
-  top_criterion:{
-    anime:{criterion:'story',avg_score:8.7},
-    manga:{criterion:'characters',avg_score:8.9},
-  },
-  community_divergence:{
-    avg_divergence:0.3,
-    most_above:[
-      {media_id:1,title:'Vinland Saga',your_score:9.0,avg_score:8.4,delta:0.6},
-      {media_id:2,title:'Cowboy Bebop',your_score:8.8,avg_score:8.4,delta:0.4},
-      {media_id:3,title:'Berserk',your_score:9.4,avg_score:9.1,delta:0.3},
-    ],
-    most_below:[
-      {media_id:4,title:'Devilman Crybaby',your_score:7.6,avg_score:7.9,delta:-0.3},
-      {media_id:5,title:'Solo Leveling',your_score:7.8,avg_score:8.2,delta:-0.4},
-    ],
-  },
-  distribution:{
-    anime:[1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5,7.0,7.5,8.0,8.5,9.0,9.5].map((b,i)=>({bucket:b,count:[0,0,0,0,0,0,0,0,1,1,2,3,5,8,12,15,10,4][i]})),
-    manga:[1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5,7.0,7.5,8.0,8.5,9.0,9.5].map((b,i)=>({bucket:b,count:[0,0,0,0,0,0,0,0,0,1,1,1,2,3,4,6,5,2][i]})),
-  },
-};
-
-// per-detail community payload (GET /media/{id}/community), keyed by title for the demo
-function community(item){
-  return {
-    rankingStats:[
-      {label:'Popularity',value:'#'+(120+(item.id%400))},
-      {label:'Favourites',value:(8+(item.id%40))+'.2k'},
-      {label:'All-time Rank',value:'#'+(30+(item.id%90))},
-    ],
-    relations:[
-      {type:'Prequel',title:item.title+' — Prologue',initials:initials(item.title)},
-      {type:'Sequel',title:item.title+' — Continuation',initials:initials(item.title)},
-    ],
-    characters:[
-      {name:'Protagonist',role:'Main'},{name:'Deuteragonist',role:'Main'},
-      {name:'Rival',role:'Supporting'},{name:'Mentor',role:'Supporting'},
-    ],
-    recommended:[
-      {title:'Vinland Saga',thumbs:'214'},{title:'Monster',thumbs:'186'},
-      {title:'Cowboy Bebop',thumbs:'173'},{title:'Berserk',thumbs:'159'},
-    ],
-  };
-}
 
 /* ============================================================= state */
 const state = {
@@ -571,7 +321,7 @@ const state = {
   feedType:'your',
   // modals
   importItem:null, importStatus:'planning',
-  profileSettingsOpen:false, pulling:false, scoreFormatDrift:false, scoreFormatDialogOpen:false, pendingPush:0,
+  profileSettingsOpen:false, pulling:false, backendUnreachable:false,
   // detail
   current:null,             // {source:'lib'|'catalog', item}
   detailMenuOpen:false, editStatus:false, editProgress:false, rewatchConfirm:null,
@@ -643,18 +393,18 @@ function startAuthPolling(){
   },1500);
 }
 H.connect = ()=>{
-  if(!BACKEND_AVAILABLE){state.connected=true;render();return;}
   window.open(API_BASE+'/auth/anilist/login','_blank');
   startAuthPolling();
 };
+H.retryBackend = ()=>{location.reload();};
 H.nav = (el)=>{
   const t=el.dataset.arg;
   if(t==='anime'){state.view='library';state.mediaType='anime';}
   else if(t==='manga'){state.view='library';state.mediaType='manga';}
   else go(t);
-  if(t==='discover'&&BACKEND_AVAILABLE&&!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);
-  if(t==='profile'&&BACKEND_AVAILABLE&&!_profileStats)loadProfileData();
-  if(t==='feed'&&BACKEND_AVAILABLE&&!_feedCache[state.feedType])loadFeed(state.feedType);
+  if(t==='discover'&&!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);
+  if(t==='profile'&&!_profileStats)loadProfileData();
+  if(t==='feed'&&!_feedCache[state.feedType])loadFeed(state.feedType);
   render();
 };
 H.stop = (el,e)=>{e.stopPropagation();};
@@ -697,7 +447,7 @@ H.openSearch = ()=>{state.view='search';state.searchType=state.mediaType;state.s
 H.openDiscoverSearch = ()=>{state.discoverSearchOpen=true;state.searchType=state.discoverType;state.dquery='';render();};
 H.closeDiscoverSearch = ()=>{state.discoverSearchOpen=false;render();};
 H.dQuery = (el)=>{state.dquery=el.value;triggerSearch('media',state.dquery,state.searchType);render();};
-H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;if(BACKEND_AVAILABLE&&!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);render();};
+H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;if(!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);render();};
 // FR-55: real mode keys by anilist_id (data-arg), never title text. `library`
 // is already the authoritative real cache (loaded at boot, kept in sync) --
 // check it first to avoid a redundant network round-trip for anything
@@ -716,43 +466,30 @@ async function openTitleByAnilistId(anilistId){
     openDetail({source:'catalog',item:mk(Object.assign({},item,{rating:null}))});
   }catch(e){ console.error('open title by anilist id failed:',e); }
 }
-H.openDiscover = async (el)=>{
-  if(BACKEND_AVAILABLE){ await openTitleByAnilistId(+el.dataset.arg); return; }
-  openDetail(discoverItem(el.dataset.arg,state.discoverType));
-};
-// FR-54: Profile favorite Anime/Manga card -> same title detail as Library/Discover.
-// Real mode: data-arg carries anilist_id (FR-55), never title text.
-H.openFavTitle = async (el)=>{
-  if(BACKEND_AVAILABLE){ await openTitleByAnilistId(+el.dataset.arg); return; }
-  openDetail(discoverItem(el.dataset.arg,el.dataset.mt));
-};
-// Relations shelf card (Detail view) -> same title detail as Discover/Favorites.
-// Never had click-through wired at all (only the cover_url/anilist_id data fix
-// was applied earlier) -- data-mt covers offline/demo mode only, since real
-// mode resolves media_type from the fetched/local item itself.
-H.openRelation = async (el)=>{
-  if(BACKEND_AVAILABLE){ await openTitleByAnilistId(+el.dataset.arg); return; }
-  openDetail(discoverItem(el.dataset.arg,el.dataset.mt));
-};
+// Discover shelf, Profile favorite Anime/Manga card (FR-54) and Relations
+// shelf card all carry a real anilist_id in data-arg (FR-55), never title text.
+H.openDiscover = (el)=>openTitleByAnilistId(+el.dataset.arg);
+H.openFavTitle = (el)=>openTitleByAnilistId(+el.dataset.arg);
+H.openRelation = (el)=>openTitleByAnilistId(+el.dataset.arg);
 
-H.openImport = (el)=>{const pool=BACKEND_AVAILABLE?_searchResults.media:CATALOG;const c=pool.find(x=>x.anilist_id==el.dataset.arg);if(c){state.importItem=c;state.importStatus='planning';render();}};
+H.openImport = (el)=>{const c=_searchResults.media.find(x=>x.anilist_id==el.dataset.arg);if(c){state.importItem=c;state.importStatus='planning';render();}};
 H.closeImport = ()=>{state.importItem=null;render();};
 H.setImportStatus = (el)=>{state.importStatus=el.dataset.arg;render();};
-H.confirmAdd = async ()=>{const it=await addFromCatalog(state.importItem,state.importStatus);state.importItem=null;state.discoverSearchOpen=false;state.view='library';state.mediaType=it.media_type;render();};
-H.confirmAddRate = async ()=>{const it=await addFromCatalog(state.importItem,state.importStatus);state.importItem=null;state.discoverSearchOpen=false;openRating([it.id]);};
+H.confirmAdd = async ()=>{const it=await addFromCatalog(state.importItem,state.importStatus);if(!it)return;state.importItem=null;state.discoverSearchOpen=false;state.view='library';state.mediaType=it.media_type;render();};
+H.confirmAddRate = async ()=>{const it=await addFromCatalog(state.importItem,state.importStatus);if(!it)return;state.importItem=null;state.discoverSearchOpen=false;openRating([it.id]);};
 
 /* feed */
-H.setFeed = (el)=>{state.feedType=el.dataset.arg;if(BACKEND_AVAILABLE&&!_feedCache[state.feedType])loadFeed(state.feedType);render();};
+H.setFeed = (el)=>{state.feedType=el.dataset.arg;if(!_feedCache[state.feedType])loadFeed(state.feedType);render();};
 
 /* profile / sync */
 H.openProfileSettings = ()=>{
   state.profileSettingsOpen=true;
-  if(BACKEND_AVAILABLE&&!_profileStats)loadProfileData(); // loadProfileData() itself renders once the fetch resolves
+  if(!_profileStats)loadProfileData(); // loadProfileData() itself renders once the fetch resolves
   setMenuOpen('modal-profileSettings',true);
 };
 H.closeProfileSettings = ()=>{state.profileSettingsOpen=false;setMenuOpen('modal-profileSettings',false);};
 H.disconnect = async ()=>{
-  if(BACKEND_AVAILABLE){try{await api.authLogout();}catch(e){}}
+  try{await api.authLogout();}catch(e){}
   state.connected=false;state.profileSettingsOpen=false;
   _profileStats=null;_profileFavorites=null;_personCache={};_studioCache={};_userCache={};
   render();
@@ -760,16 +497,12 @@ H.disconnect = async ()=>{
 H.pull = async ()=>{
   if(state.pulling)return;
   state.pulling=true;render();
-  if(BACKEND_AVAILABLE){
-    try{
-      const resp=await api.syncPull();
-      await loadRealLibrary();
-      state.pendingConflicts=resp.conflicts||[];
-    }catch(e){ console.error('pull failed:',e); }
-    state.pulling=false;render();
-    return;
-  }
-  setTimeout(()=>{state.pulling=false;render();},1100);
+  try{
+    const resp=await api.syncPull();
+    await loadRealLibrary();
+    state.pendingConflicts=resp.conflicts||[];
+  }catch(e){ console.error('pull failed:',e); }
+  state.pulling=false;render();
 };
 H.openConflicts = ()=>{
   state.conflictIdx=0;state.profileSettingsOpen=false;
@@ -787,20 +520,9 @@ H.resolveConflict = async (el)=>{
   state.conflictIdx=state.pendingConflicts.length?Math.min(idx,state.pendingConflicts.length-1):null;
   render();
 };
-H.simulateDrift = ()=>{
-  state.scoreFormatDrift=true;state.pendingPush=3;state.scoreFormatDialogOpen=true;
-  refreshModal('modal-profileSettings',profileSettingsModal); // drift indicator + pendingPush banner live there
-  setMenuOpen('modal-drift',true); // driftDialog's own body is static, just needs showing
-};
-H.driftConfirm = ()=>{
-  state.scoreFormatDrift=false;state.pendingPush=0;state.scoreFormatDialogOpen=false;
-  refreshModal('modal-profileSettings',profileSettingsModal);
-  setMenuOpen('modal-drift',false);
-};
-H.driftDismiss = ()=>{state.scoreFormatDialogOpen=false;setMenuOpen('modal-drift',false);};
 H.openInsights = ()=>{
   state.profileSettingsOpen=false;
-  if(BACKEND_AVAILABLE&&!_insights)loadInsights();
+  if(!_insights)loadInsights();
   go('insights');
 };
 
@@ -813,34 +535,28 @@ H.retryCommunity = ()=>{
 };
 H.deleteCurrent = async ()=>{
   const it=state.current&&state.current.item;if(!it)return;
-  if(BACKEND_AVAILABLE){
-    // Delete now also removes the entry from the real AniList list (main.py
-    // sequences that first) -- unlike other mutations, this can't be
-    // optimistic: if the AniList-side call fails, the row stays in library.db,
-    // so the UI must not make it disappear until the real delete succeeds.
-    try{ await api.deleteMedia(it.id); }
-    catch(e){ console.error('delete failed:',e); alert('Could not delete from AniList -- the title was not removed.'); return; }
-  }
+  // Delete now also removes the entry from the real AniList list (main.py
+  // sequences that first) -- unlike other mutations, this can't be
+  // optimistic: if the AniList-side call fails, the row stays in library.db,
+  // so the UI must not make it disappear until the real delete succeeds.
+  try{ await api.deleteMedia(it.id); }
+  catch(e){ console.error('delete failed:',e); alert('Could not delete from AniList -- the title was not removed.'); return; }
   const i=library.indexOf(it);if(i>=0)library.splice(i,1);
   state.current=null;state.detailMenuOpen=false;go('library');
 };
 H.toggleFav = async (el,e)=>{
   e.stopPropagation();
   const it=state.current&&state.current.item;if(!it)return;
-  if(BACKEND_AVAILABLE){
-    const newVal=!it._fav;it._fav=newVal;render();
-    try{
-      await api.toggleFavorite(it.media_type,it.anilist_id);
-      if(_profileFavorites){
-        const arr=_profileFavorites[it.media_type];
-        const idx=arr.findIndex(f=>f.anilist_id===it.anilist_id);
-        if(newVal&&idx<0)arr.push({anilist_id:it.anilist_id,title:it.title,title_english:it.title_english,cover_url:it.cover_url});
-        else if(!newVal&&idx>=0)arr.splice(idx,1);
-      }
-    }catch(e){ console.error('toggle favorite failed:',e); it._fav=!newVal;render(); }
-    return;
-  }
-  it._fav=!it._fav;render();
+  const newVal=!it._fav;it._fav=newVal;render();
+  try{
+    await api.toggleFavorite(it.media_type,it.anilist_id);
+    if(_profileFavorites){
+      const arr=_profileFavorites[it.media_type];
+      const idx=arr.findIndex(f=>f.anilist_id===it.anilist_id);
+      if(newVal&&idx<0)arr.push({anilist_id:it.anilist_id,title:it.title,title_english:it.title_english,cover_url:it.cover_url});
+      else if(!newVal&&idx>=0)arr.splice(idx,1);
+    }
+  }catch(e){ console.error('toggle favorite failed:',e); it._fav=!newVal;render(); }
 };
 H.toggleStatusEditor = (el,e)=>{e.stopPropagation();state.editStatus=!state.editStatus;state.editProgress=false;setMenuOpen('menu-status',state.editStatus);setMenuOpen('menu-progress',false);};
 H.toggleProgressEditor = (el,e)=>{e.stopPropagation();state.editProgress=!state.editProgress;state.editStatus=false;setMenuOpen('menu-progress',state.editProgress);setMenuOpen('menu-status',false);};
@@ -863,7 +579,7 @@ H.dDecProgress = ()=>{const it=state.current.item;applyProgress(it,it.progress-1
 H.setProgressManual = (el)=>{const it=state.current.item;const n=parseInt(el.value,10);if(!isNaN(n)){applyProgress(it,n);backgroundSync(()=>api.putProgress(it.id,it.progress));}render();};
 // FR-52: import the currently-viewed (unimported) title with a chosen status,
 // then switch the detail view into its normal in-library state.
-H.addStatus = async (el)=>{const added=await addFromCatalog(state.current.item,el.dataset.arg);state.current={source:'lib',item:added};render();};
+H.addStatus = async (el)=>{const added=await addFromCatalog(state.current.item,el.dataset.arg);if(!added)return;state.current={source:'lib',item:added};render();};
 
 /* rating */
 H.editCurrent = ()=>{openRating([state.current.item.id]);};
@@ -924,17 +640,6 @@ async function walkChain(startItem,relType){
 H.startRatingChain = async ()=>{
   if(state.chainLoading)return;
   const it=state.current.item;
-  if(!BACKEND_AVAILABLE){
-    // Offline/demo: keep the original single-hop mock-relation behavior --
-    // the mock's synthetic "-- Prologue"/"-- Continuation" relations don't
-    // represent a walkable graph, so multi-hop walking has nothing real to do.
-    const rels=(community(it).relations||[]);
-    const toLocalId=r=>{const m=library.find(x=>x.title===r.title && x.media_type===it.media_type);return m?m.id:null;};
-    const prequels=rels.filter(r=>r.type==='Prequel').map(toLocalId).filter(Boolean);
-    const sequels=rels.filter(r=>r.type==='Sequel').map(toLocalId).filter(Boolean);
-    openRating([...prequels,it.id,...sequels].filter((id,i,arr)=>arr.indexOf(id)===i));
-    return;
-  }
   state.chainLoading=true;render();
   const [prequels,sequels]=await Promise.all([walkChain(it,'PREQUEL'),walkChain(it,'SEQUEL')]);
   state.chainLoading=false;
@@ -1051,6 +756,7 @@ H.chainAddAndRate = async ()=>{
     full={anilist_id:step.anilist_id,media_type:step.media_type,title:step.title,title_english:step.title_english,cover_url:step.cover_url,year:step.year};
   }
   const added=await addFromCatalog(full,'planning');
+  if(!added)return;
   r.ids[r.idx]=added.id;r.lastRealId=added.id;r.step=0;r.scores=existingScores(added);render();
 };
 // A JS-tracked mousemove/pointermove drag was tried and confirmed unreliable
@@ -1071,30 +777,19 @@ H.trackInput = (el)=>{
 };
 
 /* person */
-// FR-54/FR-38: open Character/Staff detail. Arg-less legacy calls (detail-view
-// Characters shelf) default to the demo character; Profile cards pass name+kind.
-// Real mode reshapes the character/staff API response onto the exact same
-// flat field names personView() already renders (name/memberFavorites/bio/
-// shelfLabel/shelfItems/appearancesLabel/appearances) -- keeps personView()
-// itself completely untouched, mock and real data just fill the same shape.
+// FR-54/FR-38: open Character/Staff detail from a real anilist_id (data-arg)
+// and data-kind. The API response is reshaped onto the flat field names
+// personView() renders (name/memberFavorites/bio/shelfLabel/shelfItems/
+// appearancesLabel/appearances). A click without an id, or a failed fetch,
+// leaves the current view as-is.
 let _personCache={};
 H.openPerson = async (el)=>{
-  // Chaining from inside an already-open person page (Character -> VA ->
-  // Character...) pushes the current person onto personStack instead of
-  // clobbering personReturn -- personReturn only ever captures the true
-  // origin view, set once on the way IN from outside the person flow.
-  if(state.view==='person'&&state.person){
-    state.personStack.push(state.person);
-  }else{
-    state.personReturn=state.view;
-    state.personStack=[];
-  }
-  state.workListSearch='';state.workListOnMyList=false;state.charListSearch='';state.charListOnMyList=false;
   const kind=el&&el.dataset.kind||'character';
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
-  if(BACKEND_AVAILABLE&&anilistId){
-    const cacheKey=kind+':'+anilistId;
-    if(_personCache[cacheKey]){ state.person=_personCache[cacheKey]; go('person'); return; }
+  if(!anilistId)return;
+  const cacheKey=kind+':'+anilistId;
+  let person=_personCache[cacheKey];
+  if(!person){
     try{
       // Fetched in parallel with the favorites list (needed to know this
       // entity's real current favorited state) so opening the page never
@@ -1103,7 +798,6 @@ H.openPerson = async (el)=>{
         kind==='staff'?api.getStaff(anilistId):api.getCharacter(anilistId),
         ensureFavoritesLoaded(),
       ]);
-      let person;
       if(kind==='staff'){
         person={anilist_id:r.anilist_id,favType:'staff',name:r.name,image_url:r.image_url,memberFavorites:String(r.favorites_count||0),bio:r.bio||'',
           gender:r.gender,birthYear:r.birth_year,birthMonth:r.birth_month,birthDay:r.birth_day,age:r.age,yearsActive:r.years_active||[],homeTown:r.home_town,bloodType:r.blood_type,
@@ -1118,11 +812,21 @@ H.openPerson = async (el)=>{
       }
       const favKey=kind==='staff'?'staff':'characters';
       person._fav=!!(_profileFavorites&&_profileFavorites[favKey].some(f=>f.anilist_id===anilistId));
-      _personCache[cacheKey]=person;state.person=person;
-      go('person');return;
-    }catch(e){ console.error('open person failed:',e); }
+      _personCache[cacheKey]=person;
+    }catch(e){ console.error('open person failed:',e); return; }
   }
-  state.person=personFor(el&&el.dataset.arg||PERSON.name,kind);
+  // Chaining from inside an already-open person page (Character -> VA ->
+  // Character...) pushes the current person onto personStack instead of
+  // clobbering personReturn -- personReturn only ever captures the true
+  // origin view, set once on the way IN from outside the person flow.
+  if(state.view==='person'&&state.person){
+    state.personStack.push(state.person);
+  }else{
+    state.personReturn=state.view;
+    state.personStack=[];
+  }
+  state.workListSearch='';state.workListOnMyList=false;state.charListSearch='';state.charListOnMyList=false;
+  state.person=person;
   go('person');
 };
 H.backPerson = ()=>{
@@ -1135,21 +839,18 @@ H.backPerson = ()=>{
 H.togglePersonFav = async (el,e)=>{
   if(e)e.stopPropagation();
   const p=state.person;if(!p)return;
-  if(BACKEND_AVAILABLE&&p.anilist_id){
-    const newVal=!p._fav;p._fav=newVal;render();
-    try{
-      await api.toggleFavorite(p.favType,p.anilist_id);
-      if(_profileFavorites){
-        const key=p.favType==='staff'?'staff':'characters';
-        const arr=_profileFavorites[key];
-        const idx=arr.findIndex(f=>f.anilist_id===p.anilist_id);
-        if(newVal&&idx<0)arr.push({anilist_id:p.anilist_id,name:p.name,image_url:p.image_url});
-        else if(!newVal&&idx>=0)arr.splice(idx,1);
-      }
-    }catch(e){ console.error('toggle favorite failed:',e); p._fav=!newVal;render(); }
-    return;
-  }
-  p._fav=!p._fav;render();
+  if(!p.anilist_id)return;
+  const newVal=!p._fav;p._fav=newVal;render();
+  try{
+    await api.toggleFavorite(p.favType,p.anilist_id);
+    if(_profileFavorites){
+      const key=p.favType==='staff'?'staff':'characters';
+      const arr=_profileFavorites[key];
+      const idx=arr.findIndex(f=>f.anilist_id===p.anilist_id);
+      if(newVal&&idx<0)arr.push({anilist_id:p.anilist_id,name:p.name,image_url:p.image_url});
+      else if(!newVal&&idx>=0)arr.splice(idx,1);
+    }
+  }catch(e){ console.error('toggle favorite failed:',e); p._fav=!newVal;render(); }
 };
 
 let _studioCache={};
@@ -1157,7 +858,7 @@ H.openStudio = async (el)=>{
   state.studioReturn=state.view;
   state.workListSearch='';state.workListOnMyList=false;
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
-  if(!BACKEND_AVAILABLE||!anilistId)return;
+  if(!anilistId)return;
   if(_studioCache[anilistId]){ state.studio=_studioCache[anilistId]; go('studio'); return; }
   try{
     const [r]=await Promise.all([api.getStudio(anilistId), ensureFavoritesLoaded()]);
@@ -1170,27 +871,24 @@ H.backStudio = ()=>{const r=state.studioReturn;state.studio=null;state.studioRet
 H.toggleStudioFav = async (el,e)=>{
   if(e)e.stopPropagation();
   const s=state.studio;if(!s)return;
-  if(BACKEND_AVAILABLE&&s.anilist_id){
-    const newVal=!s._fav;s._fav=newVal;render();
-    try{
-      await api.toggleFavorite('studio',s.anilist_id);
-      if(_profileFavorites){
-        const arr=_profileFavorites.studios;
-        const idx=arr.findIndex(f=>f.anilist_id===s.anilist_id);
-        if(newVal&&idx<0)arr.push({anilist_id:s.anilist_id,name:s.name});
-        else if(!newVal&&idx>=0)arr.splice(idx,1);
-      }
-    }catch(e){ console.error('toggle favorite failed:',e); s._fav=!newVal;render(); }
-    return;
-  }
-  s._fav=!s._fav;render();
+  if(!s.anilist_id)return;
+  const newVal=!s._fav;s._fav=newVal;render();
+  try{
+    await api.toggleFavorite('studio',s.anilist_id);
+    if(_profileFavorites){
+      const arr=_profileFavorites.studios;
+      const idx=arr.findIndex(f=>f.anilist_id===s.anilist_id);
+      if(newVal&&idx<0)arr.push({anilist_id:s.anilist_id,name:s.name});
+      else if(!newVal&&idx>=0)arr.splice(idx,1);
+    }
+  }catch(e){ console.error('toggle favorite failed:',e); s._fav=!newVal;render(); }
 };
 
 let _userCache={};
 H.openUser = async (el)=>{
   state.userReturn=state.view;
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
-  if(!BACKEND_AVAILABLE||!anilistId)return;
+  if(!anilistId)return;
   if(_userCache[anilistId]){ state.user=_userCache[anilistId]; go('user'); return; }
   try{
     const r=await api.getUser(anilistId);
@@ -1214,7 +912,7 @@ function applyProgress(it,next){
   let p=Math.max(0,next);
   if(max!=null) p=Math.min(p,max);
   it.progress=p;
-  it.updated_at='2026-07-02';
+  it.updated_at=new Date().toISOString();
   if(max && p===max && old!==max){
     if(it.status==='watching'||it.status==='reading'){ it.status='completed'; }
     else if(it.status==='rewatching'||it.status==='rereading'){ it.repeat_count=(it.repeat_count||0)+1; it.status='completed'; }
@@ -1234,17 +932,18 @@ async function addFromCatalog(c,status){
     backgroundSync(()=>api.putStatus(ex.id,status));
     return ex;
   }
-  if(BACKEND_AVAILABLE){
-    try{
-      const resp=await api.importMedia({...c,status:status});
-      // real backend id, not a locally-generated fake one -- everything
-      // downstream (rating, progress, status PUTs) needs the real id to work.
-      const it=mk(Object.assign({},c,{status:status,progress:0,rating:null,id:resp.id}));
-      library.push(it);return it;
-    }catch(e){ console.error('import failed:',e); }
+  try{
+    const resp=await api.importMedia({...c,status:status});
+    // real backend id -- everything downstream (rating, progress, status PUTs)
+    // needs it. A failed import adds nothing locally: a row without a real id
+    // would 404 on every later write.
+    const it=mk(Object.assign({},c,{status:status,progress:0,rating:null,id:resp.id}));
+    library.push(it);return it;
+  }catch(e){
+    console.error('import failed:',e);
+    alert('Could not add this title -- the import request failed.');
+    return null;
   }
-  const it=mk(Object.assign({},c,{status:status,progress:0,rating:null}));
-  library.push(it);return it;
 }
 async function ensureFavoritesLoaded(){
   if(_profileFavorites)return;
@@ -1253,42 +952,17 @@ async function ensureFavoritesLoaded(){
 function openDetail(cur){
   if(state.view&&state.view!=='detail')state.detailReturn=state.view;
   state.current=cur;state.detailMenuOpen=false;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;
-  if(BACKEND_AVAILABLE){
-    if(_profileFavorites){
-      cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
-    } else {
-      ensureFavoritesLoaded().then(()=>{
-        if(_profileFavorites&&state.current===cur){
-          cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
-          render();
-        }
-      });
-    }
+  if(_profileFavorites){
+    cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
+  } else {
+    ensureFavoritesLoaded().then(()=>{
+      if(_profileFavorites&&state.current===cur){
+        cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
+        render();
+      }
+    });
   }
   go('detail');
-}
-// Build a full media-shaped item for a Discover shelf title. Returns an
-// in-library item when we already have it, otherwise a transient catalog item.
-function discoverItem(title,mt){
-  const lib=library.find(x=>x.title===title && x.media_type===mt);
-  if(lib)return {source:'lib',item:lib};
-  const cat=CATALOG.find(x=>x.title===title && x.media_type===mt);
-  const base=cat?Object.assign({},cat):{media_type:mt,title:title,title_native:title,year:2024,format:mt==='anime'?'TV':'Manga',genres:['Action','Adventure'],avg_score:7.5};
-  base.rating=null;
-  // FR-55: resolve the mt-correct cover so the detail hero matches the toggle it came from
-  if(!base.cover_url) base.cover_url=coverFor(title,mt);
-  return {source:'catalog',item:mk(base)};
-}
-// FR-54/FR-38: build a person-shaped object for a favorite Character/Staff card.
-// Returns the rich demo PERSON for the known entry; otherwise synthesizes a
-// coherent page shaped like PERSON, mirroring discoverItem's transient item.
-function personFor(name,kind){
-  if(name===PERSON.name)return PERSON;
-  const staff=kind==='staff';
-  return {name:name,kind:kind,memberFavorites:'—',
-    bio:'Details for '+name+' are fetched live from AniList when this page opens.',
-    shelfLabel:staff?'Filmography':'Voice Actors',shelfItems:[],
-    appearancesLabel:'Appearances',appearances:[]};
 }
 
 function openRating(ids){
@@ -1321,12 +995,10 @@ async function commitRating(){
   const rating={story:r.scores.story,characters:r.scores.characters,animation:r.scores.animation||0,audio:mt==='anime'?(r.scores.audio||0):0,enjoyment:r.scores.enjoyment};
   rating.overall=computeOverall(mt,rating); // optimistic local value -- mirrors the server's exact formula (ported in M3)
   it.rating=rating;it.updated_at=new Date().toISOString();
-  if(BACKEND_AVAILABLE){
-    try{
-      const resp=await api.putRating(it.id,rating);
-      rating.overall=resp.overall; // FR-9: server-computed value is authoritative
-    }catch(e){ console.error('rating submit failed:',e); }
-  }
+  try{
+    const resp=await api.putRating(it.id,rating);
+    rating.overall=resp.overall; // FR-9: server-computed value is authoritative
+  }catch(e){ console.error('rating submit failed:',e); }
 }
 function anchorsFor(it,critKey,scope){
   // FR-8: 'genre' scope keeps only titles sharing >=1 genre; 'all' drops the genre filter
@@ -1360,7 +1032,7 @@ function sliderTicksHtml(anchors){
 }
 function anchorListHtml(anchors){
   return anchors.length?anchors.map(a=>`<div style="display:flex;align-items:center;gap:11px;padding:9px;border-radius:10px;background:var(--s2);border:1px solid var(--line2);">
-    <div style="flex:0 0 34px;height:48px;border-radius:5px;position:relative;overflow:hidden;background:${cover(a.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:11px;color:rgba(255,255,255,.8);">${esc(initials(displayTitle(a)))}</span>${povr(a.cover_url||coverFor(a.title,a.media_type),displayTitle(a))}</div>
+    <div style="flex:0 0 34px;height:48px;border-radius:5px;position:relative;overflow:hidden;background:${cover(a.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:11px;color:rgba(255,255,255,.8);">${esc(initials(displayTitle(a)))}</span>${povr(a.cover_url,displayTitle(a))}</div>
     <div style="min-width:0;flex:1;"><div style="font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(a))}</div><div style="height:4px;border-radius:3px;background:var(--s3);margin-top:6px;overflow:hidden;"><div style="height:100%;width:${pct(a.score,10)};background:var(--t3);border-radius:3px;"></div></div></div>
     <span style="font-family:'Overpass Mono',monospace;font-size:15px;font-weight:700;color:var(--t2);">${fmtScore(a.score)}</span>
   </div>`).join(''):`<div style="text-align:center;padding:30px 10px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:11px;line-height:1.6;">no comparable<br>titles rated yet</div>`;
@@ -1430,9 +1102,6 @@ function wireHover(container){
 }
 
 function render(){
-  // every state change re-renders, so this is the single choke point where we
-  // flush the (mutated) library to storage — no mutation path can forget to save
-  persistLibrary();
   // preserve focus + caret for inputs across re-render
   const act=document.activeElement;
   const focusId=act&&act.id&&/^in-/.test(act.id)?act.id:null;
@@ -1445,7 +1114,8 @@ function render(){
 }
 
 function view(){
-  return (state.connected ? shell() : loginGate()) + importModal() + discoverSearchModal() + profileSettingsModal() + driftDialog() + rewatchDialog() + conflictDialog();
+  if(state.backendUnreachable)return backendDownView();
+  return (state.connected ? shell() : loginGate()) + importModal() + discoverSearchModal() + profileSettingsModal() + rewatchDialog() + conflictDialog();
 }
 
 // FR-58: per-entry conflict resolution UI. Doesn't exist in the original mock
@@ -1531,6 +1201,19 @@ function loginGate(){
       <div data-act="connect" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:15px 24px;border-radius:12px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14.5px;box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 30%,transparent);">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>Connect AniList
       </div>
+    </div>
+  </div>`;
+}
+
+/* ---- backend unreachable ---- */
+// Shown instead of everything else when boot() can't reach the API. There is no
+// offline fallback (FR-47): no tabs, library, or cached data render here.
+function backendDownView(){
+  return `<div style="flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);padding:40px;">
+    <div style="text-align:center;max-width:380px;">
+      <div style="font-size:18px;font-weight:700;margin-bottom:10px;">Can't reach the app backend</div>
+      <p style="font-size:14px;color:var(--t3);line-height:1.6;margin-bottom:26px;">MyAnimeRank needs its local server running. Start it with <code style="font-family:'Overpass Mono',monospace;color:var(--t2);">python app.py</code> (or <code style="font-family:'Overpass Mono',monospace;color:var(--t2);">uvicorn main:app</code> for browser dev), then retry.</p>
+      <div data-act="retryBackend" style="display:inline-flex;align-items:center;justify-content:center;padding:12px 22px;border-radius:12px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14px;">Retry</div>
     </div>
   </div>`;
 }
@@ -1659,8 +1342,8 @@ function libraryView(){
       let inner='';
       if(exp){
         if(sec.status==='completed'){
-          // normFormat() reconciles mock data's Title-Case strings ('Movie') with
-          // real AniList's raw enum values ('MOVIE') onto the same grouping key.
+          // norm() maps a format string onto FORMAT_ORDER's raw enum keys
+          // ('Movie' or 'MOVIE' -> 'MOVIE') so grouping never depends on casing.
           const norm=(f)=>(f||'').toUpperCase().replace(/ /g,'_');
           const known=FORMAT_ORDER[mt].map(fmt=>({label:FORMAT_LABEL[fmt]||fmt,items:sec.rows.filter(r=>norm(r.format)===fmt)}));
           const otherItems=sec.rows.filter(r=>!FORMAT_ORDER[mt].includes(norm(r.format)));
@@ -1713,7 +1396,6 @@ function libRow(it){
 function discoverView(){
   const mt=state.discoverType;
   const seg=(t,lbl,shape)=>{const on=mt===t;return `<div data-act="setDiscoverType" data-arg="${t}" style="padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;background:${on?'var(--accent)':'transparent'};color:${on?'#04121d':'var(--t3)'};transition:all .14s;">${shape}${lbl}</div>`;};
-  const shelves=DISCOVER[mt]||[];
   return `<div style="max-width:1100px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px;flex-wrap:wrap;">
       <div>
@@ -1730,7 +1412,7 @@ function discoverView(){
         </div>
       </div>
     </div>
-    ${BACKEND_AVAILABLE?DISCOVER_SECTIONS.map(sec=>{
+    ${DISCOVER_SECTIONS.map(sec=>{
       const items=_discoverCache[`${sec.key}:${mt}`]||[];
       if(!items.length)return '';
       return `<div style="margin-top:28px;">
@@ -1745,27 +1427,14 @@ function discoverView(){
           </div>`).join('')}
         </div>
       </div>`;
-    }).join(''):shelves.map(shelf=>`<div style="margin-top:28px;">
-      <h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">${esc(shelf.label)}</h2>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
-        ${shelf.items.map(t=>{const lib=library.find(x=>x.title===t&&x.media_type===mt);return `<div data-act="openDiscover" data-arg="${esc(t)}" style="flex:0 0 150px;cursor:pointer;">
-          <div style="position:relative;height:210px;border-radius:12px;background:${cover(t)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);overflow:hidden;">
-            <span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:32px;color:rgba(255,255,255,.78);">${esc(initials(t))}</span>${povr(coverFor(t,mt),t)}
-            ${shelf.unreleased?`<div style="position:absolute;top:8px;left:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:.5px;color:var(--t3);">TBA</div>`:''}
-          </div>
-          <div style="font-weight:600;font-size:12.5px;line-height:1.25;margin-top:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;height:32px;">${esc(t)}</div>
-          ${lib?`<div style="display:inline-block;margin-top:5px;font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);border-radius:5px;padding:2px 7px;">${STATUS_LABEL[lib.status]}</div>`:''}
-        </div>`;}).join('')}
-      </div>
-    </div>`).join('')}
+    }).join('')}
   </div>`;
 }
 
 /* ---- catalog search (full page + modal share results) ---- */
-function catalogResults(type,q,compact){
-  q=(q||'').trim().toLowerCase();
+function catalogResults(compact){
   // _searchResults.media is already server-filtered by type+q via triggerSearch()
-  let res=BACKEND_AVAILABLE?_searchResults.media:CATALOG.filter(c=>c.media_type===type && (!q||c.title.toLowerCase().includes(q)));
+  const res=_searchResults.media;
   if(!res.length) return {html:'',empty:true,count:0};
   const html=res.map(r=>{
     const inLib=library.some(x=>x.anilist_id===r.anilist_id);
@@ -1777,7 +1446,7 @@ function catalogResults(type,q,compact){
     return `<div style="background:var(--s${compact?'2':'1'});border:1px solid var(--line${compact?'2':''});border-radius:${compact?'12px':'14px'};overflow:hidden;display:flex;flex-direction:column;animation:rk-pop .2s ease;">
       <div style="display:flex;gap:${compact?'11px':'14px'};padding:${compact?'11px':'14px'};">
         <div style="flex:0 0 ${compact?'52px':'70px'};height:${compact?'72px':'98px'};border-radius:${compact?'7px':'8px'};position:relative;overflow:hidden;background:${cover(r.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);">
-          <span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${compact?'15px':'20px'};color:rgba(255,255,255,.82);">${esc(initials(displayTitle(r)))}</span>${povr(r.cover_url||coverFor(r.title,r.media_type),displayTitle(r))}
+          <span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${compact?'15px':'20px'};color:rgba(255,255,255,.82);">${esc(initials(displayTitle(r)))}</span>${povr(r.cover_url,displayTitle(r))}
         </div>
         <div style="min-width:0;flex:1;display:flex;flex-direction:column;">
           <div style="font-weight:600;font-size:${compact?'13px':'14px'};line-height:1.25;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(r))}</div>
@@ -1818,7 +1487,7 @@ function searchView(){
     emptyMsg=state.query.trim()?`no users match "${esc(state.query)}"`:'';
     bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:16px;">${results.map(u=>personCard(u.anilist_id,'openUser',u.name,u.avatar_url)).join('')}</div>`;
   }else{
-    const {html,empty,count}=catalogResults(state.searchType,state.query,false);
+    const {html,empty,count}=catalogResults(false);
     countLabel=`${count} catalog results`;
     emptyMsg=empty?`no titles match "${esc(state.query)}"`:'';
     bodyHtml=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;">${html}</div>`;
@@ -1846,7 +1515,7 @@ function searchView(){
 function discoverSearchModal(){
   if(!state.discoverSearchOpen)return '';
   const seg=(t,lbl)=>{const on=state.searchType===t;return `<div data-act="setSearchType" data-arg="${t}" style="padding:7px 14px;border-radius:7px;cursor:pointer;font-weight:600;font-size:12.5px;background:${on?'var(--accent)':'transparent'};color:${on?'#04121d':'var(--t3)'};">${lbl}</div>`;};
-  const {html,empty}=catalogResults(state.searchType,state.dquery,true);
+  const {html,empty}=catalogResults(true);
   return `<div data-act="closeDiscoverSearch" style="position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;background:rgba(4,5,7,.78);backdrop-filter:blur(4px);animation:rk-fade .18s ease;overflow-y:auto;">
     <div data-act="stop" style="width:820px;max-width:100%;background:var(--s1);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 30px 80px rgba(0,0,0,.6);animation:rk-pop .2s ease;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:14px;">
@@ -1879,7 +1548,7 @@ function importModal(){
         <div data-act="closeImport" data-hover="background:var(--s3);color:var(--t1)" style="width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1 L11 11 M11 1 L1 11" stroke="currentColor" stroke-width="1.4"/></svg></div>
       </div>
       <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">
-        <div style="flex:0 0 52px;height:72px;border-radius:8px;position:relative;overflow:hidden;background:${cover(c.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:16px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(c)))}</span>${povr(c.cover_url||coverFor(c.title,c.media_type),displayTitle(c))}</div>
+        <div style="flex:0 0 52px;height:72px;border-radius:8px;position:relative;overflow:hidden;background:${cover(c.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:16px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(c)))}</span>${povr(c.cover_url,displayTitle(c))}</div>
         <div style="min-width:0;flex:1;">
           <div style="display:flex;align-items:center;gap:9px;"><span style="font-weight:700;font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(c))}</span>${pill(c.media_type)}</div>
           <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">${meta}</div>
@@ -1900,11 +1569,10 @@ function importModal(){
 /* ---- feed ---- */
 function feedView(){
   const tabs=[['your','Your Feed'],['following','Following'],['global','Global']];
-  const realItems=BACKEND_AVAILABLE?(_feedCache[state.feedType]||[]).map(a=>({
+  const items=(_feedCache[state.feedType]||[]).map(a=>({
     user:a.username,verb:a.verb,title:a.title,title_english:a.title_english,mt:a.media_type,cover_url:a.cover_url,
     hasRange:!!a.progress_range,range:a.progress_range?`ep ${a.progress_range}`:'',tsLabel:timeAgo(a.occurred_at),
-  })):null;
-  const items=realItems||FEED[state.feedType]||[];
+  }));
   return `<div style="max-width:680px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;">
       <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">GET /feed?type=${state.feedType}</div>
@@ -1919,7 +1587,7 @@ function feedView(){
           <div style="font-size:13.5px;line-height:1.5;color:var(--t2);"><span style="font-weight:700;color:var(--t1);">${esc(a.user)}</span> ${esc(a.verb)} <span style="font-weight:600;color:var(--t1);">${esc(displayTitle(a))}</span>${a.hasRange?`<span style="color:var(--t4);"> &middot; ${esc(a.range)}</span>`:''}</div>
           <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:5px;">${esc(a.tsLabel)}</div>
         </div>
-        <div style="flex:0 0 46px;height:64px;border-radius:6px;position:relative;overflow:hidden;background:${cover(a.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(a)))}</span>${povr(a.cover_url||coverFor(a.title,a.mt),displayTitle(a))}</div>
+        <div style="flex:0 0 46px;height:64px;border-radius:6px;position:relative;overflow:hidden;background:${cover(a.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(a)))}</span>${povr(a.cover_url,displayTitle(a))}</div>
       </div>`).join('')}
     </div>
   </div>`;
@@ -2056,50 +1724,27 @@ function realShelfCover(label,items,actFn){
     </div></div>`;
 }
 function profileView(){
-  const p=PROFILE;
-  const shelfCover=(label,arr,subFn,imgFn,actFn)=>`<div style="margin-bottom:28px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><h2 style="font-size:16px;font-weight:700;">${label}</h2></div>
-    <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
-      ${arr.map((c,i)=>{const name=Array.isArray(c)?c[0]:c;const sub=subFn?subFn(c):'';return `<div ${actFn?actFn(name):''} style="flex:0 0 110px;cursor:pointer;">
-        <div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(imgFn?imgFn(name):null,name)}</div>
-        <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div>
-        ${sub?`<div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>`:''}
-      </div>`;}).join('')}
-    </div></div>`;
-  // n is either a plain name string (mock mode -- no id to click through to)
-  // or a {anilist_id,name} object (real mode); actFn receives n itself so it
-  // can pull anilist_id when present.
   const shelfChip=(label,arr,actFn)=>`<div style="margin-bottom:28px;"><h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">${label}</h2>
-    <div style="display:flex;flex-wrap:wrap;gap:10px;">${arr.map(n=>{const name=typeof n==='object'?n.name:n;return `<div ${actFn?actFn(n):''} data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(name)}</span></div>`;}).join('')}</div></div>`;
+    <div style="display:flex;flex-wrap:wrap;gap:10px;">${arr.map(n=>`<div ${actFn?actFn(n):''} data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(n.name)}</span></div>`).join('')}</div></div>`;
 
-  let shelves='',username=p.username,statsArr=p.stats,statsLoading=false;
-  if(BACKEND_AVAILABLE){
-    username=state.username||p.username;
-    if(_profileStats&&_profileFavorites){
-      const s=_profileStats;
-      statsArr=[
-        {label:'Anime',value:String(s.total_anime)},{label:'Manga',value:String(s.total_manga)},
-        {label:'Days Watched',value:String(s.days_watched)},{label:'Chapters Read',value:String(s.chapters_read)},
-        {label:'Followers',value:String(s.followers)},{label:'Following',value:String(s.following)},
-      ];
-      const f=_profileFavorites;
-      if(f.anime.length) shelves+=realShelfCover('Favorite Anime',f.anime,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="anime"`);
-      if(f.manga.length) shelves+=realShelfCover('Favorite Manga',f.manga,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="manga"`);
-      if(f.characters.length) shelves+=realShelfCover('Favorite Characters',f.characters,it=>`data-act="openPerson" data-arg="${it.anilist_id}" data-kind="character"`);
-      if(f.staff.length) shelves+=realShelfCover('Favorite Staff',f.staff,it=>`data-act="openPerson" data-arg="${it.anilist_id}" data-kind="staff"`);
-      if(f.studios.length) shelves+=shelfChip('Favorite Studios',f.studios,st=>`data-act="openStudio" data-arg="${st.anilist_id}"`);
-    }else{
-      // Real fetch hasn't resolved yet -- render a loading state, never the
-      // hardcoded mock numbers below (that mock is for the no-backend demo
-      // mode only, in the final else branch).
-      statsLoading=true;
-    }
+  const username=state.username||'';
+  let shelves='',statsArr=[],statsLoading=false;
+  if(_profileStats&&_profileFavorites){
+    const s=_profileStats;
+    statsArr=[
+      {label:'Anime',value:String(s.total_anime)},{label:'Manga',value:String(s.total_manga)},
+      {label:'Days Watched',value:String(s.days_watched)},{label:'Chapters Read',value:String(s.chapters_read)},
+      {label:'Followers',value:String(s.followers)},{label:'Following',value:String(s.following)},
+    ];
+    const f=_profileFavorites;
+    if(f.anime.length) shelves+=realShelfCover('Favorite Anime',f.anime,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}"`);
+    if(f.manga.length) shelves+=realShelfCover('Favorite Manga',f.manga,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}"`);
+    if(f.characters.length) shelves+=realShelfCover('Favorite Characters',f.characters,it=>`data-act="openPerson" data-arg="${it.anilist_id}" data-kind="character"`);
+    if(f.staff.length) shelves+=realShelfCover('Favorite Staff',f.staff,it=>`data-act="openPerson" data-arg="${it.anilist_id}" data-kind="staff"`);
+    if(f.studios.length) shelves+=shelfChip('Favorite Studios',f.studios,st=>`data-act="openStudio" data-arg="${st.anilist_id}"`);
   }else{
-    if(p.favorites.anime.length) shelves+=shelfCover('Favorite Anime',p.favorites.anime,null,n=>coverFor(n,'anime'),n=>`data-act="openFavTitle" data-arg="${esc(n)}" data-mt="anime"`);
-    if(p.favorites.manga.length) shelves+=shelfCover('Favorite Manga',p.favorites.manga,null,n=>coverFor(n,'manga'),n=>`data-act="openFavTitle" data-arg="${esc(n)}" data-mt="manga"`);
-    if(p.favorites.characters.length) shelves+=shelfCover('Favorite Characters',p.favorites.characters,c=>c[1],charImg,n=>`data-act="openPerson" data-arg="${esc(n)}" data-kind="character"`);
-    if(p.favorites.staff.length) shelves+=shelfCover('Favorite Staff',p.favorites.staff,c=>c[1],staffImg,n=>`data-act="openPerson" data-arg="${esc(n)}" data-kind="staff"`);
-    if(p.favorites.studios.length) shelves+=shelfChip('Favorite Studios',p.favorites.studios);
+    // Live fetch hasn't resolved yet -- render a loading state.
+    statsLoading=true;
   }
 
   return `<div style="max-width:900px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
@@ -2145,38 +1790,11 @@ function profileSettingsModal(){
       </div>
       <div style="display:flex;align-items:center;gap:12px;padding:14px;background:var(--s2);border:1px solid var(--line2);border-radius:12px;margin-bottom:16px;">
         <div style="width:10px;height:10px;border-radius:50%;background:#6bd08a;flex:0 0 auto;"></div>
-        <div style="flex:1;"><div style="font-weight:600;font-size:13.5px;">Connected as ${esc(state.username||PROFILE.username)}</div><div style="font-size:11.5px;color:var(--t4);margin-top:2px;">AniList · token valid</div></div>
+        <div style="flex:1;"><div style="font-weight:600;font-size:13.5px;">Connected as ${esc(state.username)}</div><div style="font-size:11.5px;color:var(--t4);margin-top:2px;">AniList · token valid</div></div>
       </div>
       <div data-act="disconnect" style="padding:12px;border-radius:10px;text-align:center;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:10px;background:var(--s3);color:#e57373;border:1px solid var(--line);">Disconnect AniList</div>
       <div data-act="pull" data-hover="border-color:var(--accent)" style="padding:12px;border-radius:10px;text-align:center;cursor:${state.pulling?'default':'pointer'};font-weight:600;font-size:13px;background:var(--s3);border:1px solid var(--line);color:var(--t2);">${pullLabel}</div>
       ${state.pendingConflicts&&state.pendingConflicts.length?`<div data-act="openConflicts" data-hover="border-color:#e0a24a" style="margin-top:10px;padding:10px 12px;border-radius:10px;cursor:pointer;background:color-mix(in srgb,#e0a24a 12%,transparent);border:1px solid color-mix(in srgb,#e0a24a 35%,transparent);color:#e0a24a;font-size:12px;font-weight:600;text-align:center;">${state.pendingConflicts.length} conflict(s) need review &rarr;</div>`:''}
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid var(--line2);">
-        <div><div style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--t4);text-transform:uppercase;">Score format</div>
-        <div style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:${state.scoreFormatDrift?'#e0a24a':'#6bd08a'};margin-top:3px;">${state.scoreFormatDrift?'DRIFTED — needs fix':'POINT_10_DECIMAL ✓'}</div></div>
-        <span data-act="simulateDrift" data-hover="color:var(--t2)" style="font-family:'Overpass Mono',monospace;font-size:9.5px;color:var(--t4);cursor:pointer;text-decoration:underline;" title="Dev/test affordance — simulates the AniList account's scoreFormat drifting on their end">simulate drift</span>
-      </div>
-      ${state.pendingPush?`<div style="margin-top:10px;font-size:11.5px;color:#e0a24a;line-height:1.5;">${state.pendingPush} rating(s) waiting to sync &mdash; paused until you switch the format back.</div>`:''}
-    </div>
-  </div>`;
-}
-
-function driftDialog(){
-  // Always rendered (see profileSettingsModal's convention) -- open/closed is
-  // a pure opacity/pointer-events flip via setMenuOpen, never a render().
-  const open=state.scoreFormatDialogOpen;
-  return `<div id="modal-drift" data-act="driftDismiss" style="position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(4,5,7,.8);backdrop-filter:blur(4px);opacity:${open?'1':'0'};pointer-events:${open?'auto':'none'};">
-    <div data-act="stop" style="width:420px;max-width:100%;background:var(--s1);border:1px solid var(--line);border-radius:18px;padding:24px;box-shadow:0 30px 80px rgba(0,0,0,.6);">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-        <div style="width:36px;height:36px;border-radius:9px;background:color-mix(in srgb,#e0a24a 16%,transparent);border:1px solid color-mix(in srgb,#e0a24a 40%,transparent);display:flex;align-items:center;justify-content:center;color:#e0a24a;flex:0 0 auto;">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" stroke-linejoin="round"/></svg>
-        </div>
-        <span style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:#e0a24a;text-transform:uppercase;">Score format changed</span>
-      </div>
-      <p style="font-size:13.5px;color:var(--t2);line-height:1.6;margin-bottom:22px;">Your AniList scoring display format has changed since you connected &mdash; it's no longer set to <b>POINT_10_DECIMAL</b>. MyAnimeRank needs it to push your 1.0–10.0 scores without conversion. Switch it back now?</p>
-      <div style="display:flex;gap:10px;">
-        <div data-act="driftDismiss" style="flex:0 0 auto;padding:12px 18px;border-radius:11px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:13px;cursor:pointer;text-align:center;">Not now</div>
-        <div data-act="driftConfirm" style="flex:1;padding:12px;border-radius:11px;background:var(--accent);color:#04121d;font-weight:700;font-size:13px;cursor:pointer;text-align:center;">Switch back to POINT_10_DECIMAL</div>
-      </div>
     </div>
   </div>`;
 }
@@ -2366,33 +1984,28 @@ function detailView(){
   const it=state.current.item;const inLib=state.current.source==='lib';
   // Not-yet-imported (Discover-sourced) items have no local media_id, but do
   // have a real anilist_id -- loadCommunity() picks the by-id vs by-anilist
-  // route accordingly, so the mock community() fallback below is now only
-  // for genuinely offline/demo mode (BACKEND_AVAILABLE===false).
+  // route accordingly.
   // Community data is intentionally never persisted (FR-49/PRD line 215) --
   // it's volatile and re-fetched live on every open, so the fix for the
   // empty-then-populate flash is a loading skeleton, not a cache.
   let comm,commLoading=false,commError=false;
-  if(BACKEND_AVAILABLE){
-    const real=_communityCache[it.id];
-    if(real===undefined){loadCommunity(it,inLib);commLoading=true;}
-    // A failed fetch caches as null (distinct from undefined="never tried")
-    // so it doesn't retry every render -- but rendering it identically to
-    // "this title genuinely has zero relations" is exactly the ambiguity
-    // that made an AniList-side outage look like a broken app. Surface it.
-    else if(real===null){commError=true;}
-    comm=real?{
-      rankingStats:[
-        {label:'Popularity',value:real.popularity!=null?'#'+real.popularity:'—'},
-        {label:'Favourites',value:real.favourites!=null?String(real.favourites):'—'},
-        {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+(real.rank_rated??real.rank_popular):'—'},
-      ],
-      relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
-      characters:real.characters.map(c=>({anilist_id:c.anilist_id,name:c.name||'',role:c.role||'',image_url:c.image_url})),
-      recommended:real.recommended.map(rc=>({title:rc.title||'',title_english:rc.title_english,thumbs:rc.thumbs!=null?String(rc.thumbs):'0',cover_url:rc.cover_url})),
-    }:{rankingStats:[],relations:[],characters:[],recommended:[]};
-  } else {
-    comm=community(it);
-  }
+  const real=_communityCache[it.id];
+  if(real===undefined){loadCommunity(it,inLib);commLoading=true;}
+  // A failed fetch caches as null (distinct from undefined="never tried")
+  // so it doesn't retry every render -- but rendering it identically to
+  // "this title genuinely has zero relations" is exactly the ambiguity
+  // that made an AniList-side outage look like a broken app. Surface it.
+  else if(real===null){commError=true;}
+  comm=real?{
+    rankingStats:[
+      {label:'Popularity',value:real.popularity!=null?'#'+real.popularity:'—'},
+      {label:'Favourites',value:real.favourites!=null?String(real.favourites):'—'},
+      {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+(real.rank_rated??real.rank_popular):'—'},
+    ],
+    relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
+    characters:real.characters.map(c=>({anilist_id:c.anilist_id,name:c.name||'',role:c.role||'',image_url:c.image_url})),
+    recommended:real.recommended.map(rc=>({title:rc.title||'',title_english:rc.title_english,thumbs:rc.thumbs!=null?String(rc.thumbs):'0',cover_url:rc.cover_url})),
+  }:{rankingStats:[],relations:[],characters:[],recommended:[]};
   // FR-44: Rate Series only makes sense when a real series exists -- shown/
   // hidden in sync with the Relations shelf it reuses data from (both depend
   // on the same async community fetch, same loading-then-populating pattern
@@ -2462,7 +2075,7 @@ function detailView(){
 
     <div style="max-width:1180px;margin:0 auto;padding:22px 38px 0;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Relations</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.relations.map(rel=>`<div data-act="openRelation" data-arg="${rel.anilist_id||''}" data-mt="${it.media_type}" style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;position:relative;overflow:hidden;background:${cover(rel.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(rel.initials)}</span>${povr(rel.cover_url||coverFor(rel.title),displayTitle(rel))}</div><div style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--accent);text-transform:uppercase;margin-top:8px;">${esc(rel.type)}</div><div style="font-weight:600;font-size:12.5px;line-height:1.25;margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rel))}</div></div>`).join('')}</div>
+      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.relations.map(rel=>`<div data-act="openRelation" data-arg="${rel.anilist_id||''}" data-mt="${it.media_type}" style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;position:relative;overflow:hidden;background:${cover(rel.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(rel.initials)}</span>${povr(rel.cover_url,displayTitle(rel))}</div><div style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--accent);text-transform:uppercase;margin-top:8px;">${esc(rel.type)}</div><div style="font-weight:600;font-size:12.5px;line-height:1.25;margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rel))}</div></div>`).join('')}</div>
     </div>
 
     <div style="max-width:1180px;margin:0 auto;padding:22px 38px 20px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:24px;">
@@ -2481,19 +2094,24 @@ function detailView(){
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 30px;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Characters</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,140):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;cursor:pointer;"><div style="height:140px;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url||charImg(c.name),c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(c.role)}</div></div>`).join('')}</div>
+      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,140):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;cursor:pointer;"><div style="height:140px;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url,c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(c.role)}</div></div>`).join('')}</div>
     </div>
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 60px;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Recommended</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.recommended.map(rc=>`<div style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;background:${cover(rc.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);position:relative;overflow:hidden;"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(rc)))}</span>${povr(rc.cover_url||coverFor(rc.title),displayTitle(rc))}<div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;display:flex;align-items:center;gap:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6.3l1-4.6.03-.32c0-.4-.16-.77-.44-1.06L13.17 1 7.59 6.59C7.22 6.95 7 7.45 7 8v11c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.1-.23.15-.48.15-.73v-1.91z"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:10px;font-weight:700;color:var(--t2);">${esc(rc.thumbs)}</span></div></div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rc))}</div></div>`).join('')}</div>
+      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.recommended.map(rc=>`<div style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;background:${cover(rc.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);position:relative;overflow:hidden;"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(rc)))}</span>${povr(rc.cover_url,displayTitle(rc))}<div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;display:flex;align-items:center;gap:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6.3l1-4.6.03-.32c0-.4-.16-.77-.44-1.06L13.17 1 7.59 6.59C7.22 6.95 7 7.45 7 8v11c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.1-.23.15-.48.15-.73v-1.91z"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:10px;font-weight:700;color:var(--t2);">${esc(rc.thumbs)}</span></div></div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rc))}</div></div>`).join('')}</div>
     </div>
   </div>`;
 }
 
 /* ---- insights ---- */
 function insightsView(){
-  const I=(BACKEND_AVAILABLE&&_insights)?_insights:INSIGHTS;
+  // _insights: null = loading, false = last fetch failed (H.openInsights retries).
+  const I=_insights;
+  if(!I){
+    const msg=I===false?"Couldn't load insights -- open this page again to retry.":'Loading insights…';
+    return `<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;"><h1 style="font-size:26px;font-weight:700;letter-spacing:-.4px;margin-bottom:16px;">Insights</h1><div style="font-size:13px;color:var(--t4);">${msg}</div></div>`;
+  }
   const genreSection=(mt)=>{
     const rows=I.by_genre.filter(g=>g.media_type===mt).sort((a,b)=>b.avg_overall-a.avg_overall);
     if(!rows.length)return `<div style="font-size:12.5px;color:var(--t4);">Not enough rated titles yet.</div>`;
@@ -2548,7 +2166,7 @@ function personView(){
       <div data-act="togglePersonFav" title="Favorite" style="width:36px;height:36px;border-radius:9px;background:${p._fav?'color-mix(in srgb,#e5566f 18%,transparent)':'var(--s2)'};border:1px solid ${p._fav?'color-mix(in srgb,#e5566f 45%,transparent)':'var(--line)'};display:flex;align-items:center;justify-content:center;cursor:pointer;color:${p._fav?'#e5566f':'var(--t2)'};"><svg width="15" height="15" viewBox="0 0 24 24" fill="${p._fav?'currentColor':'none'}" stroke="currentColor" stroke-width="2"><path d="M12 21s-7.5-4.6-10-9.3C.5 8 2 4.5 5.4 4A5 5 0 0112 6.2 5 5 0 0118.6 4C22 4.5 23.5 8 22 11.7 19.5 16.4 12 21 12 21z"/></svg></div>
     </div>
     <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;">
-      <div style="flex:0 0 120px;height:168px;border-radius:12px;position:relative;overflow:hidden;background:${cover(p.name)};display:flex;align-items:center;justify-content:center;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:34px;color:rgba(255,255,255,.85);">${esc(initials(p.name))}</span>${povr(p.image_url||charImg(p.name)||coverFor(p.name),p.name)}</div>
+      <div style="flex:0 0 120px;height:168px;border-radius:12px;position:relative;overflow:hidden;background:${cover(p.name)};display:flex;align-items:center;justify-content:center;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:34px;color:rgba(255,255,255,.85);">${esc(initials(p.name))}</span>${povr(p.image_url,p.name)}</div>
       <div style="flex:1;min-width:0;padding-bottom:4px;"><h1 style="font-size:30px;font-weight:800;letter-spacing:-.5px;">${esc(p.name)}</h1><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t4);text-transform:uppercase;margin-top:8px;">${esc(p.memberFavorites)} member favorites</div></div>
     </div>
     <div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;margin:22px 0 30px;">
@@ -2557,7 +2175,7 @@ function personView(){
     <div style="margin-bottom:30px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${p.favType==='staff'?'Characters Voiced':esc(p.shelfLabel)}</div>
       ${p.favType==='staff'
         ?characterRoleListView(p.charactersVoiced,{searchValue:state.charListSearch,onMyListValue:state.charListOnMyList,searchAct:'charListSearch',onMyListAct:'toggleCharListOnMyList'})
-        :`<div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;${s[3]?'cursor:pointer;':''}"><div style="height:130px;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2]||charImg(s[0]),s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
+        :`<div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;${s[3]?'cursor:pointer;':''}"><div style="height:130px;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2],s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
     </div>
     <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${esc(p.appearancesLabel)}</div>
       ${mediaListView(p.appearances,{searchValue:state.workListSearch,onMyListValue:state.workListOnMyList,searchAct:'workListSearch',onMyListAct:'toggleWorkListOnMyList'})}
@@ -2668,20 +2286,17 @@ async function loadRealLibrary(){
 }
 
 (async function boot(){
-  await detectBackend();
-  if(BACKEND_AVAILABLE){
-    try{
-      const status=await api.authStatus();
-      if(status.connected){
-        state.connected=true;state.username=status.username;
-        // Real Pull on every app open (not just the manual button), same order
-        // H.pull() already uses: sync first, then reload, so the library the
-        // user first sees is already post-pull -- no stale-then-refreshed flash.
-        try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; }
-        catch(e){ /* non-fatal -- a slow/unreachable AniList never blocks login or the library from loading */ }
-        await loadRealLibrary();
-      }
-    }catch(e){/* couldn't reach it after all; render() proceeds logged-out */}
+  let status;
+  try{ status=await api.authStatus(); }
+  catch(e){ console.error('backend unreachable:',e); state.backendUnreachable=true; render(); return; }
+  if(status.connected){
+    state.connected=true;state.username=status.username;
+    // Real Pull on every app open (not just the manual button), same order
+    // H.pull() already uses: sync first, then reload, so the library the
+    // user first sees is already post-pull -- no stale-then-refreshed flash.
+    try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; }
+    catch(e){ /* non-fatal -- a slow/unreachable AniList never blocks login or the library from loading */ }
+    await loadRealLibrary();
   }
   render();
 })();
