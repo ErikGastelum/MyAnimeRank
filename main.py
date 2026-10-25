@@ -12,7 +12,6 @@ from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 
 import anilist
@@ -69,17 +68,10 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="MyAnimeRank API")
 
-# M6: frontend is served from a different origin than this API (a static file
-# or separate dev server), so the browser needs explicit CORS clearance for
-# fetch() to work at all. Local-only dev tool -- no cookies/credentials in
-# play, so a permissive origin list is fine here.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware, deliberately: the frontend is served same-origin from
+# GET / below, so it never needs CORS -- and adding it would let any other
+# site open in a browser call (and read) these endpoints, several of which
+# write to the user's real AniList account.
 
 _FRONTEND_PATH = Path(__file__).parent / "frontend" / "index.html"
 

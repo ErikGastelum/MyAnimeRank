@@ -3,8 +3,8 @@
 One `media` table for both anime and manga, distinguished by `media_type` --
 set once at import time, never inferred or defaulted. `rating` is a separate
 table so a media row can exist with no rating yet (Planning / early Watching).
-`anilist_auth` is created now (schema-complete per Section 5) but stays
-unused until the M4 OAuth milestone wires it up.
+`anilist_auth` is a single row (id=1) holding the OAuth session written by
+oauth_listener.py; main.require_auth() gates every non-auth route on it.
 """
 import json
 import logging

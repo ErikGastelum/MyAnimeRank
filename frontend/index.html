@@ -43,16 +43,12 @@
   @keyframes rk-pulse{0%,100%{opacity:.35}50%{opacity:.7}}
   #app{display:flex;flex-direction:column;height:100vh;width:100%;background:var(--bg1);color:var(--t1);font-size:14px;overflow:hidden;transform:translateZ(0);will-change:transform}
   #titlebar{flex:0 0 auto}
-  /* pywebview's frameless windows default to easy_drag=True (app.py never sets
-     easy_drag=False): the WHOLE window body is draggable-by-click-and-move
-     unless an element opts out via -webkit-app-region:no-drag. #titlebar
-     already scopes its own buttons correctly (drag on the bar, no-drag on the
-     button row), but #screen -- every other view in the app -- had no region
-     declared at all, so it silently inherited "drag the window" on any
-     click-and-move gesture, consuming it before page JS or a native <input
-     type=range> ever saw it. This is what made every prior slider fix look
-     correct in browser-tab testing (no window-drag concept exists there) and
-     still fail in the real app. */
+  /* Window dragging is scoped to the titlebar's .pywebview-drag-region only:
+     app.py sets easy_drag=False, because pywebview's default (easy_drag=True)
+     makes a click-and-move ANYWHERE drag the window, which swallowed slider
+     gestures in the real app while working fine in a browser tab. The
+     no-drag on #screen is belt-and-braces for any -webkit-app-region-aware
+     WebView, so no view outside the titlebar can ever start a window drag. */
   #screen{flex:1;display:flex;flex-direction:column;min-height:0;-webkit-app-region:no-drag}
 </style>
 </head>
@@ -624,13 +620,12 @@ function setMenuOpen(id,open){const n=document.getElementById(id);if(n){n.style.
 // refresh convention.
 function refreshModal(id,fn){const n=document.getElementById(id);if(n)n.outerHTML=fn();}
 
-// Real login can't just navigate this tab to /auth/anilist/login and back --
+// Login can't just navigate this page to /auth/anilist/login and back --
 // that endpoint redirects to AniList, which redirects to the fixed OAuth
-// listener port (8931), not back to wherever this frontend happens to be
-// served from (no app.py/pywebview shell exists yet to own that redirect).
-// Opening it in a new tab and polling /auth/status from here avoids needing
-// to know that URL at all -- works the same whether this file is opened via
-// file://, a static server, or (later) pywebview.
+// listener port (8931, oauth_listener.py), not back to main.py's own port
+// (dynamic under app.py). So login opens in a separate window and this page
+// polls /auth/status until the listener has stored the token -- the same in
+// the pywebview shell and in a browser tab during dev.
 let _authPollTimer=null;
 function startAuthPolling(){
   if(_authPollTimer)return;
