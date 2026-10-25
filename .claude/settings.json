@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "ecc@ecc": true
-  },
   "permissions": {
     "allow": [
       "Bash(git *)",
@@ -28,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/pre_bash.py"
+            "command": "python .claude/hooks/pre_bash.py"
           }
         ]
       }
@@ -38,10 +35,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/session_end.py"
+            "command": "python .claude/hooks/session_end.py"
           }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "ecc@ecc": true
   }
 }
