@@ -1,4 +1,6 @@
-"""AniList GraphQL client -- search and by-id lookups only.
+"""AniList GraphQL client -- every AniList query and mutation in the app,
+all sent through the single _graphql() helper (plus the OAuth token exchange,
+which is a plain REST call).
 
 No MAL/Jikan calls anywhere in this app (PRD Section 0 / Non-Goals):
 this module is the ONLY place that talks to an external metadata API.

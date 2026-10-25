@@ -7,6 +7,7 @@ exactly one /callback request, exchanges the code, then shuts itself down.
 It is intentionally NOT a long-running part of the app.
 """
 import asyncio
+import html
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -81,7 +82,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
         if error or not code:
             msg = error or "no code returned"
-            self._respond(400, f"<h3>AniList login failed: {msg}</h3>")
+            self._respond(400, f"<h3>AniList login failed: {html.escape(msg)}</h3>")
         else:
             try:
                 _finish_login(code)
@@ -91,7 +92,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
                 self.wfile.write(_SUCCESS_HTML)
             except Exception as e:
                 log.exception("OAuth callback exchange failed")
-                self._respond(500, f"<h3>AniList login failed: {e}</h3>")
+                self._respond(500, f"<h3>AniList login failed: {html.escape(str(e))}</h3>")
 
         # FR-22: the listener closes immediately after that one exchange --
         # shutdown() must run on a separate thread since it blocks until
