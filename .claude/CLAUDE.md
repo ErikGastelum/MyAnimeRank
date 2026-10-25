@@ -159,16 +159,18 @@ toward it.
 - `anilist._graphql()` doesn't handle GraphQL `errors` payloads or 429s.
 - The push retry queue is in-memory only; `token_expires_at` is never checked.
 - Some UI labels use `text-transform:uppercase`, against the convention above.
+- FR-25/FR-28 score-format consent and drift have no frontend wiring: nothing
+  calls `POST /auth/score-format/confirm`, and `push_now`'s
+  `score_format_drift` result is never surfaced (pushes silently skip).
 
 ## Current status
 
 - v2 rebuild feature-complete through M9 per the PRD.
 - Done: `_graphql()` consolidation, debounced-search consolidation (one
   `SEARCH_FETCHERS` dispatcher + `_searchResults` map), `requirements.txt`
-  trimmed to direct deps, dead OAuth values and no-op window handlers removed.
-- Decided, in progress: remove the wildcard CORS middleware (frontend is
-  same-origin); remove the frontend mock/offline mode and its localStorage
-  library cache (FR-47 stands).
+  trimmed to direct deps, dead OAuth values and no-op window handlers removed,
+  wildcard CORS middleware removed (frontend is same-origin), frontend
+  mock/offline mode and its localStorage library cache removed (FR-47).
 
 ## Working philosophy
 
