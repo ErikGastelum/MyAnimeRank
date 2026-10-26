@@ -10,7 +10,7 @@ import json
 import logging
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "library.db"
@@ -198,7 +198,7 @@ def upsert_rating(media_id: int, scores: dict) -> dict:
         # Section 5: audio is always 0.0 for manga, never NULL -- server does not
         # trust whatever the client sent for audio on a manga title.
         audio = scores["audio"] if media_type == "anime" else 0.0
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn.execute(
             """
             INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at)
@@ -229,7 +229,7 @@ def update_status(media_id: int, status: str) -> str | None:
         row = conn.execute("SELECT id FROM media WHERE id = ?", (media_id,)).fetchone()
         if not row:
             return None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE media SET status = ?, updated_at = ? WHERE id = ?",
             (status, now, media_id),
@@ -265,7 +265,7 @@ def update_progress(media_id: int, new_progress: int) -> int | None:
                 repeat_count += 1
                 status = "completed"
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE media SET progress = ?, status = ?, repeat_count = ?, updated_at = ? WHERE id = ?",
             (p, status, repeat_count, now, media_id),
@@ -278,7 +278,7 @@ def update_repeat_count(media_id: int, repeat_count: int) -> int | None:
         row = conn.execute("SELECT id FROM media WHERE id = ?", (media_id,)).fetchone()
         if not row:
             return None
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE media SET repeat_count = ?, updated_at = ? WHERE id = ?",
             (repeat_count, now, media_id),

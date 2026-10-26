@@ -5,7 +5,7 @@ data -- this exists purely to keep Discover/Feed tab-switching within
 AniList's ~90 req/min limit, not as a general-purpose cache.
 """
 import time
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 _store: dict[str, tuple[float, object]] = {}
 

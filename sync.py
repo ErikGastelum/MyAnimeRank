@@ -4,7 +4,7 @@ pure external-API client -- this module is where the two meet.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -27,7 +27,7 @@ async def pull() -> dict:
     imported = 0
     updated = 0
     conflicts = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for media_type in ("anime", "manga"):
         entries = await anilist.get_media_list_collection(
@@ -110,7 +110,7 @@ async def resolve(media_id: int, winner: str) -> dict:
     if not local:
         raise ValueError("media not found")
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     if winner == "remote":
         entries = await anilist.get_media_list_collection(
             auth["access_token"], auth["anilist_user_id"], local["media_type"]
@@ -174,7 +174,7 @@ async def push_now(media_id: int, score_format: str | None = None) -> dict:
             local["repeat_count"],
             overall,
         )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         database.set_last_synced(media_id, now)
         # A brand-new local-only entry has no anilist_list_entry_id until its
         # first successful push creates one on AniList's side.

@@ -3,7 +3,6 @@ import pytest
 import anilist
 import database
 
-
 # ---------------------------------------------------------------- _to_media_type
 
 

@@ -8,6 +8,8 @@ uvicorn main:app --port 8420
 import asyncio
 import logging
 import math
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
@@ -66,7 +68,20 @@ from models import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="MyAnimeRank API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    database.init_db()
+    retry_task = asyncio.create_task(sync.retry_loop())
+    yield
+    # Stop the FR-26 retry loop cleanly instead of abandoning it mid-sleep
+    # when the event loop closes.
+    retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retry_task
+
+
+app = FastAPI(title="MyAnimeRank API", lifespan=lifespan)
 
 # No CORS middleware, deliberately: the frontend is served same-origin from
 # GET / below, so it never needs CORS -- and adding it would let any other
@@ -102,12 +117,6 @@ _FRONTEND_PATH = Path(__file__).parent / "frontend" / "index.html"
 @app.get("/", include_in_schema=False)
 def serve_frontend() -> FileResponse:
     return FileResponse(_FRONTEND_PATH)
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    database.init_db()
-    asyncio.create_task(sync.retry_loop())
 
 
 # FR-47: no route/screen is usable without a valid token. Applied to every
@@ -193,8 +202,8 @@ async def import_media(body: MediaImport):
     # value that disagrees is ignored (and logged), not rejected.
     try:
         remote = await anilist.get_by_id(body.anilist_id)
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="could not reach AniList to verify this title")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail="could not reach AniList to verify this title") from e
     if not remote:
         raise HTTPException(status_code=404, detail="anilist_id not found")
     data = body.model_dump()
@@ -250,7 +259,7 @@ def get_anchors(media_id: int, criterion: str, scope: str = "genre"):
     try:
         anchors = database.get_anchors(media_id, criterion, scope)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if anchors is None:
         raise HTTPException(status_code=404, detail="media not found")
     return {"anchors": anchors}
@@ -303,7 +312,7 @@ async def sync_resolve(media_id: int, body: ResolveIn):
     try:
         return await sync.resolve(media_id, body.winner)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @app.post("/sync/push/{media_id}", response_model=PushResult, dependencies=[Depends(require_auth)])
@@ -311,9 +320,9 @@ async def sync_push(media_id: int):
     try:
         return await sync.push_now(media_id)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"push failed, queued for retry: {e}")
+        raise HTTPException(status_code=502, detail=f"push failed, queued for retry: {e}") from e
 
 
 # ---------------------------------------------------- discover / feed (M5) ----
@@ -473,8 +482,8 @@ async def delete_media(media_id: int):
         raise HTTPException(status_code=404, detail="media not found")
     try:
         await sync.delete_remote_entry(media_id)
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="failed to delete from AniList; local entry not removed")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail="failed to delete from AniList; local entry not removed") from e
     deleted = database.delete_media(media_id)
     return {"deleted": deleted}
 
