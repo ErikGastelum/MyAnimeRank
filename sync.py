@@ -43,11 +43,15 @@ async def pull() -> dict:
                     for k, v in entry.items()
                     if k not in ("list_entry_id", "status", "progress", "repeat_count", "score", "updated_at")
                 }
-                media_data["status"] = entry["status"]
                 media_id = database.insert_or_update_media(media_data)
-                database.update_progress(media_id, entry["progress"])
-                database.update_repeat_count(media_id, entry["repeat_count"])
-                database.set_last_synced(media_id, now)
+                # AniList's status/progress/repeat/score land exactly as-is,
+                # with updated_at == last_synced_at, so the row starts out in
+                # sync: not run through update_progress()'s local auto-complete
+                # rules, and not stamped as a local edit (which made the next
+                # remote change look like a conflict).
+                database.apply_remote_entry(
+                    media_id, entry["status"], entry["progress"], entry["repeat_count"], entry["score"], now
+                )
                 database.set_anilist_list_entry_id(media_id, entry["list_entry_id"])
                 imported += 1
                 continue

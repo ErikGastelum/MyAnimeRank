@@ -8,6 +8,7 @@ oauth_listener.py; main.require_auth() gates every non-auth route on it.
 """
 import json
 import logging
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -411,7 +412,10 @@ def apply_remote_entry(
     intentionally visible in the Detail view rather than hidden, and resolves
     itself the next time the user re-rates. If no local rating exists yet, all
     criteria seed to this one known value (never a fabricated split), since the
-    NOT NULL columns need something. Score is applied in the same transaction
+    NOT NULL columns need something -- snapped to the nearest 0.5 step so
+    criteria stay on the rating scale, while overall keeps AniList's exact
+    score so the next push doesn't rewrite it. Pull's first import of a new
+    entry goes through here too. Score is applied in the same transaction
     as the status/progress/timestamp write, so last_synced_at can never be
     stamped ahead of the score actually landing -- that gap is what let a
     stale local score silently overwrite a real AniList change on the next
@@ -431,12 +435,19 @@ def apply_remote_entry(
                 )
             else:
                 media_row = conn.execute("SELECT media_type FROM media WHERE id = ?", (media_id,)).fetchone()
-                audio = score if media_row["media_type"] == "anime" else 0.0
+                seed = _snap_to_half_step(score)
+                audio = seed if media_row["media_type"] == "anime" else 0.0
                 conn.execute(
                     "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (media_id, score, score, score, audio, score, score, ts),
+                    (media_id, seed, seed, seed, audio, seed, score, ts),
                 )
+
+
+def _snap_to_half_step(score: float) -> float:
+    """Nearest valid criterion value: 1.0-10.0 in 0.5 steps, halves round up
+    (7.25 -> 7.5). AniList's POINT_10_DECIMAL allows e.g. 7.3, criteria don't."""
+    return min(10.0, max(1.0, math.floor(score * 2 + 0.5) / 2))
 
 
 def detect_conflict(local_updated_at: str | None, remote_updated_at: str | None, last_synced_at: str | None) -> str:
