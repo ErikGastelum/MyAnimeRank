@@ -284,6 +284,10 @@ async fn search_media(State(st): State<Shared>, q: Params) -> ApiResult {
 struct MediaImport {
     #[serde(flatten)]
     fields: MediaFields,
+    /// Required, like Python's MediaImport (`title: str`): missing or null is
+    /// a 422. MediaFields keeps it optional (AniList titles can be null), so
+    /// this takes the key and import_media puts it back into `fields`.
+    title: String,
     #[serde(default = "planning")]
     status: String,
 }
@@ -304,6 +308,7 @@ async fn import_media(State(st): State<Shared>, Body(body): Body<MediaImport>) -
         return Err(ApiError::new(404, "anilist_id not found"));
     };
     let mut fields = body.fields;
+    fields.title = Some(body.title);
     if fields.media_type != remote.media_type {
         log::warn!(
             "import anilist_id={}: client sent media_type={:?}, AniList says {:?}; using AniList's",

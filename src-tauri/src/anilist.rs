@@ -787,7 +787,7 @@ fn map_media(node: &Value) -> AlResult<MediaFields> {
         title_native: str_of(&t["native"]),
         title_english: str_of(&t["english"]),
         cover_url: str_of(&node["coverImage"]["large"]),
-        genres: arr(&node["genres"]).iter().filter_map(|g| str_of(g)).collect(),
+        genres: arr(&node["genres"]).iter().filter_map(str_of).collect(),
         tags: arr(&node["tags"]).iter().filter_map(|g| str_of(&g["name"])).collect(),
         producers: arr(&node["studios"]["nodes"]).iter().filter_map(|s| str_of(&s["name"])).collect(),
         year: node["seasonYear"].as_i64(),
