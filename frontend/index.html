@@ -7,8 +7,8 @@
 <!--
   MyAnimeRank v2 frontend — single-file HTML/JS shell (PRD milestone M1).
   Implemented from Claude Design project "MyAnimeRank" / Ranked.dc.html.
-  Data shapes follow PRD Section 7 (API Contract). Served by main.py at GET /
-  and always talks to that same-origin backend -- there is no offline mode.
+  Data shapes follow PRD Section 7 (API Contract). Runs inside the Tauri app
+  (src-tauri/), whose in-process Rust API it always talks to -- there is no offline mode.
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,12 +43,9 @@
   @keyframes rk-pulse{0%,100%{opacity:.35}50%{opacity:.7}}
   #app{display:flex;flex-direction:column;height:100vh;width:100%;background:var(--bg1);color:var(--t1);font-size:14px;overflow:hidden;transform:translateZ(0);will-change:transform}
   #titlebar{flex:0 0 auto}
-  /* Window dragging is scoped to the titlebar's .pywebview-drag-region only:
-     app.py sets easy_drag=False, because pywebview's default (easy_drag=True)
-     makes a click-and-move ANYWHERE drag the window, which swallowed slider
-     gestures in the real app while working fine in a browser tab. The
-     no-drag on #screen is belt-and-braces for any -webkit-app-region-aware
-     WebView, so no view outside the titlebar can ever start a window drag. */
+  /* Window dragging is scoped to the titlebar's data-tauri-drag-region only,
+     so slider gestures anywhere else never move the window. The no-drag on
+     #screen is belt-and-braces for any -webkit-app-region-aware WebView. */
   #screen{flex:1;display:flex;flex-direction:column;min-height:0;-webkit-app-region:no-drag}
 </style>
 </head>
@@ -86,20 +83,30 @@ function fmtScore(n){return (n==null)?'—':Number(n).toFixed(1);}
 function pct(n,max){return Math.max(0,Math.min(100,(n/max)*100))+'%';}
 
 /* ============================================================= API layer
-   Same-origin only: main.py serves this file at GET / on whatever port it
-   runs on (dynamic under app.py), so API_BASE is just this page's origin.
+   Desktop app (Tauri): there is no HTTP server. Each call goes through the
+   `api` command straight into the Rust router in the same process, with the
+   same method, path and JSON as before.
+   Browser dev (`myanimerank --serve`): plain same-origin fetch, as before.
    There is no offline/mock mode -- if the backend can't be reached at boot,
    boot() shows backendDownView() and nothing else (FR-47). */
+const TAURI=window.__TAURI__||null;
 const API_BASE=window.location.origin;
 
-async function apiFetch(path,opts){
-  const resp=await fetch(API_BASE+path,{headers:{'Content-Type':'application/json'},...opts});
-  if(!resp.ok){
-    let detail='';try{detail=(await resp.json()).detail||'';}catch(e){}
-    const err=new Error(`API ${path} failed: ${resp.status} ${detail}`);err.status=resp.status;throw err;
+async function apiFetch(path,opts={}){
+  let status,text;
+  if(TAURI){
+    const r=await TAURI.core.invoke('api',{method:opts.method||'GET',path,body:opts.body??null});
+    status=r.status;text=r.body;
+  }else{
+    const resp=await fetch(API_BASE+path,{headers:{'Content-Type':'application/json'},...opts});
+    status=resp.status;text=await resp.text();
   }
-  if(resp.status===204)return null;
-  return resp.json();
+  if(status<200||status>=300){
+    let detail='';try{detail=JSON.parse(text).detail||'';}catch(e){}
+    const err=new Error(`API ${path} failed: ${status} ${detail}`);err.status=status;throw err;
+  }
+  if(status===204||!text)return null;
+  return JSON.parse(text);
 }
 
 const api={
@@ -351,13 +358,15 @@ function secExpanded(mt,status){
 
 /* ============================================================= actions */
 const H = {};
-// Real window chrome only exists inside the pywebview shell (app.py) --
-// window.pywebview.api is undefined when this runs in a plain browser tab
-// (main.py standalone dev), so these no-op harmlessly there instead of
-// throwing.
-H.winMinimize = ()=>{ if(window.pywebview&&window.pywebview.api) window.pywebview.api.minimize(); };
-H.winMaximize = ()=>{ if(window.pywebview&&window.pywebview.api) window.pywebview.api.toggle_maximize(); };
-H.winClose = ()=>{ if(window.pywebview&&window.pywebview.api) window.pywebview.api.close(); };
+// Real window chrome only exists inside the desktop app -- in a plain
+// browser tab (`--serve` dev mode) these no-op harmlessly instead of
+// throwing. The pywebview branch keeps the old Python shell (app.py) working
+// until it's retired; delete it along with app.py.
+const appWindow=()=>TAURI?TAURI.window.getCurrentWindow():null;
+const pyWindow=()=>window.pywebview&&window.pywebview.api;
+H.winMinimize = ()=>{ if(TAURI)appWindow().minimize(); else pyWindow()?.minimize(); };
+H.winMaximize = ()=>{ if(TAURI)appWindow().toggleMaximize(); else pyWindow()?.toggle_maximize(); };
+H.winClose = ()=>{ if(TAURI)appWindow().close(); else pyWindow()?.close(); };
 function go(view){state.view=view;state.libSortMenuOpen=false;state.detailMenuOpen=false;render();}
 // Fast path for the 4 open/close-only dropdowns below: mutating opacity/pointer-events
 // directly (instead of calling render()) avoids destroying+recreating their box-shadow
@@ -370,12 +379,10 @@ function setMenuOpen(id,open){const n=document.getElementById(id);if(n){n.style.
 // refresh convention.
 function refreshModal(id,fn){const n=document.getElementById(id);if(n)n.outerHTML=fn();}
 
-// Login can't just navigate this page to /auth/anilist/login and back --
-// that endpoint redirects to AniList, which redirects to the fixed OAuth
-// listener port (8931, oauth_listener.py), not back to main.py's own port
-// (dynamic under app.py). So login opens in a separate window and this page
-// polls /auth/status until the listener has stored the token -- the same in
-// the pywebview shell and in a browser tab during dev.
+// Login can't navigate this page to AniList and back: AniList redirects to
+// the fixed OAuth listener port (8931), not to this page. So login opens
+// elsewhere (the system browser in the desktop app, a new tab in browser dev)
+// and this page polls /auth/status until the listener has stored the token.
 let _authPollTimer=null;
 function startAuthPolling(){
   if(_authPollTimer)return;
@@ -392,8 +399,13 @@ function startAuthPolling(){
     }catch(e){/* transient network hiccup while polling -- keep trying */}
   },1500);
 }
-H.connect = ()=>{
-  window.open(API_BASE+'/auth/anilist/login','_blank');
+H.connect = async ()=>{
+  if(TAURI){
+    try{await TAURI.core.invoke('start_login');}
+    catch(e){console.error('login failed to start:',e);alert(String(e));return;}
+  }else{
+    window.open(API_BASE+'/auth/anilist/login','_blank');
+  }
   startAuthPolling();
 };
 H.retryBackend = ()=>{location.reload();};
@@ -535,7 +547,7 @@ H.retryCommunity = ()=>{
 };
 H.deleteCurrent = async ()=>{
   const it=state.current&&state.current.item;if(!it)return;
-  // Delete now also removes the entry from the real AniList list (main.py
+  // Delete now also removes the entry from the real AniList list (the backend
   // sequences that first) -- unlike other mutations, this can't be
   // optimistic: if the AniList-side call fails, the row stays in library.db,
   // so the UI must not make it disappear until the real delete succeeds.
@@ -760,8 +772,8 @@ H.chainAddAndRate = async ()=>{
   r.ids[r.idx]=added.id;r.lastRealId=added.id;r.step=0;r.scores=existingScores(added);render();
 };
 // A JS-tracked mousemove/pointermove drag was tried and confirmed unreliable
-// specifically inside the real pywebview/WebView2 desktop window (this app's
-// actual runtime, app.py) -- documented WebView2 gaps: "MouseHover and
+// specifically inside the real WebView2 desktop window (this app's
+// actual runtime on Windows, under pywebview then and Tauri now) -- documented WebView2 gaps: "MouseHover and
 // MouseMove events do not work with WebView2" (MicrosoftEdge/WebView2Feedback
 // #425) and pointer capture is lost when the cursor leaves the control
 // (microsoft/microsoft-ui-xaml #8677). Both explain why manual pointer/mouse
@@ -1165,23 +1177,17 @@ function conflictDialog(){
 /* ---- titlebar ---- */
 function titlebar(){
   const btn=(act,h,hover)=>`<div data-act="${act}" data-hover="${hover}" style="width:46px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);height:100%">${h}</div>`;
-  // Ground-truthed against the actual installed pywebview (6.2.1, winforms/
-  // WebView2 backend on Windows): its easy_drag implementation is entirely
-  // JS-injected (webview/js/customize.js) and never reads -webkit-app-region
-  // at all -- that CSS property only matters to engines that natively
-  // implement it (e.g. WebKit/Cocoa), which this build doesn't use. The real
-  // opt-in this version's JS checks is a CSS *class*, settings['DRAG_REGION_
-  // SELECTOR'] (default '.pywebview-drag-region'), matched by walking up from
-  // the click target -- so the class must sit only on the logo/title block,
-  // never on an ancestor that also wraps the window-control buttons, or
-  // clicking those buttons would match too. -webkit-app-region is kept
-  // alongside it (harmless here, and genuinely load-bearing on engines that
-  // read it natively, e.g. a future Cocoa/WebKit build).
+  // Tauri starts a window drag only when the mousedown target ITSELF carries
+  // data-tauri-drag-region (double-click toggles maximize). The logo/title
+  // children are pointer-events:none so clicks on them land on the region.
+  // The attribute sits only on the logo/title block, never on an ancestor of
+  // the window-control buttons, so those buttons stay clickable. The
+  // pywebview-drag-region class does the same for the old Python shell.
   return `<div style="flex:0 0 auto;height:40px;background:var(--bg0);border-bottom:1px solid var(--line2);display:flex;align-items:center;justify-content:space-between;padding:0 0 0 14px;user-select:none;">
-    <div class="pywebview-drag-region" style="-webkit-app-region:drag;display:flex;align-items:center;gap:10px;flex:1;height:100%;">
-      <div style="width:13px;height:13px;border-radius:3px;background:var(--accent);transform:rotate(45deg);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);"></div>
-      <span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;letter-spacing:3px;">MyAnimeRank</span>
-      <span style="font-family:'Overpass Mono',monospace;font-size:10px;letter-spacing:1px;color:var(--t4);padding-left:8px;border-left:1px solid var(--line2);">anime · manga scoring</span>
+    <div data-tauri-drag-region class="pywebview-drag-region" style="display:flex;align-items:center;gap:10px;flex:1;height:100%;">
+      <div style="pointer-events:none;width:13px;height:13px;border-radius:3px;background:var(--accent);transform:rotate(45deg);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);"></div>
+      <span style="pointer-events:none;font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;letter-spacing:3px;">MyAnimeRank</span>
+      <span style="pointer-events:none;font-family:'Overpass Mono',monospace;font-size:10px;letter-spacing:1px;color:var(--t4);padding-left:8px;border-left:1px solid var(--line2);">anime · manga scoring</span>
     </div>
     <div style="-webkit-app-region:no-drag;display:flex;align-items:stretch;height:100%;">
       ${btn('winMinimize','<div style="width:11px;height:1px;background:currentColor;"></div>','background:var(--s2);color:var(--t1)')}
@@ -1212,7 +1218,7 @@ function backendDownView(){
   return `<div style="flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);padding:40px;">
     <div style="text-align:center;max-width:380px;">
       <div style="font-size:18px;font-weight:700;margin-bottom:10px;">Can't reach the app backend</div>
-      <p style="font-size:14px;color:var(--t3);line-height:1.6;margin-bottom:26px;">MyAnimeRank needs its local server running. Start it with <code style="font-family:'Overpass Mono',monospace;color:var(--t2);">python app.py</code> (or <code style="font-family:'Overpass Mono',monospace;color:var(--t2);">uvicorn main:app</code> for browser dev), then retry.</p>
+      <p style="font-size:14px;color:var(--t3);line-height:1.6;margin-bottom:26px;">MyAnimeRank couldn't reach its backend. Restart the app (or <code style="font-family:'Overpass Mono',monospace;color:var(--t2);">myanimerank --serve</code> for browser dev), then retry.</p>
       <div data-act="retryBackend" style="display:inline-flex;align-items:center;justify-content:center;padding:12px 22px;border-radius:12px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14px;">Retry</div>
     </div>
   </div>`;
