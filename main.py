@@ -137,6 +137,17 @@ def _to_media_out(record: dict) -> MediaOut:
     )
 
 
+def _validate_status(media_type: str, status: str) -> None:
+    """FR-17 / PRD §7: status must be one of the values for THIS media_type
+    (e.g. 'reading' is manga-only), checked before anything is stored or
+    pushed to AniList."""
+    valid = anilist.local_statuses(media_type)
+    if status not in valid:
+        raise HTTPException(
+            status_code=422, detail=f"status must be one of {sorted(valid)} for {media_type}"
+        )
+
+
 def _validate_rating_audio(media_type: str, audio: float) -> None:
     if media_type == "manga":
         if audio != 0.0:
@@ -213,6 +224,7 @@ async def import_media(body: MediaImport):
             body.anilist_id, data["media_type"], remote["media_type"],
         )
     data["media_type"] = remote["media_type"]
+    _validate_status(data["media_type"], data["status"])
     media_id = database.insert_or_update_media(data)
     return {"id": media_id}
 
@@ -267,9 +279,11 @@ def get_anchors(media_id: int, criterion: str, scope: str = "genre"):
 
 @app.put("/media/{media_id}/status", response_model=StatusOut, dependencies=[Depends(require_auth)])
 def put_status(media_id: int, body: StatusIn, background_tasks: BackgroundTasks):
-    status = database.update_status(media_id, body.status)
-    if status is None:
+    media = database.get_media_by_id(media_id)
+    if media is None:
         raise HTTPException(status_code=404, detail="media not found")
+    _validate_status(media["media_type"], body.status)
+    status = database.update_status(media_id, body.status)
     background_tasks.add_task(sync.push_now_guarded, media_id)
     return {"status": status}
 

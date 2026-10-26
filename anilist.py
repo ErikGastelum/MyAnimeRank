@@ -219,6 +219,13 @@ def local_status_from_al(al_status: str, media_type: str) -> str:
     return _AL_TO_LOCAL_STATUS.get(al_status, {}).get(media_type, "planning")
 
 
+def local_statuses(media_type: str) -> set[str]:
+    """FR-17: the statuses valid for a media_type -- AniList's MediaListStatus
+    enum in this app's words (watching/rewatching for anime, reading/rereading
+    for manga, plus completed/paused/dropped/planning for both)."""
+    return {names[media_type] for names in _AL_TO_LOCAL_STATUS.values()}
+
+
 def authorize_url(client_id: str, redirect_uri: str) -> str:
     return (
         f"{AUTHORIZE_URL}?client_id={client_id}"

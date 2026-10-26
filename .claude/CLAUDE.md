@@ -44,9 +44,9 @@ local_config.py      ANILIST_CLIENT_ID / ANILIST_CLIENT_SECRET (gitignored)
 ## Commands
 
 ```powershell
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime deps + pytest + ruff (use a .venv)
 python -m pytest -q
-ruff check .                   # lint (pip install ruff; config in pyproject.toml)
+ruff check .                   # lint (config in pyproject.toml)
 uvicorn main:app --port 8420   # browser dev (matches .claude/launch.json)
 python app.py                  # desktop window
 ```
@@ -154,8 +154,6 @@ toward it.
 
 - Schema allows nullable `rating.animation` and has no `ON DELETE CASCADE`.
   Fixing either is a migration against live data — see the `library.db` rule.
-- `StatusIn.status` accepts any string; an unknown status is stored and then
-  pushed to AniList as PLANNING. Should be limited to the FR-17 values (422).
 - The push retry queue is in-memory only; `token_expires_at` is never checked.
 - Some UI labels use `text-transform:uppercase`, against the convention above.
 - FR-25/FR-28 score-format consent and drift have no frontend wiring: nothing

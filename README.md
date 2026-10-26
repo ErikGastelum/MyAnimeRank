@@ -18,23 +18,35 @@ in a frameless pywebview desktop window. The product spec is
 
 Requires Python 3.12+.
 
-1. Install dependencies:
+1. Create and activate a virtual environment (`.venv/` is gitignored):
+
+   ```powershell
+   python -m venv .venv
+   .venv\Scripts\Activate.ps1      # Windows PowerShell
+   ```
 
    ```bash
-   pip install -r requirements.txt
+   source .venv/bin/activate        # macOS / Linux
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt       # to run the app
+   pip install -r requirements-dev.txt   # to also run tests and lint (pytest, ruff)
    ```
 
    On Linux, pywebview also needs GTK3 + WebKit2GTK from your OS package
    manager (see the note in `requirements.txt`).
 
-2. Register an AniList API client at <https://anilist.co/settings/developer>
+3. Register an AniList API client at <https://anilist.co/settings/developer>
    with this exact redirect URI:
 
    ```
    http://localhost:8931/callback
    ```
 
-3. Create `local_config.py` in the project root with your client's
+4. Create `local_config.py` in the project root with your client's
    credentials. It's gitignored; never commit it.
 
    ```python
@@ -64,6 +76,8 @@ it, and may migrate its schema, so copy it somewhere safe before upgrading.
 
 ## Test
 
+With the dev dependencies installed (`pip install -r requirements-dev.txt`):
+
 ```bash
 python -m pytest -q
 ```
@@ -75,5 +89,4 @@ never touch `library.db` or the network.
 ruff check .
 ```
 
-runs the linter (configured in `pyproject.toml`; install it with
-`pip install ruff`).
+runs the linter (configured in `pyproject.toml`).
