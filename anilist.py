@@ -6,7 +6,7 @@ No MAL/Jikan calls anywhere in this app (PRD Section 0 / Non-Goals):
 this module is the ONLY place that talks to an external metadata API.
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -76,9 +76,9 @@ def _unwrap(response: httpx.Response) -> dict:
         response.raise_for_status()
     try:
         body = response.json()
-    except ValueError:
+    except ValueError as e:
         response.raise_for_status()
-        raise AniListError("AniList returned a non-JSON response", response.status_code)
+        raise AniListError("AniList returned a non-JSON response", response.status_code) from e
     errors = body.get("errors")
     if errors:
         message = "; ".join(str(e.get("message", "unknown error")) for e in errors)
@@ -331,7 +331,7 @@ def _list_entry(e: dict, media_type: str) -> dict:
         "repeat_count": e["repeat"],
         "score": e["score"],
         "updated_at": (
-            datetime.fromtimestamp(e["updatedAt"], tz=timezone.utc).isoformat()
+            datetime.fromtimestamp(e["updatedAt"], tz=UTC).isoformat()
             if e.get("updatedAt")
             else None
         ),
@@ -431,7 +431,7 @@ _SEASONS = ("WINTER", "SPRING", "SUMMER", "FALL")
 
 
 def _season_year(offset_seasons: int = 0) -> tuple[str, int]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     idx = (now.month - 1) // 3 + offset_seasons
     year = now.year + idx // 4
     return _SEASONS[idx % 4], year
@@ -519,7 +519,7 @@ async def feed(feed_type: str, page: int, own_user_id: int, access_token: str) -
                 "cover_url": (media.get("coverImage") or {}).get("large"),
                 "progress_range": a.get("progress"),
                 "occurred_at": (
-                    datetime.fromtimestamp(created, tz=timezone.utc).isoformat() if created else None
+                    datetime.fromtimestamp(created, tz=UTC).isoformat() if created else None
                 ),
             }
         )

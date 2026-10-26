@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Ruff's defaults (pyflakes + core pycodestyle errors), plus import sorting,
+# common bug patterns, and syntax upgrades for the targeted Python.
+extend-select = ["I", "B", "UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom (`auth: dict = Depends(require_auth)`)
+# is a call in a default by design, not the mutable-default bug B008 targets.
+extend-immutable-calls = ["fastapi.Depends"]

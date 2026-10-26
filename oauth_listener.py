@@ -10,7 +10,7 @@ import asyncio
 import html
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -38,7 +38,7 @@ def _finish_login(code: str) -> dict:
     access_token = token_data["access_token"]
     expires_in = token_data.get("expires_in")
     expires_at = (
-        (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+        (datetime.now(UTC) + timedelta(seconds=expires_in)).isoformat()
         if expires_in
         else None
     )

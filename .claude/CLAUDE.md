@@ -46,6 +46,7 @@ local_config.py      ANILIST_CLIENT_ID / ANILIST_CLIENT_SECRET (gitignored)
 ```powershell
 pip install -r requirements.txt
 python -m pytest -q
+ruff check .                   # lint (pip install ruff; config in pyproject.toml)
 uvicorn main:app --port 8420   # browser dev (matches .claude/launch.json)
 python app.py                  # desktop window
 ```
@@ -153,10 +154,8 @@ toward it.
 
 - Schema allows nullable `rating.animation` and has no `ON DELETE CASCADE`.
   Fixing either is a migration against live data — see the `library.db` rule.
-- `anilist._to_media_type` maps anything that isn't `ANIME` to `manga` (a
-  silent default), and `POST /media` trusts the client-supplied `media_type`
-  instead of taking it from AniList.
-- `anilist._graphql()` doesn't handle GraphQL `errors` payloads or 429s.
+- `StatusIn.status` accepts any string; an unknown status is stored and then
+  pushed to AniList as PLANNING. Should be limited to the FR-17 values (422).
 - The push retry queue is in-memory only; `token_expires_at` is never checked.
 - Some UI labels use `text-transform:uppercase`, against the convention above.
 - FR-25/FR-28 score-format consent and drift have no frontend wiring: nothing
@@ -170,7 +169,10 @@ toward it.
   `SEARCH_FETCHERS` dispatcher + `_searchResults` map), `requirements.txt`
   trimmed to direct deps, dead OAuth values and no-op window handlers removed,
   wildcard CORS middleware removed (frontend is same-origin), frontend
-  mock/offline mode and its localStorage library cache removed (FR-47).
+  mock/offline mode and its localStorage library cache removed (FR-47),
+  media_type taken from AniList on import, `_graphql()` error/404/429
+  handling, one-request pre-push check, lifespan startup, ruff config.
+- Full picture and open items: `PROJECT_STATUS.md`.
 
 ## Working philosophy
 
