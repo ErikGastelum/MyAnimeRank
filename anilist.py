@@ -5,11 +5,47 @@ which is a plain REST call).
 No MAL/Jikan calls anywhere in this app (PRD Section 0 / Non-Goals):
 this module is the ONLY place that talks to an external metadata API.
 """
+import asyncio
 from datetime import datetime, timezone
 
 import httpx
 
 ANILIST_URL = "https://graphql.anilist.co"
+
+# HTTP 429: honor Retry-After, at most this many retries per call, and never
+# block a request longer than this per wait (AniList asking for more means
+# give up now and let the caller / push retry queue try again later).
+_MAX_429_RETRIES = 2
+_MAX_RETRY_WAIT_SECONDS = 30
+_DEFAULT_RETRY_AFTER_SECONDS = 2
+# Module-level so tests can fake 429 waits without patching asyncio.sleep
+# globally (which would also stall every other coroutine, e.g. retry_loop).
+_sleep = asyncio.sleep
+
+
+class AniListError(Exception):
+    """AniList answered with a GraphQL `errors` payload (bad query, invalid
+    token, validation...). Not transient: resending the same request won't
+    help, so this is deliberately NOT an httpx.HTTPError (which push_now()
+    treats as retryable)."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class AniListNotFound(AniListError):
+    """HTTP 404: the requested Media/MediaList/etc doesn't exist. AniList then
+    nulls EVERY root field in the response, not just the missing one."""
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    try:
+        seconds = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        return _DEFAULT_RETRY_AFTER_SECONDS
+    return seconds if seconds > 0 else _DEFAULT_RETRY_AFTER_SECONDS
+
 
 async def _graphql(
     query: str,
@@ -22,9 +58,35 @@ async def _graphql(
         payload["variables"] = variables
     headers = {"Authorization": f"Bearer {token}"} if token else None
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(ANILIST_URL, json=payload, headers=headers)
+        for attempt in range(_MAX_429_RETRIES + 1):
+            response = await client.post(ANILIST_URL, json=payload, headers=headers)
+            if response.status_code != 429 or attempt == _MAX_429_RETRIES:
+                break
+            wait = _retry_after_seconds(response)
+            if wait > _MAX_RETRY_WAIT_SECONDS:
+                break  # a shorter wait would only earn another 429
+            await _sleep(wait)
+    return _unwrap(response)
+
+
+def _unwrap(response: httpx.Response) -> dict:
+    # Rate limits and server errors are transient: keep them httpx.HTTPStatusError
+    # so push_now() queues the edit for retry (FR-26).
+    if response.status_code == 429 or response.status_code >= 500:
         response.raise_for_status()
-        return response.json()["data"]
+    try:
+        body = response.json()
+    except ValueError:
+        response.raise_for_status()
+        raise AniListError("AniList returned a non-JSON response", response.status_code)
+    errors = body.get("errors")
+    if errors:
+        message = "; ".join(str(e.get("message", "unknown error")) for e in errors)
+        if response.status_code == 404 or any(e.get("status") == 404 for e in errors):
+            raise AniListNotFound(message, 404)
+        raise AniListError(message, response.status_code)
+    response.raise_for_status()
+    return body["data"]
 
 
 _MEDIA_FIELDS = """
@@ -114,7 +176,10 @@ async def search(query: str, media_type: str) -> list[dict]:
 
 async def get_by_id(anilist_id: int) -> dict | None:
     variables = {"id": anilist_id}
-    data = await _graphql(_BY_ID_QUERY, variables)
+    try:
+        data = await _graphql(_BY_ID_QUERY, variables)
+    except AniListNotFound:  # AniList 404s an unknown id rather than returning null
+        return None
     node = data.get("Media")
     return _map(node) if node else None
 
@@ -254,26 +319,55 @@ async def get_media_list_collection(access_token: str, user_id: int, media_type:
         timeout=20,
     )
     lists = data["MediaListCollection"]["lists"] or []
-    entries = []
-    for lst in lists:
-        for e in lst["entries"]:
-            media_fields = _map(e["media"])
-            entries.append(
-                {
-                    "list_entry_id": e["id"],
-                    "status": local_status_from_al(e["status"], media_type),
-                    "progress": e["progress"],
-                    "repeat_count": e["repeat"],
-                    "score": e["score"],
-                    "updated_at": (
-                        datetime.fromtimestamp(e["updatedAt"], tz=timezone.utc).isoformat()
-                        if e.get("updatedAt")
-                        else None
-                    ),
-                    **media_fields,
-                }
-            )
-    return entries
+    return [{**_list_entry(e, media_type), **_map(e["media"])} for lst in lists for e in lst["entries"]]
+
+
+def _list_entry(e: dict, media_type: str) -> dict:
+    """One AniList MediaList node -> the sync fields push/pull compare."""
+    return {
+        "list_entry_id": e["id"],
+        "status": local_status_from_al(e["status"], media_type),
+        "progress": e["progress"],
+        "repeat_count": e["repeat"],
+        "score": e["score"],
+        "updated_at": (
+            datetime.fromtimestamp(e["updatedAt"], tz=timezone.utc).isoformat()
+            if e.get("updatedAt")
+            else None
+        ),
+    }
+
+
+_LIST_ENTRY_QUERY = """
+query ($userId: Int, $mediaId: Int) {
+  Viewer { mediaListOptions { scoreFormat } }
+  MediaList(userId: $userId, mediaId: $mediaId) {
+    id
+    status
+    progress
+    repeat
+    score(format: POINT_10_DECIMAL)
+    updatedAt
+  }
+}
+"""
+
+
+async def get_list_entry(access_token: str, user_id: int, anilist_id: int, media_type: str) -> dict:
+    """FR-24/FR-28/FR-58: one request covering both the pre-push conflict check
+    (this title's single list entry) and the scoreFormat re-check. When the
+    title isn't on the list, AniList 404s the whole query -- Viewer included --
+    so score_format is None in that case and the caller must fetch it."""
+    try:
+        data = await _graphql(_LIST_ENTRY_QUERY, {"userId": user_id, "mediaId": anilist_id}, token=access_token)
+    except AniListNotFound:
+        return {"entry": None, "score_format": None}
+    node = data.get("MediaList")
+    viewer = data.get("Viewer") or {}
+    return {
+        "entry": _list_entry(node, media_type) if node else None,
+        "score_format": (viewer.get("mediaListOptions") or {}).get("scoreFormat"),
+    }
 
 
 _SAVE_LIST_ENTRY_MUTATION = """
