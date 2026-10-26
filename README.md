@@ -10,9 +10,48 @@ sync both ways (status, progress, overall score), and you can browse Discover,
 your Feed, characters, staff, studios and user profiles. All metadata comes
 from AniList's GraphQL API.
 
+The product spec is [`docs/PRD.md`](docs/PRD.md).
+
+## Desktop app (Tauri + Rust)
+
+The app is being moved from Python to a single native Rust binary for lower
+memory use. It lives in [`src-tauri/`](src-tauri/): the same API routes,
+JSON shapes and SQLite schema, running in-process (no local web server),
+with the same `frontend/index.html` shown in a frameless Tauri window. The
+Python version below still works during the transition.
+
+### Setup (Windows)
+
+1. Install Rust from <https://rustup.rs> (it sets up the MSVC build tools it
+   needs). WebView2 is already part of Windows 10/11.
+2. AniList credentials: the existing `local_config.py` in the project root is
+   picked up automatically when you run from `src-tauri/`. For the installed
+   app, copy it to `local_config.toml` (same contents) in
+   `%APPDATA%\com.erikgastelum.myanimerank\`. Environment variables
+   `ANILIST_CLIENT_ID` / `ANILIST_CLIENT_SECRET` also work.
+3. Your library: the app keeps its database at
+   `%APPDATA%\com.erikgastelum.myanimerank\library.db`. To bring your
+   existing library over, close the app and **copy** your current
+   `library.db` there (the schema is identical, nothing is migrated). Or point
+   it anywhere with the `MYANIMERANK_DB` environment variable.
+
+### Run
+
+```powershell
+cd src-tauri
+cargo run                      # desktop window (debug build)
+cargo run --release            # optimized build
+cargo run -- --serve 8420      # browser dev at http://127.0.0.1:8420 (uses ./library.db or MYANIMERANK_DB)
+cargo test                     # tests; in-memory databases and a fake AniList, never the network
+```
+
+To build an installer (`.msi` / `.exe`): `cargo install tauri-cli --version "^2" --locked`,
+then `cargo tauri build` from `src-tauri/`.
+
+## Python version (being replaced)
+
 Stack: Python (FastAPI) backend, SQLite, a single-file HTML/JS frontend, shown
-in a frameless pywebview desktop window. The product spec is
-[`docs/PRD.md`](docs/PRD.md).
+in a frameless pywebview desktop window.
 
 ## Setup
 
