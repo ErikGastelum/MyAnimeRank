@@ -18,7 +18,7 @@ A personal, locally-hosted desktop app for ranking anime and manga through **anc
 | Desktop shell | pywebview (frameless) | 6.2.1 |
 | DB | SQLite via stdlib `sqlite3` | — |
 | Frontend | single vanilla HTML/JS file, no build step | — |
-| Lint | ruff (dev tool, not in requirements.txt) | 0.17.2 |
+| Test / lint | pytest, ruff (in `requirements-dev.txt`) | 9.0.3 / 0.17.2 |
 
 ---
 
@@ -34,7 +34,9 @@ oauth_listener.py     one-shot OAuth callback listener, fixed port 8931 (escaped
 cache.py              60s TTL cache for Discover/Feed
 app.py                pywebview shell: uvicorn subprocess on a free port + frameless window
 frontend/index.html   entire UI (real API only; "can't reach backend" screen if the API is down)
-tests/                pytest: 147 tests, 9 files; conftest gives every test a temp DB, AniList always faked
+tests/                pytest: 174 tests, 9 test files + conftest (temp DB per test, AniList always faked)
+requirements.txt      runtime dependencies (direct imports only)
+requirements-dev.txt  requirements.txt + pytest + ruff
 docs/PRD.md           product contract (authoritative)
 docs/anilist-api-notes.md  AniList schema notes and gotchas
 README.md             what it is, setup, run, test
@@ -55,15 +57,16 @@ backups/*.json        v1 JSON backups (committed)
 ## 3. How to run it
 
 ```powershell
-pip install -r requirements.txt
-python app.py                    # desktop window
-uvicorn main:app --port 8420     # browser dev
-python -m pytest -q              # tests
-ruff check .                     # lint (pip install ruff)
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt   # runtime deps + pytest + ruff (requirements.txt alone to just run)
+python app.py                         # desktop window
+uvicorn main:app --port 8420          # browser dev
+python -m pytest -q                   # tests
+ruff check .                          # lint
 ```
 
 **Current results (2026-10-25):**
-- `pytest`: **147 passed**, 1 warning. The warning is Starlette 1.10's TestClient deprecation, asking for a different HTTP client package for tests; not installed, see §7.
+- `pytest`: **174 passed**, 1 warning. The warning is Starlette 1.10's TestClient deprecation, asking for a different HTTP client package for tests; not installed, see §7.
 - `ruff check .`: app and test code clean. 3 findings remain in `.claude/hooks/`, deliberately untouched (see §6).
 - Boot smoke test (TestClient on a temp DB): starts cleanly; `/` 200, `/auth/status` 200, protected routes 401.
 - Live run (Phase 3, against a temp copy of the DB and your real AniList account, read-only screens only): boot, library, Discover, Feed, Profile, Insights, detail, character/VA chain, catalog/studio/user search all worked with zero console errors.
@@ -72,7 +75,7 @@ ruff check .                     # lint (pip install ruff)
 
 ## 4. Git state
 
-- **Branch `rebuild`**, 3 commits ahead of `origin/rebuild` (Phases 4–6 unpushed), plus uncommitted Phase 7 work.
+- **Branch `rebuild`**, pushed through `5bab9ce` (Phase 7). The post-Phase-7 follow-ups below are uncommitted.
 - `main` and `archive/broken-v1` are unchanged at `c6ac79c` (v1).
 
 | Commit | Phase | What |
@@ -84,7 +87,8 @@ ruff check .                     # lint (pip install ruff)
 | `ff2339b` | 4 | media_type taken from AniList on import; strict `_to_media_type`; NULL-criterion anchors |
 | `8f4dd87` | 5 | False-conflict-after-import fix; ratings seeded from AniList scores; sync test coverage |
 | `1fce4f4` | 6 | AniList client hardening; one-request pre-push check |
-| *(uncommitted)* | 7 | Lifespan, ruff config + trivial fixes, README, release.yml deleted, this file |
+| `5bab9ce` | 7 | Lifespan, ruff config + trivial fixes, README, release.yml deleted, status docs |
+| *(uncommitted)* | follow-up | Status validation (FR-17), `requirements-dev.txt`, venv setup in README, `.venv/` ignored |
 
 ---
 
@@ -137,7 +141,12 @@ ruff check .                     # lint (pip install ruff)
 - README added; v1 `release.yml` deleted.
 - `.gitignore` widened to `*.db.bak*`. Your dated backup `library.db.bak-20261025` was *not* ignored before this.
 
-**Tests:** 23 → 147. They now cover `detect_conflict`, Pull/push paths, `apply_remote_entry`, progress auto-complete, anchors, the media_type invariant, AniList error/404/429 handling, auth on every route, CORS, OAuth escaping and lifespan.
+**Follow-ups after Phase 7**
+- Status validation: a status must be valid for the title's media type (FR-17, PRD §7), checked on both status edits and import, before anything is stored or pushed. The valid set comes from the existing AniList-enum mapping (`anilist.local_statuses()`), so there's one source of truth.
+- `requirements-dev.txt` (runtime deps + pytest + ruff), venv setup in the README, `.venv/` gitignored.
+- Checked, no change needed: `app.py` already launches uvicorn with `sys.executable`.
+
+**Tests:** 23 → 174. They now cover `detect_conflict`, Pull/push paths, `apply_remote_entry`, progress auto-complete, anchors, the media_type invariant, AniList error/404/429 handling, auth on every route, CORS, OAuth escaping and lifespan.
 
 ---
 
@@ -150,7 +159,7 @@ ruff check .                     # lint (pip install ruff)
 - Failures from AniList surface clearly instead of as 500s.
 
 **Remaining risks:**
-1. **Old credentials in public git history.** Commit `403be7e` on the public `origin/rebuild` contains an old client secret (`_secrets.py`) and an old AniList token (inside `myanimrank.db`). Rotating and revoking them is on you. I don't know whether that's been done.
+1. ~~**Old credentials in public git history.**~~ **Resolved (2026-10-25):** the old AniList token has been revoked and the old client secret deleted, so the copies still in commit `403be7e` (`_secrets.py`, `myanimrank.db`) are dead. Scrubbing them from history is optional cleanup, not urgent.
 2. **FR-25/FR-28 score-format flow isn't wired in the frontend.** Nothing calls `POST /auth/score-format/confirm`, and a drift result from a push is never shown. If your account isn't on POINT_10_DECIMAL, pushes silently skip.
 3. **Write paths weren't exercised live after Phase 3.** Status, progress, rating, favorite, import and delete are covered by backend tests, but haven't been clicked through in the real UI since the mock removal. Try one of each once.
 4. **The retry queue is in-memory.** Queued pushes are lost on app close. An item that becomes permanently failing logs a traceback every 30s.
@@ -163,10 +172,10 @@ ruff check .                     # lint (pip install ruff)
 
 Roughly by priority:
 
-1. **Rotate the old AniList client secret and revoke the old token** exposed in public history (`403be7e`). Optionally scrub history afterwards with `git filter-repo` and a force-push.
-2. **Push `rebuild`** (Phases 4–6 are local only) and commit Phase 7.
+1. ~~Rotate the old AniList client secret and revoke the old token~~ **Done.** Optional, not urgent: scrub `403be7e` from history with `git filter-repo` and a force-push.
+2. ~~Push `rebuild` and commit Phase 7~~ **Done** (`5bab9ce`, pushed).
 3. **Wire FR-25/FR-28:** the consent dialog on first login, and a drift dialog when a push reports `score_format_drift`.
-4. **Validate status values:** `StatusIn.status` accepts any string, and an unknown status is stored as-is, then pushed to AniList as PLANNING (`_LOCAL_TO_AL_STATUS.get(..., "PLANNING")`). Restrict it to the FR-17 values per media type, with a 422 otherwise.
+4. ~~Validate status values~~ **Done:** `PUT /media/{id}/status` and `POST /media` now return 422 unless the status is one of the FR-17 values for that title's media type.
 5. **Token expiry** (PRD §11 open question): `token_expires_at` is stored but never checked; show a clear re-login prompt.
 6. **Click-test the write paths** in the real app once (see §6.3).
 7. **Frontend `anchorsFor()`** treats a NULL criterion as score 0 (the client-side twin of the Phase 4 server fix).
