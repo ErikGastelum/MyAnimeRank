@@ -11,8 +11,8 @@ import math
 from pathlib import Path
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 import anilist
 import cache
@@ -72,6 +72,25 @@ app = FastAPI(title="MyAnimeRank API")
 # GET / below, so it never needs CORS -- and adding it would let any other
 # site open in a browser call (and read) these endpoints, several of which
 # write to the user's real AniList account.
+
+
+# AniList failures that escape a route become clear HTTP errors instead of a
+# bare 500. Routes that need a different outcome (delete, import, manual push)
+# still catch these themselves first.
+@app.exception_handler(anilist.AniListNotFound)
+async def _anilist_not_found(request: Request, exc: anilist.AniListNotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": f"not found on AniList: {exc}"})
+
+
+@app.exception_handler(anilist.AniListError)
+async def _anilist_error(request: Request, exc: anilist.AniListError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": f"AniList error: {exc}"})
+
+
+@app.exception_handler(httpx.HTTPError)
+async def _anilist_unreachable(request: Request, exc: httpx.HTTPError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": "could not reach AniList, try again shortly"})
+
 
 _FRONTEND_PATH = Path(__file__).parent / "frontend" / "index.html"
 

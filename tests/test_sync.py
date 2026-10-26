@@ -196,56 +196,137 @@ def test_pull_import_copies_anilist_values_exactly(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.fixture
-def fake_push(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    pushed: list[dict] = []
+def remote(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Fake AniList for the push path. Set remote["entry"] (or None = not on
+    the list) and remote["score_format"]; every call is counted, and the full
+    collection fetch is wired to fail the test if push ever uses it."""
+    state = {"entry": None, "score_format": "POINT_10_DECIMAL", "pushed": [],
+             "calls": {"get_list_entry": 0, "get_viewer": 0, "push_list_entry": 0}}
+
+    async def get_list_entry(token, user_id, anilist_id, media_type) -> dict:
+        state["calls"]["get_list_entry"] += 1
+        if state["entry"] is None:   # AniList 404s the whole query, Viewer included
+            return {"entry": None, "score_format": None}
+        return {"entry": state["entry"], "score_format": state["score_format"]}
 
     async def get_viewer(token: str) -> dict:
-        return {"id": 1, "name": "tester", "score_format": "POINT_10_DECIMAL"}
+        state["calls"]["get_viewer"] += 1
+        return {"id": 1, "name": "tester", "score_format": state["score_format"]}
 
     async def push_list_entry(token, anilist_id, status, progress, repeat_count, overall) -> dict:
-        pushed.append({"anilist_id": anilist_id, "status": status, "progress": progress,
-                       "repeat_count": repeat_count, "overall": overall})
+        state["calls"]["push_list_entry"] += 1
+        state["pushed"].append({"anilist_id": anilist_id, "status": status, "progress": progress,
+                                "repeat_count": repeat_count, "overall": overall})
         return {"id": 5555}
 
+    async def no_collection(*args):
+        raise AssertionError("push path must not fetch the whole list collection")
+
+    monkeypatch.setattr(anilist, "get_list_entry", get_list_entry)
     monkeypatch.setattr(anilist, "get_viewer", get_viewer)
     monkeypatch.setattr(anilist, "push_list_entry", push_list_entry)
-    return pushed
+    monkeypatch.setattr(anilist, "get_media_list_collection", no_collection)
+    return state
 
 
-def test_guarded_push_pushes_a_clean_local_change(monkeypatch: pytest.MonkeyPatch, fake_push) -> None:
+def remote_entry(**kw) -> dict:
+    base = {"list_entry_id": 1001, "status": "watching", "progress": 3, "repeat_count": 0,
+            "score": 0, "updated_at": ts(1)}
+    base.update(kw)
+    return base
+
+
+def test_guarded_push_pushes_a_clean_local_change_in_two_requests(remote) -> None:
     media_id = local_row(1, status="completed", progress=12, updated_at=ts(10), last_synced_at=ts(5),
                          anilist_list_entry_id=1001)
-    fake_collection(monkeypatch, [entry(1, updated_at=ts(1))])
+    remote["entry"] = remote_entry(updated_at=ts(1))
 
     result = asyncio.run(sync.push_now_guarded(media_id))
 
     assert result["synced_at"] is not None
-    assert fake_push == [{"anilist_id": 1, "status": "completed", "progress": 12, "repeat_count": 0, "overall": None}]
+    assert remote["pushed"] == [{"anilist_id": 1, "status": "completed", "progress": 12, "repeat_count": 0, "overall": None}]
     assert database.get_media_by_id(media_id)["last_synced_at"] == result["synced_at"]
+    # One combined entry+scoreFormat lookup, one mutation; no separate Viewer call.
+    assert remote["calls"] == {"get_list_entry": 1, "get_viewer": 0, "push_list_entry": 1}
 
 
-def test_guarded_push_creates_entry_when_no_remote_counterpart(monkeypatch: pytest.MonkeyPatch, fake_push) -> None:
+def test_guarded_push_creates_entry_when_no_remote_counterpart(remote) -> None:
     media_id = local_row(1, updated_at=ts(10), last_synced_at=None)
-    fake_collection(monkeypatch, [])
+    remote["entry"] = None
 
     asyncio.run(sync.push_now_guarded(media_id))
 
-    assert len(fake_push) == 1
     row = database.get_media_by_id(media_id)
     assert (row["anilist_list_entry_id"], row["pending_conflict"]) == (5555, 0)
+    # AniList nulls Viewer on the 404, so scoreFormat needs its own call here.
+    assert remote["calls"] == {"get_list_entry": 1, "get_viewer": 1, "push_list_entry": 1}
 
 
-def test_guarded_push_refuses_on_conflict(monkeypatch: pytest.MonkeyPatch, fake_push) -> None:
+def test_guarded_push_refuses_on_conflict(remote) -> None:
     media_id = local_row(1, updated_at=ts(10), last_synced_at=ts(5), anilist_list_entry_id=1001)
-    fake_collection(monkeypatch, [entry(1, progress=9, updated_at=ts(10))])
+    remote["entry"] = remote_entry(progress=9, updated_at=ts(10))
     sync._push_queue.add(media_id)
 
     result = asyncio.run(sync.push_now_guarded(media_id))
 
     assert result["conflict"] is True
-    assert fake_push == []
+    assert remote["pushed"] == []
     assert database.get_media_by_id(media_id)["pending_conflict"] == 1
     assert media_id not in sync._push_queue
+
+
+def test_guarded_push_rechecks_score_format_on_every_push(remote) -> None:
+    # FR-28: the format comes back fresh with the entry lookup, so a drift made
+    # on the AniList website is caught before any score is written.
+    media_id = local_row(1, updated_at=ts(10), last_synced_at=ts(5), anilist_list_entry_id=1001)
+    remote["entry"] = remote_entry(updated_at=ts(1))
+    remote["score_format"] = "POINT_100"
+
+    result = asyncio.run(sync.push_now_guarded(media_id))
+
+    assert result == {"synced_at": None, "score_format_drift": True}
+    assert remote["pushed"] == []
+    assert database.get_auth()["score_format"] == "POINT_100"
+
+
+def test_guarded_push_queues_for_retry_when_offline(monkeypatch: pytest.MonkeyPatch, remote) -> None:
+    # FR-26: a network failure on the pre-push lookup must still queue the
+    # edit, or it would never reach AniList.
+    async def offline(*args):
+        raise anilist.httpx.ConnectError("offline")
+
+    monkeypatch.setattr(anilist, "get_list_entry", offline)
+    media_id = local_row(1, updated_at=ts(10), last_synced_at=ts(5), anilist_list_entry_id=1001)
+
+    with pytest.raises(anilist.httpx.ConnectError):
+        asyncio.run(sync.push_now_guarded(media_id))
+
+    assert media_id in sync._push_queue
+
+
+def test_retry_loop_logs_failures_instead_of_swallowing_them(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sleeps = 0
+
+    async def one_tick(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError  # stop the infinite loop after one pass
+
+    async def boom(media_id: int) -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sync.asyncio, "sleep", one_tick)
+    monkeypatch.setattr(sync, "push_now_guarded", boom)
+    sync._push_queue.add(42)
+
+    with caplog.at_level("WARNING", logger="sync"), pytest.raises(asyncio.CancelledError):
+        asyncio.run(sync.retry_loop())
+
+    assert "media_id=42" in caplog.text and "boom" in caplog.text
+    assert 42 in sync._push_queue   # still queued for the next pass
 
 
 def test_push_of_unrated_title_never_sends_a_score(monkeypatch: pytest.MonkeyPatch) -> None:

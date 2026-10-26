@@ -141,10 +141,14 @@ async def resolve(media_id: int, winner: str) -> dict:
     raise ValueError(f"invalid winner: {winner!r}")
 
 
-async def push_now(media_id: int) -> dict:
+async def push_now(media_id: int, score_format: str | None = None) -> dict:
     """FR-24/FR-25/FR-28. Transient network failures get queued for retry
-    (FR-26); permanent errors (not connected, media doesn't exist) are NOT
-    queued -- retrying those forever would never succeed."""
+    (FR-26); permanent errors (not connected, media doesn't exist, an AniList
+    GraphQL error) are NOT queued -- retrying those forever would never succeed.
+
+    `score_format`: a scoreFormat the caller already fetched fresh for this
+    push (push_now_guarded gets it free with its entry lookup); when None it
+    is fetched here. Either way it is re-checked on every push, never cached."""
     auth = database.get_auth()
     if not auth:
         raise RuntimeError("not connected")
@@ -154,11 +158,11 @@ async def push_now(media_id: int) -> dict:
 
     try:
         # FR-28: re-check scoreFormat on every sync, never silently reapply.
-        viewer = await anilist.get_viewer(auth["access_token"])
-        current_format = viewer["score_format"]
-        if auth.get("score_format") != current_format:
-            database.update_score_format(current_format)
-        if current_format != "POINT_10_DECIMAL":
+        if score_format is None:
+            score_format = (await anilist.get_viewer(auth["access_token"]))["score_format"]
+        if auth.get("score_format") != score_format:
+            database.update_score_format(score_format)
+        if score_format != "POINT_10_DECIMAL":
             return {"synced_at": None, "score_format_drift": True}
 
         overall = (local.get("rating") or {}).get("overall")
@@ -225,10 +229,19 @@ async def push_now_guarded(media_id: int) -> dict:
     if not local:
         raise ValueError("media not found")
 
-    entries = await anilist.get_media_list_collection(
-        auth["access_token"], auth["anilist_user_id"], local["media_type"]
-    )
-    remote_entry = next((e for e in entries if e["anilist_id"] == local["anilist_id"]), None)
+    # One request for this title's own list entry plus a fresh scoreFormat
+    # (not the whole collection + a separate Viewer call). A network failure
+    # here must still queue the edit (FR-26) -- it runs before push_now()'s
+    # own retry handling ever gets a chance.
+    try:
+        remote = await anilist.get_list_entry(
+            auth["access_token"], auth["anilist_user_id"], local["anilist_id"], local["media_type"]
+        )
+    except httpx.HTTPError:
+        log.warning("pre-push lookup failed for media_id=%s (network), queued for retry", media_id)
+        _push_queue.add(media_id)
+        raise
+    remote_entry = remote["entry"]
 
     if remote_entry is None:
         return await push_now(media_id)
@@ -244,7 +257,7 @@ async def push_now_guarded(media_id: int) -> dict:
         log.warning("automatic push skipped for media_id=%s: conflict with remote change", media_id)
         return {"synced_at": None, "score_format_drift": False, "conflict": True}
 
-    return await push_now(media_id)
+    return await push_now(media_id, score_format=remote["score_format"])
 
 
 async def retry_loop() -> None:
@@ -260,7 +273,8 @@ async def retry_loop() -> None:
                 await push_now_guarded(media_id)
                 log.info("retry succeeded for media_id=%s", media_id)
             except Exception:
-                pass  # stays queued, tries again next interval
+                # Stays queued and tries again next interval -- but say why.
+                log.exception("retry failed for media_id=%s; still queued", media_id)
 
 
 async def get_pending_conflicts() -> list[dict]:
