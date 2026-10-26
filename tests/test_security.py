@@ -1,19 +1,11 @@
 import threading
-from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import database
 import main
 import oauth_listener
-
-
-@pytest.fixture(autouse=True)
-def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never open library.db -- startup runs init_db() against DB_PATH."""
-    monkeypatch.setattr(database, "DB_PATH", tmp_path / "library.db")
 
 
 def test_app_serves_frontend_and_auth_status() -> None:

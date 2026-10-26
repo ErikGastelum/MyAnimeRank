@@ -68,7 +68,13 @@ _AL_TYPE = {"anime": "ANIME", "manga": "MANGA"}
 
 
 def _to_media_type(al_type: str) -> str:
-    return "anime" if al_type == "ANIME" else "manga"
+    """AniList's MediaType enum -> our media_type. Anything else is an error,
+    never a default: media_type is set once from AniList and never guessed."""
+    if al_type == "ANIME":
+        return "anime"
+    if al_type == "MANGA":
+        return "manga"
+    raise ValueError(f"unexpected AniList media type: {al_type!r}")
 
 
 def _map(node: dict) -> dict:

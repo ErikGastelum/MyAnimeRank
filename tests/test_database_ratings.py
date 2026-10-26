@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 from pydantic import ValidationError
@@ -7,15 +5,6 @@ from pydantic import ValidationError
 import database
 import main
 from models import RatingIn
-
-
-@pytest.fixture(autouse=True)
-def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Give every test its own SQLite database and never open library.db."""
-    db_path = tmp_path / "library.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
-    database.init_db()
-    return db_path
 
 
 def _scores(
