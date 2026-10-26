@@ -303,7 +303,7 @@ def get_anchors(media_id: int, criterion: str, scope: str) -> list[dict] | None:
             f"""
             SELECT m.id, m.title, m.title_english, m.cover_url, m.genres, r.{criterion} AS score
             FROM media m JOIN rating r ON r.media_id = m.id
-            WHERE m.media_type = ? AND m.id != ?
+            WHERE m.media_type = ? AND m.id != ? AND r.{criterion} IS NOT NULL
             """,
             (target["media_type"], media_id),
         ).fetchall()

@@ -169,7 +169,23 @@ async def search_media(q: str, type: str):
 
 @app.post("/media", dependencies=[Depends(require_auth)])
 async def import_media(body: MediaImport):
-    media_id = database.insert_or_update_media(body.model_dump())
+    # FR-3: media_type comes from AniList's own record for this anilist_id,
+    # never from the client body -- same rule as overall (FR-9). A client
+    # value that disagrees is ignored (and logged), not rejected.
+    try:
+        remote = await anilist.get_by_id(body.anilist_id)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="could not reach AniList to verify this title")
+    if not remote:
+        raise HTTPException(status_code=404, detail="anilist_id not found")
+    data = body.model_dump()
+    if data["media_type"] != remote["media_type"]:
+        log.warning(
+            "import anilist_id=%s: client sent media_type=%r, AniList says %r -- using AniList's",
+            body.anilist_id, data["media_type"], remote["media_type"],
+        )
+    data["media_type"] = remote["media_type"]
+    media_id = database.insert_or_update_media(data)
     return {"id": media_id}
 
 
