@@ -357,6 +357,24 @@ async fn import_takes_media_type_from_anilist_not_the_client() {
 }
 
 #[tokio::test]
+async fn import_requires_a_title_like_pythons_media_import() {
+    let fake = fake_anilist(|_, _| (200, json!({"data": {"Media": media_node(7, "ANIME")}}), None)).await;
+    let st = state_with(&fake);
+    login(&st);
+    for body in [json!({"anilist_id": 7, "media_type": "anime"}), json!({"anilist_id": 7, "media_type": "anime", "title": null})] {
+        let (s, _) = call(&st, "POST", "/media", Some(body.clone())).await;
+        assert_eq!(s, 422, "{body}");
+    }
+    assert!(fake.calls().is_empty());
+    assert!(st.db.get_media_by_anilist_id(7).unwrap().is_none());
+
+    let (s, b) = call(&st, "POST", "/media", Some(json!({"anilist_id": 7, "media_type": "anime", "title": "x"}))).await;
+    assert_eq!(s, 200);
+    let m = st.db.get_media_by_id(b["id"].as_i64().unwrap()).unwrap().unwrap();
+    assert_eq!(m.fields.title.as_deref(), Some("x"));
+}
+
+#[tokio::test]
 async fn import_502s_when_anilist_is_unreachable() {
     let st = offline_state().await;
     login(&st);

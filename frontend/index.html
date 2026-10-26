@@ -2028,8 +2028,10 @@ function detailView(){
   ];
   const divergence=rated?(it.rating.overall-it.avg_score):0;
 
+  // No overflow:hidden on the hero: the Status/Progress menus hang below it
+  // and were clipped. Its backgrounds stay inside it on their own.
   return `<div style="animation:rk-fade .25s ease;">
-    <div style="position:relative;padding:30px 38px 26px;background:linear-gradient(180deg,${cover(it.title)},transparent);overflow:hidden;">
+    <div style="position:relative;padding:30px 38px 26px;background:linear-gradient(180deg,${cover(it.title)},transparent);">
       <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(12,13,16,.55),var(--bg1));"></div>
       <div style="position:relative;max-width:1180px;margin:0 auto;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;">
