@@ -1211,18 +1211,25 @@ async fn callback_page_never_reflects_query_text_as_html() {
 }
 
 #[test]
-fn config_falls_back_to_the_builtin_client_id() {
+fn client_id_comes_from_the_env_var_then_local_config_toml_then_the_builtin() {
     let dir = tempfile::tempdir().unwrap();
-    let files = [dir.path().join("local_config.toml"), dir.path().join("local_config.py")];
-    assert_eq!(Config::from_sources(None, &files).client_id, config::BUILTIN_CLIENT_ID);
-    assert_eq!(Config::from_sources(Some(String::new()), &files).client_id, config::BUILTIN_CLIENT_ID);
+    let toml = dir.path().join("local_config.toml");
+    // Nothing set (no config folder, or no file in it): the built-in ID.
+    assert_eq!(Config::from_sources(None, None).client_id, config::BUILTIN_CLIENT_ID);
+    assert_eq!(Config::from_sources(None, Some(&toml)).client_id, config::BUILTIN_CLIENT_ID);
+    assert_eq!(Config::from_sources(Some(String::new()), Some(&toml)).client_id, config::BUILTIN_CLIENT_ID);
     assert_eq!(
         anilist::authorize_url(config::BUILTIN_CLIENT_ID),
         format!("https://anilist.co/api/v2/oauth/authorize?client_id={}&response_type=token", config::BUILTIN_CLIENT_ID)
     );
 
-    // Overrides: a file, then the environment variable over it.
-    std::fs::write(&files[1], "ANILIST_CLIENT_ID = \"777\"\n").unwrap();
-    assert_eq!(Config::from_sources(None, &files).client_id, "777");
-    assert_eq!(Config::from_sources(Some("888".into()), &files).client_id, "888");
+    // Overrides: local_config.toml, then the environment variable over it.
+    std::fs::write(&toml, "ANILIST_CLIENT_ID = \"777\"\n").unwrap();
+    assert_eq!(Config::from_sources(None, Some(&toml)).client_id, "777");
+    assert_eq!(Config::from_sources(Some("888".into()), Some(&toml)).client_id, "888");
+
+    // A local_config.py in the config folder is never read.
+    std::fs::remove_file(&toml).unwrap();
+    std::fs::write(dir.path().join("local_config.py"), "ANILIST_CLIENT_ID = \"999\"\n").unwrap();
+    assert_eq!(Config::from_sources(None, Some(&toml)).client_id, config::BUILTIN_CLIENT_ID);
 }
