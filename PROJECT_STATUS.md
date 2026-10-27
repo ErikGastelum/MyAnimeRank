@@ -125,7 +125,8 @@ database.
 - Default branch: **`main`**. `rebuild` and `tauri-port` were merged in and
   deleted.
 - Current branch: **`remove-python`** (deletes the Python app, ports its
-  remaining test coverage). Not yet merged or pushed.
+  remaining test coverage, moves the PRD's stack sections to Rust). Its first
+  commit (`f611e7f`) is also on local `main`; neither branch is pushed.
 
 | Commit | What |
 |---|---|
