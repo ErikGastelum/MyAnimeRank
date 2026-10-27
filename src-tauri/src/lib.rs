@@ -97,21 +97,46 @@ fn database_path(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Error>
     if let Some(p) = std::env::var_os("MYANIMERANK_DB") {
         return Ok(PathBuf::from(p));
     }
-    let dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("library.db"))
+    Ok(app.path().app_data_dir()?.join("library.db"))
+}
+
+/// A release build has no console, so a startup failure is shown in a native
+/// dialog, with the (empty) window hidden behind it, and the app exits once
+/// it's dismissed. Non-blocking: on macOS the dialog needs the main thread,
+/// which the setup hook is still holding.
+fn exit_with_error(app: &tauri::App, message: String) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    log::error!("{message}");
+    for window in app.webview_windows().values() {
+        let _ = window.hide();
+    }
+    let handle = app.handle().clone();
+    app.dialog()
+        .message(message)
+        .title("MyAnimeRank can't start")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
 }
 
 pub fn run() {
     init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let db_path = database_path(app)?;
             log::info!("library database: {}", db_path.display());
+            let db = match db::Db::open(&db_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    // Returning Err here would make Tauri panic instead.
+                    exit_with_error(app, format!("Could not open the library database at\n{}\n\n{e}", db_path.display()));
+                    return Ok(());
+                }
+            };
             let config_dir = app.path().app_config_dir().ok();
             let config = config::Config::load(config_dir.as_deref());
-            let state = AppState::new(db::Db::open(&db_path)?, anilist::AniList::default(), config);
+            let state = AppState::new(db, anilist::AniList::default(), config);
             app.manage(api::router(state.clone()));
             app.manage(state.clone());
             tauri::async_runtime::spawn(sync::retry_loop(state));
@@ -134,7 +159,13 @@ pub fn serve(port: u16) {
     runtime.block_on(async move {
         let db_path = std::env::var_os("MYANIMERANK_DB").map(PathBuf::from).unwrap_or_else(|| "library.db".into());
         log::info!("library database: {}", db_path.display());
-        let db = db::Db::open(&db_path).expect("open database");
+        let db = match db::Db::open(&db_path) {
+            Ok(db) => db,
+            Err(e) => {
+                log::error!("could not open the library database at {}: {e}", db_path.display());
+                std::process::exit(1);
+            }
+        };
         let config = config::Config::load(None);
         let state = AppState::new(db, anilist::AniList::default(), config);
         tokio::spawn(sync::retry_loop(state.clone()));
