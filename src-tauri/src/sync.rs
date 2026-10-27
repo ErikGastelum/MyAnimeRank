@@ -68,6 +68,14 @@ fn conflict_entry(local: &Media, remote: Option<(&str, i64, Option<&str>)>) -> V
     })
 }
 
+/// What one pulled entry did locally.
+enum Pulled {
+    Imported,
+    Updated,
+    Conflict(Value),
+    Unchanged,
+}
+
 /// FR-23. One-sided changes apply automatically; both-sides-changed entries
 /// come back as conflicts and are NOT auto-resolved.
 pub async fn pull(st: &Shared) -> SyncResult<Value> {
@@ -82,42 +90,60 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
             .get_media_list_collection(&auth.access_token, auth.anilist_user_id, media_type)
             .await?;
         for entry in entries {
-            let Some(local) = st.db.get_media_by_anilist_id(entry.media.anilist_id)? else {
-                // New AniList entry with no local row: import directly. Its
-                // status/progress/score land exactly as AniList has them, with
-                // updated_at == last_synced_at, so the row starts in sync.
-                let media_id = st.db.insert_or_update_media(&entry.media, None)?;
-                st.db.apply_remote_entry(media_id, &entry.status, entry.progress, entry.repeat_count, entry.score, &now)?;
-                st.db.set_anilist_list_entry_id(media_id, entry.list_entry_id)?;
-                imported += 1;
-                continue;
-            };
-
-            // Backfill for rows imported before anilist_list_entry_id existed.
-            if local.anilist_list_entry_id.is_none() {
-                st.db.set_anilist_list_entry_id(local.id, entry.list_entry_id)?;
-            }
-
-            match detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref()) {
-                SyncOutcome::Conflict => {
-                    // FR-58: same flag push_now_guarded() sets.
-                    st.db.set_pending_conflict(local.id, true)?;
-                    conflicts.push(conflict_entry(
-                        &local,
-                        Some((&entry.status, entry.progress, entry.updated_at.as_deref())),
-                    ));
-                }
-                SyncOutcome::Remote => {
-                    st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, entry.score, &now)?;
-                    updated += 1;
-                }
-                // Local wins but is pushed separately (FR-24); just mark seen.
-                SyncOutcome::Local => st.db.set_last_synced(local.id, &now)?,
-                SyncOutcome::None => {}
+            // One entry failing (say, a write that fails for a moment) must
+            // not stop the rest. It's left untouched locally, so the next
+            // pull tries it again.
+            match pull_entry(st, &entry, &now) {
+                Ok(Pulled::Imported) => imported += 1,
+                Ok(Pulled::Updated) => updated += 1,
+                Ok(Pulled::Conflict(c)) => conflicts.push(c),
+                Ok(Pulled::Unchanged) => {}
+                Err(e) => log::error!("pull skipped AniList media {} ({media_type}): {e}", entry.media.anilist_id),
             }
         }
     }
     Ok(json!({"imported": imported, "updated": updated, "conflicts": conflicts}))
+}
+
+fn pull_entry(st: &Shared, entry: &ListEntry, now: &str) -> SyncResult<Pulled> {
+    let Some(local) = st.db.get_media_by_anilist_id(entry.media.anilist_id)? else {
+        // New AniList entry with no local row: import directly. Its
+        // status/progress/score land exactly as AniList has them, with
+        // updated_at == last_synced_at, so the row starts in sync.
+        st.db.import_remote_entry(
+            &entry.media,
+            entry.list_entry_id,
+            &entry.status,
+            entry.progress,
+            entry.repeat_count,
+            entry.score,
+            now,
+        )?;
+        return Ok(Pulled::Imported);
+    };
+
+    // Backfill for rows imported before anilist_list_entry_id existed.
+    if local.anilist_list_entry_id.is_none() {
+        st.db.set_anilist_list_entry_id(local.id, entry.list_entry_id)?;
+    }
+
+    Ok(match detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref()) {
+        SyncOutcome::Conflict => {
+            // FR-58: same flag push_now_guarded() sets.
+            st.db.set_pending_conflict(local.id, true)?;
+            Pulled::Conflict(conflict_entry(&local, Some((&entry.status, entry.progress, entry.updated_at.as_deref()))))
+        }
+        SyncOutcome::Remote => {
+            st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, entry.score, now)?;
+            Pulled::Updated
+        }
+        // Local wins but is pushed separately (FR-24); just mark seen.
+        SyncOutcome::Local => {
+            st.db.set_last_synced(local.id, now)?;
+            Pulled::Unchanged
+        }
+        SyncOutcome::None => Pulled::Unchanged,
+    })
 }
 
 async fn find_remote(st: &Shared, auth: &crate::db::Auth, local: &Media) -> SyncResult<Option<ListEntry>> {
