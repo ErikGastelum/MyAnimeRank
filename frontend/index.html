@@ -226,14 +226,23 @@ const DISCOVER_SECTIONS=[
   {key:'top_ranked_movies',label:'Top Ranked Movies'},
   {key:'popular',label:'Popular'},
 ];
+// _discoverCache[`${section}:${mt}`]: undefined = loading (skeleton shelf),
+// false = that section's fetch failed, array = loaded. Opening Discover (or
+// its Anime/Manga toggle) again re-fetches only the sections not loaded yet.
 let _discoverCache={};
+const _discoverLoading=new Set();
 async function loadDiscoverType(mt){
-  await Promise.all(DISCOVER_SECTIONS.map(async sec=>{
+  const todo=DISCOVER_SECTIONS.filter(sec=>!_discoverCache[`${sec.key}:${mt}`]);
+  if(!todo.length||_discoverLoading.has(mt))return;
+  _discoverLoading.add(mt);
+  todo.forEach(sec=>{delete _discoverCache[`${sec.key}:${mt}`];});
+  await Promise.all(todo.map(async sec=>{
     try{
       const resp=await api.getDiscover(sec.key,mt);
       _discoverCache[`${sec.key}:${mt}`]=resp.results;
-    }catch(e){ console.error('discover fetch failed:',sec.key,mt,e); }
+    }catch(e){ console.error('discover fetch failed:',sec.key,mt,e); _discoverCache[`${sec.key}:${mt}`]=false; }
   }));
+  _discoverLoading.delete(mt);
   render();
 }
 // Search results caches, one per result shape, populated by a debounced fetch
@@ -368,6 +377,7 @@ function povr(url,label){ return url?`<img src="${esc(url)}" alt="${esc(label||'
 /* ============================================================= state */
 const state = {
   connected:false,
+  booting:true,              // boot(): /auth/status, then the first Pull + library load
   view:'library',            // library|discover|feed|profile|search|rating|detail|insights|person|studio|user
   mediaType:'anime',
   libSearch:'', libSort:'score', libSortMenuOpen:false,
@@ -472,7 +482,7 @@ H.nav = (el)=>{
   if(t==='anime'){state.view='library';state.mediaType='anime';}
   else if(t==='manga'){state.view='library';state.mediaType='manga';}
   else go(t);
-  if(t==='discover'&&!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);
+  if(t==='discover')loadDiscoverType(state.discoverType);
   if(t==='profile'&&!_profileStats)loadProfileData();
   if(t==='feed'&&!_feedCache[state.feedType])loadFeed(state.feedType);
   render();
@@ -517,7 +527,7 @@ H.openSearch = ()=>{state.view='search';state.searchType=state.mediaType;state.s
 H.openDiscoverSearch = ()=>{state.discoverSearchOpen=true;state.searchType=state.discoverType;state.dquery='';render();};
 H.closeDiscoverSearch = ()=>{state.discoverSearchOpen=false;render();};
 H.dQuery = (el)=>{state.dquery=el.value;triggerSearch('media',state.dquery,state.searchType);render();};
-H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;if(!_discoverCache[`trending:${state.discoverType}`])loadDiscoverType(state.discoverType);render();};
+H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;loadDiscoverType(state.discoverType);render();};
 // FR-55: real mode keys by anilist_id (data-arg), never title text. `library`
 // is already the authoritative real cache (loaded at boot, kept in sync) --
 // check it first to avoid a redundant network round-trip for anything
@@ -1194,6 +1204,7 @@ function render(){
 
 function view(){
   if(state.backendUnreachable)return backendDownView();
+  if(state.booting)return bootView();
   return (state.connected ? shell() : loginGate()) + importModal() + discoverSearchModal() + profileSettingsModal() + rewatchDialog() + conflictDialog();
 }
 
@@ -1276,6 +1287,20 @@ function loginGate(){
       ${state.loginError?`<p style="font-size:13px;color:#e57373;line-height:1.5;margin-top:18px;">Couldn't start login: ${esc(state.loginError)}</p>`:''}
     </div>
   </div>`;
+}
+
+/* ---- boot / syncing ---- */
+// Shown by boot() until the first Pull and library load are done (logo alone
+// until /auth/status says we're connected), and by libraryView() while the
+// Pull right after login runs into a still-empty library.
+function syncingBlock(label){
+  return `<div style="text-align:center;">
+    <div style="width:44px;height:44px;border-radius:12px;background:var(--accent);transform:rotate(45deg);margin:0 auto 30px;box-shadow:0 0 0 7px color-mix(in srgb, var(--accent) 14%, transparent);animation:rk-pulse 1.2s ease-in-out infinite;"></div>
+    ${label?`<div style="font-size:14px;color:var(--t3);">${label}</div>`:''}
+  </div>`;
+}
+function bootView(){
+  return `<div style="flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);padding:40px;">${syncingBlock(state.connected?'Syncing with AniList…':'')}</div>`;
 }
 
 /* ---- backend unreachable ---- */
@@ -1409,6 +1434,9 @@ function libraryView(){
     return {status,rows};
   }).filter(s=>s.rows.length||true); // keep all headers (design shows counts)
 
+  // Right after login the Pull is still filling an empty library: say so rather
+  // than "nothing here yet" under every status.
+  if(state.pulling&&!library.length)return header+`<div style="padding:70px 24px;">${syncingBlock('Syncing with AniList…')}</div>`;
   const body=`<div style="max-width:900px;margin:0 auto;padding:0 24px 60px;">
     ${sections.map(sec=>{
       const exp=secExpanded(mt,sec.status);
@@ -1488,8 +1516,11 @@ function discoverView(){
       </div>
     </div>
     ${DISCOVER_SECTIONS.map(sec=>{
-      const items=_discoverCache[`${sec.key}:${mt}`]||[];
-      if(!items.length)return '';
+      const items=_discoverCache[`${sec.key}:${mt}`];
+      if(items&&!items.length)return ''; // loaded, but AniList has nothing for this shelf
+      const head=`<div style="margin-top:28px;"><h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">${esc(sec.label)}</h2>`;
+      if(items===undefined)return head+`<div style="display:flex;gap:14px;overflow:hidden;padding-bottom:10px;">${skeletonShelf(8,150,210)}</div></div>`;
+      if(items===false)return head+`<div style="font-size:12.5px;color:var(--t4);padding-bottom:10px;">Couldn't load this shelf -- open Discover again to retry.</div></div>`;
       return `<div style="margin-top:28px;">
         <h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">${esc(sec.label)}</h2>
         <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
@@ -2402,13 +2433,16 @@ async function pullThenLoadLibrary(){
 }
 
 (async function boot(){
+  render(); // bootView() splash instead of a blank window
   let status;
   try{ status=await api.authStatus(); }
-  catch(e){ console.error('backend unreachable:',e); state.backendUnreachable=true; render(); return; }
+  catch(e){ console.error('backend unreachable:',e); state.booting=false; state.backendUnreachable=true; render(); return; }
   if(status.connected){
     state.connected=true;state.username=status.username;
+    render(); // splash now reads "Syncing with AniList…"
     await pullThenLoadLibrary(); // real Pull on every app open, not just the manual button
   }
+  state.booting=false;
   render();
 })();
 </script>
