@@ -187,7 +187,7 @@ ScoreFormat:       POINT_100, POINT_10_DECIMAL, POINT_10, POINT_5, POINT_3
 
 13. **`FuzzyDate` is `{year, month, day}`, all independently nullable `Int`.** Used for `dateOfBirth`/`dateOfDeath` (Character, Staff), `startDate`/`endDate` (Media), and `startedAt`/`completedAt` (MediaList). Format defensively — many real records only have `year` populated.
 
-14. **Local (non-AniList) fact:** manga rows always write `audio=0.0` (never `NULL`) in the local `rating` table — `database.py`'s `upsert_rating()` and `apply_remote_entry()` both explicitly override this server-side regardless of client input, since manga has no Audio criterion. Relevant for any per-criterion sort/filter/average logic — `NULL` never means "not applicable" for manga audio, `0.0` does.
+14. **Local (non-AniList) fact:** manga rows always write `audio=0.0` (never `NULL`) in the local `rating` table — `db.rs`'s `upsert_rating()` and `apply_remote_entry()` both explicitly override this server-side regardless of client input, since manga has no Audio criterion. Relevant for any per-criterion sort/filter/average logic — `NULL` never means "not applicable" for manga audio, `0.0` does.
 
 15. **AniList rate-limits aggressively, even for unauthenticated introspection queries.** Hit real `429 Too Many Requests` responses this session after roughly 15 rapid sequential single-type introspection calls. Batch multiple type/enum lookups into one query using GraphQL aliases (`Foo: __type(name:"Foo"){...} Bar: __type(name:"Bar"){...}`) instead of firing many small requests back to back.
 

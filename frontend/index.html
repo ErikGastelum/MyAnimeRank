@@ -361,13 +361,11 @@ function secExpanded(mt,status){
 const H = {};
 // Real window chrome only exists inside the desktop app -- in a plain
 // browser tab (`--serve` dev mode) these no-op harmlessly instead of
-// throwing. The pywebview branch keeps the old Python shell (app.py) working
-// until it's retired; delete it along with app.py.
+// throwing.
 const appWindow=()=>TAURI?TAURI.window.getCurrentWindow():null;
-const pyWindow=()=>window.pywebview&&window.pywebview.api;
-H.winMinimize = ()=>{ if(TAURI)appWindow().minimize(); else pyWindow()?.minimize(); };
-H.winMaximize = ()=>{ if(TAURI)appWindow().toggleMaximize(); else pyWindow()?.toggle_maximize(); };
-H.winClose = ()=>{ if(TAURI)appWindow().close(); else pyWindow()?.close(); };
+H.winMinimize = ()=>{ if(TAURI)appWindow().minimize(); };
+H.winMaximize = ()=>{ if(TAURI)appWindow().toggleMaximize(); };
+H.winClose = ()=>{ if(TAURI)appWindow().close(); };
 function go(view){state.view=view;state.libSortMenuOpen=false;state.detailMenuOpen=false;render();}
 // Fast path for the 4 open/close-only dropdowns below: mutating opacity/pointer-events
 // directly (instead of calling render()) avoids destroying+recreating their box-shadow
@@ -779,7 +777,7 @@ H.chainAddAndRate = async ()=>{
 };
 // A JS-tracked mousemove/pointermove drag was tried and confirmed unreliable
 // specifically inside the real WebView2 desktop window (this app's
-// actual runtime on Windows, under pywebview then and Tauri now) -- documented WebView2 gaps: "MouseHover and
+// actual runtime on Windows) -- documented WebView2 gaps: "MouseHover and
 // MouseMove events do not work with WebView2" (MicrosoftEdge/WebView2Feedback
 // #425) and pointer capture is lost when the cursor leaves the control
 // (microsoft/microsoft-ui-xaml #8677). Both explain why manual pointer/mouse
@@ -1187,10 +1185,9 @@ function titlebar(){
   // data-tauri-drag-region (double-click toggles maximize). The logo/title
   // children are pointer-events:none so clicks on them land on the region.
   // The attribute sits only on the logo/title block, never on an ancestor of
-  // the window-control buttons, so those buttons stay clickable. The
-  // pywebview-drag-region class does the same for the old Python shell.
+  // the window-control buttons, so those buttons stay clickable.
   return `<div style="flex:0 0 auto;height:40px;background:var(--bg0);border-bottom:1px solid var(--line2);display:flex;align-items:center;justify-content:space-between;padding:0 0 0 14px;user-select:none;">
-    <div data-tauri-drag-region class="pywebview-drag-region" style="display:flex;align-items:center;gap:10px;flex:1;height:100%;">
+    <div data-tauri-drag-region style="display:flex;align-items:center;gap:10px;flex:1;height:100%;">
       <div style="pointer-events:none;width:13px;height:13px;border-radius:3px;background:var(--accent);transform:rotate(45deg);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);"></div>
       <span style="pointer-events:none;font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;letter-spacing:3px;">MyAnimeRank</span>
       <span style="pointer-events:none;font-family:'Overpass Mono',monospace;font-size:10px;letter-spacing:1px;color:var(--t4);padding-left:8px;border-left:1px solid var(--line2);">anime · manga scoring</span>

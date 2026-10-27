@@ -1,10 +1,6 @@
 local_config.py
 library.db
-__pycache__/
-*.pyc
 library.db.bak
 *.db.bak*
 myanimrank.db
-.pytest_cache/
 .claude/settings.local.json
-.venv/

@@ -12,15 +12,14 @@ from AniList's GraphQL API.
 
 The product spec is [`docs/PRD.md`](docs/PRD.md).
 
-## Desktop app (Tauri + Rust)
+## How it's built
 
-The app is being moved from Python to a single native Rust binary for lower
-memory use. It lives in [`src-tauri/`](src-tauri/): the same API routes,
-JSON shapes and SQLite schema, running in-process (no local web server),
-with the same `frontend/index.html` shown in a frameless Tauri window. The
-Python version below still works during the transition.
+A single native Rust binary built with Tauri 2, in [`src-tauri/`](src-tauri/).
+The API runs in-process (no local web server, no open port), SQLite holds the
+library, and the UI is the single-file `frontend/index.html`, shown in a
+frameless Tauri window.
 
-### Setup (Windows)
+## Setup (Windows)
 
 1. Install Rust from <https://rustup.rs> (it sets up the MSVC build tools it
    needs). WebView2 is already part of Windows 10/11.
@@ -34,12 +33,11 @@ Python version below still works during the transition.
    client is used, its redirect URI on AniList must stay exactly
    `http://localhost:8931/callback`.
 3. Your library: the app keeps its database at
-   `%APPDATA%\com.erikgastelum.myanimerank\library.db`. To bring your
-   existing library over, close the app and **copy** your current
-   `library.db` there (the schema is identical, nothing is migrated). Or point
+   `%APPDATA%\com.erikgastelum.myanimerank\library.db`. To bring an existing
+   library over, close the app and **copy** your `library.db` there. Or point
    it anywhere with the `MYANIMERANK_DB` environment variable.
 
-### Setup (macOS / Linux)
+## Setup (macOS / Linux)
 
 Login works the same way: no setup needed.
 
@@ -63,97 +61,25 @@ Login works the same way: no setup needed.
 The commands below are the same on every platform (use `export
 MYANIMERANK_DB=...` instead of PowerShell's `$env:` syntax).
 
-### Run
+## Run
 
 ```powershell
 cd src-tauri
 cargo run                      # desktop window (debug build)
 cargo run --release            # optimized build
 cargo run -- --serve 8420      # browser dev at http://127.0.0.1:8420 (uses ./library.db or MYANIMERANK_DB)
-cargo test                     # tests; in-memory databases and a fake AniList, never the network
 ```
+
+Opening a database may migrate its schema, so copy `library.db` somewhere safe
+before trying a new build against it.
 
 To build an installer (`.msi` / `.exe`): `cargo install tauri-cli --version "^2" --locked`,
 then `cargo tauri build` from `src-tauri/`.
 
-## Python version (being replaced)
-
-Stack: Python (FastAPI) backend, SQLite, a single-file HTML/JS frontend, shown
-in a frameless pywebview desktop window.
-
-## Setup
-
-Requires Python 3.12+.
-
-1. Create and activate a virtual environment (`.venv/` is gitignored):
-
-   ```powershell
-   python -m venv .venv
-   .venv\Scripts\Activate.ps1      # Windows PowerShell
-   ```
-
-   ```bash
-   source .venv/bin/activate        # macOS / Linux
-   ```
-
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt       # to run the app
-   pip install -r requirements-dev.txt   # to also run tests and lint (pytest, ruff)
-   ```
-
-   On Linux, pywebview also needs GTK3 + WebKit2GTK from your OS package
-   manager (see the note in `requirements.txt`).
-
-3. Register an AniList API client at <https://anilist.co/settings/developer>
-   with this exact redirect URI:
-
-   ```
-   http://localhost:8931/callback
-   ```
-
-4. Create `local_config.py` in the project root with your client's
-   credentials. It's gitignored; never commit it.
-
-   ```python
-   ANILIST_CLIENT_ID = "12345"
-   ANILIST_CLIENT_SECRET = "your-client-secret"
-   ```
-
-## Run
-
-```bash
-python app.py
-```
-
-opens the desktop window. On first launch you'll see the login screen; the
-app can't be used without an AniList login.
-
-For frontend/backend work in a browser instead:
-
-```bash
-uvicorn main:app --port 8420
-```
-
-then open <http://127.0.0.1:8420>.
-
-Your library lives in `library.db` (gitignored). Starting the server creates
-it, and may migrate its schema, so copy it somewhere safe before upgrading.
-
 ## Test
 
-With the dev dependencies installed (`pip install -r requirements-dev.txt`):
-
-```bash
-python -m pytest -q
+```powershell
+cd src-tauri
+cargo test                     # in-memory databases and a fake AniList, never the network
+cargo clippy --all-targets     # lint; kept warning-free
 ```
-
-Tests use a throwaway database per test and fake every AniList call; they
-never touch `library.db` or the network.
-
-```bash
-ruff check .
-```
-
-runs the linter (configured in `pyproject.toml`).

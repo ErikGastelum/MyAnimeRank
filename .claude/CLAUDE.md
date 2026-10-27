@@ -26,10 +26,9 @@ single-file vanilla HTML/JS `frontend/index.html` in a frameless window with
 a custom titlebar. Metadata comes from **AniList's GraphQL API only**. Runs on
 Windows (WebView2), macOS (WebKit) and Linux (WebKitGTK).
 
-The Python app (FastAPI + uvicorn + pywebview) was the previous
-implementation. It is still in the repo root for reference and comparison
-only, and will be deleted once the Rust app has been in daily use for a
-while. Don't add features to it.
+The Rust app replaced an earlier Python implementation (FastAPI + uvicorn +
+pywebview), now deleted; it's in git history before the `remove-python`
+branch. Existing `library.db` files it wrote open unchanged.
 
 ## Repo layout
 
@@ -49,7 +48,8 @@ src-tauri/
   tauri.conf.json, capabilities/, icons/
 frontend/index.html       entire UI (works in Tauri and in a browser via --serve)
 README.md                 setup and run, per platform
-*.py, tests/*.py          previous Python implementation (reference only)
+PROJECT_STATUS.md         current state and open items
+.claude/hooks/*.py        Claude Code hooks (not app code)
 ```
 
 Data and config live outside the repo, in the OS app-data folder for
@@ -148,13 +148,13 @@ toward it.
   the manga average.
 - Scores: 1.0–10.0 in 0.5 increments (validated in `api.rs`).
 - Overall score is **always computed server-side** from `media_type`, never
-  trusted from the client. It rounds half-to-even to one decimal, matching
-  the Python app (manga 7.25 → 7.2).
+  trusted from the client. It rounds half-to-even to one decimal, as the
+  old Python app did (manga 7.25 → 7.2).
 - Duplicate import (same `anilist_id`) updates the existing row; it does
   not create a second entry and never changes `media_type`.
 - Timestamps are written in Python's `isoformat()` shape
   (`2026-01-01T00:00:00.123456+00:00`) and compared as parsed datetimes, so
-  rows written by either app compare correctly.
+  rows the old Python app wrote still compare correctly.
 
 ## Coding conventions
 
@@ -173,8 +173,7 @@ toward it.
 - Frontend: this runs in a frameless desktop window, not a browser tab.
   Window controls (minimize/maximize/close) and the drag region
   (`data-tauri-drag-region`) are real UI you own. Don't use `alert()`; it
-  does nothing on macOS. Show errors in the page. The pywebview branches in
-  the frontend exist only for the old Python app; delete them with it.
+  does nothing on macOS. Show errors in the page.
 - Run shell commands from the repo root, or in a `( cd src-tauri && ... )`
   subshell, so the project hooks keep working.
 - Git: never run `commit`, `push`, `checkout`, `stash`, `reset`, `rebase`, or

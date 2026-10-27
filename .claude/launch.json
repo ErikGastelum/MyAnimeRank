@@ -2,9 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "myanimrank",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "main:app", "--port", "8420"],
+      "name": "myanimerank",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--", "--serve", "8420"],
+      "cwd": "src-tauri",
       "port": 8420
     }
   ]
