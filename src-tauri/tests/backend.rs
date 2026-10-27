@@ -490,6 +490,42 @@ async fn pull_flags_both_sides_changed_as_a_conflict_and_keeps_local_values() {
     assert_eq!((m.progress, m.pending_conflict), (7, true));
 }
 
+#[tokio::test]
+async fn one_failing_entry_is_skipped_and_imported_cleanly_on_the_next_pull() {
+    let fake = fake_anilist(|q, v| {
+        if q.contains("MediaListCollection") && v["type"] == "MANGA" {
+            let ts = 1_700_000_000;
+            (200, collection(vec![list_node(1, "MANGA", ts, 0.0), list_node(2, "MANGA", ts, 0.0), list_node(3, "MANGA", ts, 0.0)]), None)
+        } else {
+            (200, collection(vec![]), None)
+        }
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    let st = AppState::new(Db::open(&path).unwrap(), AniList::with_url(&fake.url), Config { client_id: "1".into() });
+    login(&st);
+    // Entry 2's write fails after its row is inserted, as one did in a real pull.
+    let side = rusqlite::Connection::open(&path).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER fail_two BEFORE UPDATE OF last_synced_at ON media WHEN NEW.anilist_id = 2
+         BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;",
+    )
+    .unwrap();
+
+    let first = sync::pull(&st).await.unwrap();
+    assert_eq!(first["imported"], 2);
+    assert!(st.db.get_media_by_anilist_id(3).unwrap().is_some()); // the import kept going
+    assert!(st.db.get_media_by_anilist_id(2).unwrap().is_none()); // and left no half-imported row
+
+    // Next pull: entry 2 imports as new, not as a "never synced" false conflict.
+    side.execute_batch("DROP TRIGGER fail_two;").unwrap();
+    let second = sync::pull(&st).await.unwrap();
+    assert_eq!((second["imported"].as_i64(), second["conflicts"].as_array().unwrap().len()), (Some(1), 0));
+    let m = st.db.get_media_by_anilist_id(2).unwrap().unwrap();
+    assert_eq!((m.status.as_str(), m.anilist_list_entry_id, m.pending_conflict), ("reading", Some(1002), false));
+}
+
 fn save_ok() -> Reply {
     (200, json!({"data": {"SaveMediaListEntry": {"id": 555, "status": "CURRENT", "progress": 1, "updatedAt": 1}}}), None)
 }

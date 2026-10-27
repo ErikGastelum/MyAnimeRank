@@ -341,7 +341,10 @@ impl Db {
     /// media_type is written on insert only, never changed afterwards.
     /// `status` is None for Pull imports (status lands via apply_remote_entry).
     pub fn insert_or_update_media(&self, f: &MediaFields, status: Option<&str>) -> DbResult<i64> {
-        let conn = self.conn();
+        Self::upsert_media(&self.conn(), f, status)
+    }
+
+    fn upsert_media(conn: &Connection, f: &MediaFields, status: Option<&str>) -> DbResult<i64> {
         let existing: Option<i64> = conn
             .query_row("SELECT id FROM media WHERE anilist_id = ?", [f.anilist_id], |r| r.get(0))
             .optional()?;
@@ -633,11 +636,38 @@ impl Db {
     }
 
     pub fn set_anilist_list_entry_id(&self, media_id: i64, entry_id: i64) -> DbResult<()> {
-        self.conn().execute(
+        Self::set_list_entry_id(&self.conn(), media_id, entry_id)
+    }
+
+    fn set_list_entry_id(conn: &Connection, media_id: i64, entry_id: i64) -> DbResult<()> {
+        conn.execute(
             "UPDATE media SET anilist_list_entry_id = ? WHERE id = ?",
             params![entry_id, media_id],
         )?;
         Ok(())
+    }
+
+    /// FR-23: a new AniList entry with no local row, imported in ONE
+    /// transaction. A failure partway leaves no half-imported row, which the
+    /// next pull would otherwise mistake for a never-synced conflict.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_remote_entry(
+        &self,
+        f: &MediaFields,
+        list_entry_id: i64,
+        status: &str,
+        progress: i64,
+        repeat_count: i64,
+        score: Option<f64>,
+        ts: &str,
+    ) -> DbResult<i64> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let media_id = Self::upsert_media(&tx, f, None)?;
+        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, ts)?;
+        Self::set_list_entry_id(&tx, media_id, list_entry_id)?;
+        tx.commit()?;
+        Ok(media_id)
     }
 
     /// FR-23: AniList's value wins for this entry. Applied in one transaction
@@ -657,6 +687,19 @@ impl Db {
     ) -> DbResult<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, ts)?;
+        tx.commit()
+    }
+
+    fn apply_remote(
+        tx: &Connection,
+        media_id: i64,
+        status: &str,
+        progress: i64,
+        repeat_count: i64,
+        score: Option<f64>,
+        ts: &str,
+    ) -> DbResult<()> {
         tx.execute(
             "UPDATE media SET status = ?, progress = ?, repeat_count = ?, updated_at = ?, last_synced_at = ? WHERE id = ?",
             params![status, progress, repeat_count, ts, ts, media_id],
@@ -684,7 +727,7 @@ impl Db {
                 )?;
             }
         }
-        tx.commit()
+        Ok(())
     }
 
     pub fn set_pending_conflict(&self, media_id: i64, value: bool) -> DbResult<()> {
