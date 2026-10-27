@@ -58,19 +58,31 @@
 /* ============================================================= helpers */
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 // AniList bios come back as markdown (description(asHtml:false)) -- renders [text](url)
-// links, escaping each raw segment independently so URLs already containing & aren't
-// double-encoded. Only http(s) links are linkified to keep out javascript: etc.
+// links, ~!spoilers!~ (blurred until clicked, see H.revealSpoiler), and via mdInline()
+// __bold__, _italic_ and newlines. Each raw segment is escaped independently so URLs
+// already containing & aren't double-encoded. Only http(s) links are linkified to keep
+// out javascript: etc.
 function mdLinks(s){
   s=String(s==null?'':s);
-  const re=/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  const re=/~!([\s\S]+?)!~|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   let out='',last=0,m;
   while((m=re.exec(s))){
-    out+=esc(s.slice(last,m.index));
-    out+=`<a href="${esc(m[2])}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">${esc(m[1])}</a>`;
+    out+=mdInline(s.slice(last,m.index));
+    out+=m[1]!=null
+      ?`<span data-act="revealSpoiler" title="Spoiler: click to reveal" style="filter:blur(5px);cursor:pointer;">${mdLinks(m[1])}</span>`
+      :`<a href="${esc(m[3])}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">${mdInline(m[2])}</a>`;
     last=re.lastIndex;
   }
-  out+=esc(s.slice(last));
+  out+=mdInline(s.slice(last));
   return out;
+}
+// Runs on already-escaped text, so the only markup it can produce is its own
+// tags. _italic_ needs a non-word character (or the edge) on both sides, so
+// snake_case words and URL paths stay plain.
+function mdInline(s){
+  return esc(s).replace(/__([^\s_](?:[^\n]*?[^\s_])?)__/g,'<b>$1</b>')
+    .replace(/(^|\W)_([^\s_](?:[^_\n]*?[^\s_])?)_(?!\w)/g,'$1<i>$2</i>')
+    .replace(/\r?\n/g,'<br>');
 }
 // AniList synopses carry <br>, <i>, <b> even with description(asHtml:false).
 // Everything is escaped first; then the escaped <br>s become line breaks (3+
@@ -875,6 +887,14 @@ H.openPerson = async (el)=>{
   state.workListSearch='';state.workListOnMyList=false;state.charListSearch='';state.charListOnMyList=false;
   state.person=person;
   go('person');
+};
+// ~!spoiler!~ in a bio (mdLinks): the first click only unblurs it, so a link
+// inside isn't followed until the spoiler can be read. Style only -- its text
+// is already in the page, escaped.
+H.revealSpoiler = (el,e)=>{
+  if(el.dataset.revealed)return;
+  e.preventDefault();el.dataset.revealed='1';
+  el.style.filter='none';el.style.cursor='';el.removeAttribute('title');
 };
 H.backPerson = ()=>{
   if(state.personStack.length){ state.person=state.personStack.pop(); render(); return; }
