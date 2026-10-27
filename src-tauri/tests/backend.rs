@@ -384,6 +384,39 @@ async fn import_requires_a_title_like_pythons_media_import() {
 }
 
 #[tokio::test]
+async fn import_pushes_the_new_title_to_anilist_in_the_background() {
+    let fake = fake_anilist(|q, _| {
+        if q.contains("MediaList(userId") {
+            (404, json!({"data": {"Viewer": null, "MediaList": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None)
+        } else if q.contains("Media(id") {
+            (200, json!({"data": {"Media": media_node(7, "ANIME")}}), None)
+        } else if q.contains("Viewer") {
+            (200, json!({"data": {"Viewer": {"id": 1, "name": "tester", "mediaListOptions": {"scoreFormat": "POINT_10_DECIMAL"}}}}), None)
+        } else {
+            save_ok()
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, b) = call(&st, "POST", "/media", Some(json!({"anilist_id": 7, "media_type": "anime", "title": "x", "status": "planning"}))).await;
+    assert_eq!(s, 200);
+    let id = b["id"].as_i64().unwrap();
+
+    // FR-24: the push runs in the background, so wait for it to land.
+    for _ in 0..100 {
+        if st.db.get_media_by_id(id).unwrap().unwrap().anilist_list_entry_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(st.db.get_media_by_id(id).unwrap().unwrap().anilist_list_entry_id, Some(555));
+    let saves = fake.calls_containing("SaveMediaListEntry");
+    assert_eq!(saves.len(), 1);
+    assert_eq!((saves[0]["mediaId"].as_i64(), saves[0]["status"].as_str()), (Some(7), Some("PLANNING")));
+}
+
+#[tokio::test]
 async fn import_502s_when_anilist_is_unreachable() {
     let st = offline_state().await;
     login(&st);
