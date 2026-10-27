@@ -1195,15 +1195,38 @@ function wireHover(container){
   });
 }
 
+// Which page the main scroll container is showing: the view, plus the title/
+// person/studio/user/tab it's showing where one view serves many (a Relations
+// click opens another detail; Anime and Manga are both 'library'). A render
+// with the same key as the last one is the same page and keeps its scroll.
+let _screenKey=null;
+function screenKey(){
+  const v=state.view;
+  const sub={library:state.mediaType,detail:state.current&&state.current.item.anilist_id,
+    person:state.person&&state.person.favType+state.person.anilist_id,studio:state.studio&&state.studio.anilist_id,
+    user:state.user&&state.user.anilist_id,rating:state.rating&&state.rating.idx}[v];
+  return `${state.connected}:${v}:${sub}`;
+}
+
 function render(){
   // preserve focus + caret for inputs across re-render
   const act=document.activeElement;
   const focusId=act&&act.id&&/^in-/.test(act.id)?act.id:null;
   const selStart=focusId?act.selectionStart:null, selEnd=focusId?act.selectionEnd:null;
+  // ...and, on the same page, the main scroll position and each data-shelf's
+  // horizontal scroll, which the innerHTML swap below would reset to 0.
+  // Navigating to another page starts at the top.
+  const key=screenKey(),samePage=key===_screenKey;_screenKey=key;
+  const scroller=document.getElementById('main-scroll');
+  const top=samePage&&scroller?scroller.scrollTop:0;
+  const shelves={};
+  if(samePage)screenEl.querySelectorAll('[data-shelf]').forEach(n=>{shelves[n.dataset.shelf]=n.scrollLeft;});
 
   screenEl.innerHTML = view();
 
   if(focusId){const n=document.getElementById(focusId);if(n){n.focus();try{n.setSelectionRange(selStart,selEnd);}catch(e){}}}
+  if(top){const n=document.getElementById('main-scroll');if(n)n.scrollTop=top;}
+  screenEl.querySelectorAll('[data-shelf]').forEach(n=>{if(shelves[n.dataset.shelf])n.scrollLeft=shelves[n.dataset.shelf];});
   wireHover(screenEl);
 }
 
@@ -1339,7 +1362,7 @@ function shell(){
     default: body=libraryView();
   }
   return `<div style="flex:1;display:flex;flex-direction:column;min-height:0;">
-    <div style="flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);">${body}</div>
+    <div id="main-scroll" style="flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);">${body}</div>
     ${bottomNav()}
   </div>`;
 }
@@ -1528,7 +1551,7 @@ function discoverView(){
       if(items===false)return head+`<div style="font-size:12.5px;color:var(--t4);padding-bottom:10px;">Couldn't load this shelf -- open Discover again to retry.</div></div>`;
       return `<div style="margin-top:28px;">
         <h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">${esc(sec.label)}</h2>
-        <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
+        <div data-shelf="${sec.key}:${mt}" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
           ${items.map(it=>`<div data-act="openDiscover" data-arg="${it.anilist_id}" style="flex:0 0 150px;cursor:pointer;">
             <div style="position:relative;height:210px;border-radius:12px;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);overflow:hidden;">
               <span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:32px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}
@@ -1852,7 +1875,7 @@ function staffBioFields(p){
 function realShelfCover(label,items,actFn){
   return `<div style="margin-bottom:28px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><h2 style="font-size:16px;font-weight:700;">${label}</h2></div>
-    <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
+    <div data-shelf="${esc(label)}" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
       ${items.map(it=>{const key=it.title||it.name;const name=displayTitle(it)||it.name;const img=it.cover_url||it.image_url;return `<div ${actFn(it)} style="flex:0 0 110px;cursor:pointer;">
         <div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(key)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div>
         <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div>
@@ -2222,7 +2245,7 @@ function detailView(){
 
     <div style="max-width:1180px;margin:0 auto;padding:22px 38px 0;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Relations</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.relations.map(rel=>`<div data-act="openRelation" data-arg="${rel.anilist_id||''}" data-mt="${it.media_type}" style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;position:relative;overflow:hidden;background:${cover(rel.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(rel.initials)}</span>${povr(rel.cover_url,displayTitle(rel))}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;letter-spacing:.3px;color:var(--accent);margin-top:8px;">${esc(enumLabel(rel.type))}</div><div style="font-weight:600;font-size:12.5px;line-height:1.25;margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rel))}</div></div>`).join('')}</div>
+      <div data-shelf="relations" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.relations.map(rel=>`<div data-act="openRelation" data-arg="${rel.anilist_id||''}" data-mt="${it.media_type}" style="flex:0 0 130px;cursor:pointer;"><div style="height:180px;border-radius:11px;position:relative;overflow:hidden;background:${cover(rel.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(rel.initials)}</span>${povr(rel.cover_url,displayTitle(rel))}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;letter-spacing:.3px;color:var(--accent);margin-top:8px;">${esc(enumLabel(rel.type))}</div><div style="font-weight:600;font-size:12.5px;line-height:1.25;margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rel))}</div></div>`).join('')}</div>
     </div>
 
     <div style="max-width:1180px;margin:0 auto;padding:22px 38px 20px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:24px;">
@@ -2241,12 +2264,12 @@ function detailView(){
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 30px;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Characters</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,140):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;cursor:pointer;"><div style="height:140px;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url,c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(enumLabel(c.role))}</div></div>`).join('')}</div>
+      <div data-shelf="characters" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,140):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;cursor:pointer;"><div style="height:140px;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url,c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(enumLabel(c.role))}</div></div>`).join('')}</div>
     </div>
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 60px;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Recommended</div>
-      <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.recommended.map(rc=>`<div ${rc.anilist_id?`data-act="openRelation" data-arg="${rc.anilist_id}" `:''}style="flex:0 0 130px;${rc.anilist_id?'cursor:pointer;':''}"><div style="height:180px;border-radius:11px;background:${cover(rc.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);position:relative;overflow:hidden;"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(rc)))}</span>${povr(rc.cover_url,displayTitle(rc))}<div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;display:flex;align-items:center;gap:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6.3l1-4.6.03-.32c0-.4-.16-.77-.44-1.06L13.17 1 7.59 6.59C7.22 6.95 7 7.45 7 8v11c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.1-.23.15-.48.15-.73v-1.91z"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:10px;font-weight:700;color:var(--t2);">${esc(rc.thumbs)}</span></div></div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rc))}</div></div>`).join('')}</div>
+      <div data-shelf="recommended" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,130,180):comm.recommended.map(rc=>`<div ${rc.anilist_id?`data-act="openRelation" data-arg="${rc.anilist_id}" `:''}style="flex:0 0 130px;${rc.anilist_id?'cursor:pointer;':''}"><div style="height:180px;border-radius:11px;background:${cover(rc.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);position:relative;overflow:hidden;"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(rc)))}</span>${povr(rc.cover_url,displayTitle(rc))}<div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;display:flex;align-items:center;gap:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M2 21h4V9H2v12zM22 10c0-1.1-.9-2-2-2h-6.3l1-4.6.03-.32c0-.4-.16-.77-.44-1.06L13.17 1 7.59 6.59C7.22 6.95 7 7.45 7 8v11c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.1-.23.15-.48.15-.73v-1.91z"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:10px;font-weight:700;color:var(--t2);">${esc(rc.thumbs)}</span></div></div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(rc))}</div></div>`).join('')}</div>
     </div>
   </div>`;
 }
@@ -2324,7 +2347,7 @@ function personView(){
     <div style="margin-bottom:30px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${p.favType==='staff'?'Characters Voiced':esc(p.shelfLabel)}</div>
       ${p.favType==='staff'
         ?characterRoleListView(p.charactersVoiced,{searchValue:state.charListSearch,onMyListValue:state.charListOnMyList,searchAct:'charListSearch',onMyListAct:'toggleCharListOnMyList'})
-        :`<div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;${s[3]?'cursor:pointer;':''}"><div style="height:130px;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2],s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
+        :`<div data-shelf="voice-actors" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;${s[3]?'cursor:pointer;':''}"><div style="height:130px;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2],s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
     </div>
     <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${esc(p.appearancesLabel)}</div>
       ${mediaListView(p.appearances,{searchValue:state.workListSearch,onMyListValue:state.workListOnMyList,searchAct:'workListSearch',onMyListAct:'toggleWorkListOnMyList'})}
