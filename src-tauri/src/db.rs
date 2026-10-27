@@ -314,8 +314,14 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(path: &Path) -> DbResult<Db> {
-        Self::init(Connection::open(path)?)
+    /// Creates the file's folder first if it's missing (say, %TEMP% was
+    /// cleaned out). The error type is wider than DbResult so a folder that
+    /// can't be created reports the OS's reason.
+    pub fn open(path: &Path) -> Result<Db, Box<dyn std::error::Error>> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(Self::init(Connection::open(path)?)?)
     }
 
     pub fn open_in_memory() -> DbResult<Db> {

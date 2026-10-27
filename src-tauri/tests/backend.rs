@@ -264,6 +264,15 @@ fn opens_an_older_library_db_and_adds_missing_columns() {
     assert_eq!((m.fields.media_type.as_str(), m.fields.genres.clone(), m.pending_conflict), ("manga", vec!["Drama".to_string()], false));
 }
 
+#[test]
+fn opening_a_database_in_a_missing_folder_creates_the_folder() {
+    // e.g. MYANIMERANK_DB under %TEMP% after Windows cleaned it out
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cleaned").join("out").join("library.db");
+    Db::open(&path).unwrap();
+    assert!(path.is_file());
+}
+
 // --------------------------------------------------------------------- routes ----
 
 const PROTECTED: &[(&str, &str)] = &[
