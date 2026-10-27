@@ -315,6 +315,8 @@ async fn import_media(State(st): State<Shared>, Body(body): Body<MediaImport>) -
     fields.media_type = remote.media_type;
     validate_status(&fields.media_type, &body.status)?;
     let id = st.db.insert_or_update_media(&fields, Some(&body.status))?;
+    // FR-24: adding a title sets its status, so it pushes like any other change.
+    sync::spawn_push(&st, id);
     ok(json!({"id": id}))
 }
 
