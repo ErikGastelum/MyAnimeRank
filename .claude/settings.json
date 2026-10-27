@@ -2,7 +2,7 @@
   "permissions": {
     "allow": [
       "Bash(git *)",
-      "Bash(uvicorn *)",
+      "Bash(cargo *)",
       "Bash(ls *)",
       "Bash(find *)",
       "Bash(grep *)",

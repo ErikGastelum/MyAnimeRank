@@ -1,8 +1,8 @@
 # MyAnimeRank — Project Status
 
-*Updated 2026-10-27, after the port to Tauri 2 + Rust. This replaces the
-2026-10-25 Python status (cleanup and hardening, phases 1–7); that version is
-in git history (`bea0e17`).*
+*Updated 2026-10-27, after the port to Tauri 2 + Rust and the removal of the
+Python app (branch `remove-python`). The 2026-10-25 Python status (cleanup and
+hardening, phases 1–7) is in git history (`bea0e17`).*
 
 ---
 
@@ -25,7 +25,7 @@ The spec is `docs/PRD.md` (v2, through M9).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (36), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (51), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -84,11 +84,20 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 36 Rust tests, covering overall computation (including Python's
-  half-to-even rounding), media_type immutability, anchors, progress
-  auto-complete, conflict detection, Pull/push against a fake AniList, the
-  login gate on every route, rating/status validation, 429 handling, login,
-  and opening an older-schema database.
+- **Tests:** 51 Rust tests (50 in `tests/backend.rs`, 1 in `config.rs`).
+  Before the Python app was deleted, its 174 pytest cases were read through
+  and everything not yet covered was ported: the full conflict-detection
+  table, Pull imports of both media types (seeded ratings, values copied
+  as-is, local-only rows untouched), guarded push (two-request clean push,
+  score-format recheck, conflict leaves the retry queue, unrated never sends
+  a score), media_type from AniList on import, NULL-criterion anchors,
+  per-type status and score validation, AniList error classes (GraphQL
+  errors, 404, 5xx, 429 with and without Retry-After), the login gate on
+  every route enumerated from `api.rs`, and no CORS headers. No ported test
+  found a behavior difference.
+- **Not ported:** the Python retry-loop logging test (the Rust loop sleeps a
+  real 30 s; testing it would need tokio's `test-util` feature) and the
+  FastAPI lifespan tests (no Rust equivalent).
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
@@ -115,6 +124,8 @@ database.
 
 - Default branch: **`main`**. `rebuild` and `tauri-port` were merged in and
   deleted.
+- Current branch: **`remove-python`** (deletes the Python app, ports its
+  remaining test coverage). Not yet merged or pushed.
 
 | Commit | What |
 |---|---|
@@ -137,14 +148,11 @@ Roughly by priority:
    (tauri-action) that builds Windows/macOS/Linux installers on a version tag.
    There is no `.github/` yet. Builds will be unsigned (SmartScreen and
    Gatekeeper warnings on first launch).
-2. **Retire the Python app:** delete `*.py`, `tests/*.py`, `requirements*.txt`,
-   `pyproject.toml`, the pywebview branches in `frontend/index.html`, the
-   Python sections of the README, and `.claude/launch.json` (still runs
-   uvicorn against the repo's `library.db`). Do this once the Rust app has
-   been in daily use for a while.
-3. **`--serve` defaults to `./library.db`.** Run from the repo root, that's
-   the old Python app's real library. Consider requiring `MYANIMERANK_DB` in
-   that mode.
+2. **`--serve` defaults to `./library.db`.** `.claude/launch.json` runs it
+   from `src-tauri/`, so it uses `src-tauri/library.db` unless
+   `MYANIMERANK_DB` is set. Consider requiring `MYANIMERANK_DB` in that mode.
+3. **Retry queue is in memory only (FR-26):** queued pushes are lost when the
+   app closes. See item 6.
 4. **Wire FR-25/FR-28:** the score-format consent dialog on first login, and a
    drift message when a push reports `score_format_drift`.
 5. **Token expiry:** `token_expires_at` is stored but never checked (implicit
