@@ -198,6 +198,9 @@ async function loadInsights(){
   catch(e){ console.error('insights fetch failed:',e); _insights=false; }
   render();
 }
+// Insights are computed from local ratings, so the cached copy goes stale on
+// every rating save or library reload; refetch at once if it's on screen.
+function invalidateInsights(){ _insights=null; if(state.view==='insights')loadInsights(); }
 function timeAgo(iso){
   if(!iso)return '';
   const diffMs=Date.now()-new Date(iso).getTime();
@@ -606,6 +609,7 @@ H.openInsights = ()=>{
   if(!_insights)loadInsights();
   go('insights');
 };
+H.backInsights = ()=>go('profile');
 
 /* detail */
 H.backView = ()=>{state.current=null;go(state.detailReturn||'library');};
@@ -1088,6 +1092,7 @@ async function commitRating(){
     const resp=await api.putRating(it.id,rating);
     rating.overall=resp.overall; // FR-9: server-computed value is authoritative
   }catch(e){ console.error('rating submit failed:',e); }
+  invalidateInsights();
 }
 function anchorsFor(it,critKey,scope){
   // FR-8: 'genre' scope keeps only titles sharing >=1 genre; 'all' drops the genre filter
@@ -2244,9 +2249,10 @@ function detailView(){
 function insightsView(){
   // _insights: null = loading, false = last fetch failed (H.openInsights retries).
   const I=_insights;
+  const back=`<div style="display:flex;align-items:center;margin-bottom:24px;"><div data-act="backInsights" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t2);"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>BACK</div></div>`;
   if(!I){
     const msg=I===false?"Couldn't load insights -- open this page again to retry.":'Loading insights…';
-    return `<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;"><h1 style="font-size:26px;font-weight:700;letter-spacing:-.4px;margin-bottom:16px;">Insights</h1><div style="font-size:13px;color:var(--t4);">${msg}</div></div>`;
+    return `<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;">${back}<h1 style="font-size:26px;font-weight:700;letter-spacing:-.4px;margin-bottom:16px;">Insights</h1><div style="font-size:13px;color:var(--t4);">${msg}</div></div>`;
   }
   const genreSection=(mt)=>{
     const rows=I.by_genre.filter(g=>g.media_type===mt).sort((a,b)=>b.avg_overall-a.avg_overall);
@@ -2265,6 +2271,7 @@ function insightsView(){
   };
   const d=I.community_divergence;
   return `<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;">
+    ${back}
     <div style="margin-bottom:26px;"><h1 style="font-size:26px;font-weight:700;letter-spacing:-.4px;">Insights</h1></div>
 
     <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:12px;">Genre Breakdown</div>
@@ -2422,6 +2429,7 @@ async function loadRealLibrary(){
     resp.results.forEach(x=>library.push(x));
     _uid=library.reduce((m,x)=>Math.max(m,x.id||0),_uid);
   }catch(e){console.error('failed to load real library:',e);}
+  invalidateInsights();
 }
 
 // Pull first, then load, so the library the user first sees is already
