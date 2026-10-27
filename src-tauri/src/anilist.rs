@@ -1,6 +1,5 @@
 //! AniList GraphQL client. Port of anilist.py: every AniList query and
-//! mutation in the app goes through the single `graphql()` helper (plus the
-//! OAuth token exchange, which is a plain REST call).
+//! mutation in the app goes through the single `graphql()` helper.
 //!
 //! No MAL/Jikan calls anywhere: this is the ONLY module that talks to an
 //! external metadata API.
@@ -13,7 +12,6 @@ use serde_json::{json, Map, Value};
 use crate::db::{round1, MediaFields};
 
 pub const ANILIST_URL: &str = "https://graphql.anilist.co";
-pub const TOKEN_URL: &str = "https://anilist.co/api/v2/oauth/token";
 pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
 
 /// HTTP 429: honor Retry-After, at most this many retries per call, and never
@@ -64,7 +62,6 @@ pub type AlResult<T> = Result<T, AlError>;
 pub struct AniList {
     http: reqwest::Client,
     graphql_url: String,
-    token_url: String,
 }
 
 /// One AniList MediaList entry joined with its media (Pull / conflict data).
@@ -98,17 +95,17 @@ pub struct Viewer {
 
 impl Default for AniList {
     fn default() -> Self {
-        Self::with_urls(ANILIST_URL, TOKEN_URL)
+        Self::with_url(ANILIST_URL)
     }
 }
 
 impl AniList {
-    pub fn with_urls(graphql_url: &str, token_url: &str) -> Self {
+    pub fn with_url(graphql_url: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()
             .expect("HTTP client builds with static settings");
-        AniList { http, graphql_url: graphql_url.into(), token_url: token_url.into() }
+        AniList { http, graphql_url: graphql_url.into() }
     }
 
     async fn graphql(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64) -> AlResult<Value> {
@@ -165,26 +162,6 @@ impl AniList {
     // ---------------------------------------------------- authenticated ----
     // Everything below requires an access token and is the ONLY place in this
     // app that writes to the user's real AniList account.
-
-    /// FR-22. Returns AniList's token response ({access_token, expires_in, ...}).
-    pub async fn exchange_code(&self, client_id: &str, client_secret: &str, code: &str, redirect_uri: &str) -> AlResult<Value> {
-        let resp = self
-            .http
-            .post(&self.token_url)
-            .timeout(Duration::from_secs(15))
-            .header("Accept", "application/json")
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "code": code,
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
-    }
 
     pub async fn get_viewer(&self, token: &str) -> AlResult<Viewer> {
         let q = "query { Viewer { id name mediaListOptions { scoreFormat } } }";
@@ -746,8 +723,10 @@ pub fn local_statuses(media_type: &str) -> Vec<&'static str> {
     v
 }
 
-pub fn authorize_url(client_id: &str, redirect_uri: &str) -> String {
-    format!("{AUTHORIZE_URL}?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code")
+/// FR-22, implicit grant: AniList sends the token back to the client's
+/// registered redirect URI, so none is passed here.
+pub fn authorize_url(client_id: &str) -> String {
+    format!("{AUTHORIZE_URL}?client_id={client_id}&response_type=token")
 }
 
 fn season_year(offset: i32) -> (&'static str, i32) {

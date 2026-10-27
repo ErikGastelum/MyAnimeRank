@@ -1,64 +1,50 @@
-//! AniList client credentials. Port of local_config.py.
+//! AniList client ID. Login uses AniList's implicit grant, which needs only
+//! the client ID. That ID is public by design (it's in the login URL anyway),
+//! so it's built in and there is no client secret anywhere.
 //!
-//! Looked up in this order, first hit wins:
-//! 1. `ANILIST_CLIENT_ID` / `ANILIST_CLIENT_SECRET` environment variables
+//! Overrides, first hit wins:
+//! 1. the `ANILIST_CLIENT_ID` environment variable
 //! 2. `local_config.toml` in the app's config folder
 //! 3. `local_config.py` in the current folder or its parent (the existing
 //!    Python file works unchanged during development)
 //!
-//! Both files use the same `NAME = "value"` lines, so the Python file can be
-//! copied to `local_config.toml` as-is. The secret is never stored anywhere else.
+//! Both files use the same `NAME = "value"` lines. With none of them set, the
+//! built-in ID is used, so login never fails for missing config.
 
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default)]
+/// This app's AniList API client. Its redirect URI must stay
+/// `http://localhost:8931/callback` (see oauth.rs).
+pub const BUILTIN_CLIENT_ID: &str = "45069";
+
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    /// Where credentials were looked for, for a useful error message.
-    pub searched: Vec<PathBuf>,
+    pub client_id: String,
 }
 
 impl Config {
     pub fn load(config_dir: Option<&Path>) -> Config {
-        let mut cfg = Config {
-            client_id: std::env::var("ANILIST_CLIENT_ID").ok().filter(|v| !v.is_empty()),
-            client_secret: std::env::var("ANILIST_CLIENT_SECRET").ok().filter(|v| !v.is_empty()),
-            searched: Vec::new(),
-        };
-        let mut candidates = Vec::new();
+        let mut files = Vec::new();
         if let Some(dir) = config_dir {
-            candidates.push(dir.join("local_config.toml"));
+            files.push(dir.join("local_config.toml"));
         }
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("local_config.py"));
+            files.push(cwd.join("local_config.py"));
             if let Some(parent) = cwd.parent() {
-                candidates.push(parent.join("local_config.py"));
+                files.push(parent.join("local_config.py"));
             }
         }
-        for path in candidates {
-            if cfg.is_complete() {
-                break;
-            }
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                cfg.client_id = cfg.client_id.or_else(|| read_value(&text, "ANILIST_CLIENT_ID"));
-                cfg.client_secret = cfg.client_secret.or_else(|| read_value(&text, "ANILIST_CLIENT_SECRET"));
-            }
-            cfg.searched.push(path);
-        }
-        cfg
+        Config::from_sources(std::env::var("ANILIST_CLIENT_ID").ok(), &files)
     }
 
-    pub fn is_complete(&self) -> bool {
-        self.client_id.is_some() && self.client_secret.is_some()
-    }
-
-    pub fn missing_message(&self) -> String {
-        let places: Vec<String> = self.searched.iter().map(|p| p.display().to_string()).collect();
-        format!(
-            "AniList client credentials not found. Set ANILIST_CLIENT_ID and ANILIST_CLIENT_SECRET in {}",
-            places.first().cloned().unwrap_or_else(|| "local_config.toml".into())
-        )
+    /// `load` minus the process environment and current folder, so tests can
+    /// drive the lookup order directly.
+    pub fn from_sources(env_value: Option<String>, files: &[PathBuf]) -> Config {
+        let client_id = env_value
+            .filter(|v| !v.is_empty())
+            .or_else(|| files.iter().find_map(|p| read_value(&std::fs::read_to_string(p).ok()?, "ANILIST_CLIENT_ID")))
+            .unwrap_or_else(|| BUILTIN_CLIENT_ID.to_string());
+        Config { client_id }
     }
 }
 
@@ -80,9 +66,9 @@ mod tests {
 
     #[test]
     fn reads_python_and_toml_style_lines() {
-        let text = "# creds\nANILIST_CLIENT_ID = \"12345\"\nANILIST_CLIENT_SECRET='s3cret'  # keep private\n";
+        let text = "# config\nANILIST_CLIENT_ID = \"12345\"\nOTHER_NAME='abc'  # a comment\n";
         assert_eq!(read_value(text, "ANILIST_CLIENT_ID").as_deref(), Some("12345"));
-        assert_eq!(read_value(text, "ANILIST_CLIENT_SECRET").as_deref(), Some("s3cret"));
-        assert_eq!(read_value(text, "OTHER"), None);
+        assert_eq!(read_value(text, "OTHER_NAME").as_deref(), Some("abc"));
+        assert_eq!(read_value(text, "MISSING"), None);
     }
 }

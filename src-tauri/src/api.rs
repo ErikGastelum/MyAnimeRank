@@ -239,16 +239,13 @@ async fn require_auth(State(st): State<Shared>, mut req: Request, next: Next) ->
 
 /// Starts the one-shot callback listener and returns AniList's authorize URL.
 /// Shared by the browser route below and the desktop `start_login` command.
-pub fn begin_login(st: &Shared) -> Result<String, String> {
-    let Some(client_id) = st.config.client_id.as_deref().filter(|_| st.config.is_complete()) else {
-        return Err(st.config.missing_message());
-    };
+pub fn begin_login(st: &Shared) -> String {
     oauth::start_listener(st);
-    Ok(anilist::authorize_url(client_id, &oauth::redirect_uri(st.oauth_port)))
+    anilist::authorize_url(&st.config.client_id)
 }
 
-async fn auth_login(State(st): State<Shared>) -> Result<Redirect, ApiError> {
-    begin_login(&st).map(|url| Redirect::temporary(&url)).map_err(|m| ApiError::new(500, m))
+async fn auth_login(State(st): State<Shared>) -> Redirect {
+    Redirect::temporary(&begin_login(&st))
 }
 
 async fn auth_status(State(st): State<Shared>) -> ApiResult {

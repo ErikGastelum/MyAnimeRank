@@ -554,7 +554,6 @@ impl Db {
     }
 
     // ------------------------------------------------------------- auth ----
-    // client_secret NEVER lives in this database.
 
     pub fn get_auth(&self) -> DbResult<Option<Auth>> {
         let conn = self.conn();
