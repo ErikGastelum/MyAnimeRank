@@ -72,6 +72,24 @@ function mdLinks(s){
   out+=esc(s.slice(last));
   return out;
 }
+// AniList synopses carry <br>, <i>, <b> even with description(asHtml:false).
+// Everything is escaped first; then the escaped <br>s become line breaks (3+
+// in a row collapse to 2) and only <i>/<b>/<em>/<strong> are let back in,
+// balanced so an unclosed tag can't carry its style into the rest of the
+// page. Any other markup stays escaped text.
+function fmtSynopsis(s){
+  const open=[];
+  let h=esc(s).replace(/&lt;br\s*\/?&gt;/gi,'\n')
+    .replace(/[ \t]*\r?\n[ \t]*/g,'\n').replace(/\n{3,}/g,'\n\n').trim()
+    .replace(/&lt;(\/?)(i|b|em|strong)&gt;/gi,(m,close,tag)=>{
+      tag=tag.toLowerCase();
+      if(!close){open.push(tag);return `<${tag}>`;}
+      const i=open.lastIndexOf(tag);
+      return i<0?'':open.splice(i).reverse().map(t=>`</${t}>`).join('');
+    });
+  h+=open.reverse().map(t=>`</${t}>`).join('');
+  return h.replace(/\n/g,'<br>');
+}
 // Primary displayed name is English when AniList has one; romaji title_native
 // and the romaji title itself stay untouched wherever they're already shown
 // as secondary/subtitle text -- this only picks what counts as the headline.
@@ -2116,7 +2134,7 @@ function detailView(){
         <div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:14px;">Series info</div>${seriesInfo.map(m=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line2);"><span style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);text-transform:uppercase;letter-spacing:.5px;">${esc(m[0])}</span><span style="font-size:13px;color:var(--t2);font-weight:500;text-align:right;">${esc(m[1])}</span></div>`).join('')}</div>
         ${it.producers&&it.producers.length?`<div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:12px;">Producers</div><div style="display:flex;flex-wrap:wrap;gap:7px;">${it.producers.map(p=>`<span style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:var(--t2);background:var(--s3);border-radius:6px;padding:5px 10px;">${esc(p)}</span>`).join('')}</div></div>`:''}
         ${rated?`<div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:16px;">Community divergence</div><div style="display:flex;align-items:center;justify-content:space-between;"><div style="text-align:center;"><div style="font-family:'Overpass Mono',monospace;font-size:26px;font-weight:700;color:var(--t2);">${fmtScore(it.avg_score)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9px;color:var(--t4);text-transform:uppercase;letter-spacing:1px;margin-top:3px;">community</div></div><div style="flex:1;text-align:center;color:${divergence>=0?'#6bd08a':'#e57373'};"><div style="font-family:'Overpass Mono',monospace;font-size:18px;font-weight:700;">${divergence>=0?'+':''}${divergence.toFixed(1)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9px;color:var(--t4);text-transform:uppercase;letter-spacing:1px;margin-top:3px;">your delta</div></div><div style="text-align:center;"><div style="font-family:'Overpass Mono',monospace;font-size:26px;font-weight:700;color:var(--accent);">${fmtScore(it.rating.overall)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9px;color:var(--t4);text-transform:uppercase;letter-spacing:1px;margin-top:3px;">you</div></div></div></div>`:''}
-        <div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:10px;">Synopsis</div><p style="font-size:13px;color:var(--t2);line-height:1.6;">${esc(it.synopsis)}</p></div>
+        ${it.synopsis?`<div style="background:var(--s1);border:1px solid var(--line);border-radius:13px;padding:18px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t3);text-transform:uppercase;margin-bottom:10px;">Synopsis</div><p style="font-size:13px;color:var(--t2);line-height:1.6;">${fmtSynopsis(it.synopsis)}</p></div>`:''}
       </div>
     </div>
 
