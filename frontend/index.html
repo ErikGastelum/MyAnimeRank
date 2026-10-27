@@ -80,6 +80,9 @@ function displayTitle(it){if(typeof it==='string')return it;return (it&&it.title
 function cover(seed){let h=0;seed=String(seed||'');for(let i=0;i<seed.length;i++)h=(h*31+seed.charCodeAt(i))>>>0;const a=h%360,b=(a+42)%360;return `linear-gradient(135deg,hsl(${a} 46% 30%),hsl(${b} 52% 17%))`;}
 function initials(t){t=String(t||'').trim();if(!t)return '?';const w=t.split(/\s+/).filter(Boolean);return ((w[0]||'')[0]+(w[1]?w[1][0]:'')).toUpperCase();}
 function fmtScore(n){return (n==null)?'—':Number(n).toFixed(1);}
+// Joins only the parts of a meta line that exist ("TV · ⭐ 8.5" when year is
+// null), so a missing field never prints as "null" or leaves a stray separator.
+function joinMeta(parts){return parts.filter(p=>p!=null&&p!=='').join(' · ');}
 function pct(n,max){return Math.max(0,Math.min(100,(n/max)*100))+'%';}
 
 /* ============================================================= API layer
@@ -1461,7 +1464,7 @@ function catalogResults(compact){
         <div style="min-width:0;flex:1;display:flex;flex-direction:column;">
           <div style="font-weight:600;font-size:${compact?'13px':'14px'};line-height:1.25;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${esc(displayTitle(r))}</div>
           ${compact?'':`<div style="font-size:11px;color:var(--t4);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.title_native)}</div><div style="flex:1;"></div>`}
-          <div style="font-family:'Overpass Mono',monospace;font-size:${compact?'10.5px':'11px'};color:var(--t${compact?'4':'3'});margin-top:${compact?'5px':'0'};">${r.year} &middot; ${esc(r.format)}${compact?'':' &middot; ⭐ '+fmtScore(r.avg_score)}</div>
+          <div style="font-family:'Overpass Mono',monospace;font-size:${compact?'10.5px':'11px'};color:var(--t${compact?'4':'3'});margin-top:${compact?'5px':'0'};">${esc(joinMeta([r.year,r.format,!compact&&r.avg_score!=null?'⭐ '+fmtScore(r.avg_score):null]))}</div>
         </div>
       </div>
       ${compact?'':`<div style="display:flex;flex-wrap:wrap;gap:5px;padding:0 14px 12px;">${r.genres.slice(0,3).map(g=>`<span style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t3);background:var(--s3);border-radius:5px;padding:3px 7px;">${esc(g)}</span>`).join('')}</div>`}
@@ -1550,7 +1553,7 @@ function importModal(){
   if(!state.importItem)return '';
   const c=state.importItem;
   const statuses=STATUS[c.media_type];
-  const meta=`${c.year} · ${esc(c.format)} · ${c.media_type==='anime'?(c.episodes||'?')+' eps':(c.chapters||'?')+' ch'}`;
+  const meta=esc(joinMeta([c.year,c.format,totalCount(c)!=null?countLabel(c):null]));
   return `<div data-act="closeImport" style="position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(4,5,7,.74);backdrop-filter:blur(4px);animation:rk-fade .18s ease;">
     <div data-act="stop" style="width:460px;max-width:94vw;background:var(--s1);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 30px 80px rgba(0,0,0,.6);animation:rk-pop .2s ease;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
@@ -2024,12 +2027,15 @@ function detailView(){
   const rated=!!it.rating;
   const rank=rated?myRank(it):0;
   const cs=crits(it.media_type);
+  // Rows whose value AniList doesn't have (manga have no year, ongoing titles
+  // no total) are left out rather than shown blank or as "?". Status only
+  // exists once the title is in the library.
   const seriesInfo=[
     ['Type',it.media_type==='anime'?'Anime':'Manga'],['Format',it.format],['Year',it.year],['Season',it.season],
-    it.media_type==='anime'?['Episodes',it.episodes||'?']:['Chapters',it.chapters||'?'],
-    it.media_type==='anime'?['Runtime',(it.runtime_minutes||'?')+' min']:['Volumes',it.volumes||'?'],
-    ['Community',fmtScore(it.avg_score)],['Status',STATUS_LABEL[it.status]],
-  ];
+    it.media_type==='anime'?['Episodes',it.episodes]:['Chapters',it.chapters],
+    it.media_type==='anime'?['Runtime',it.runtime_minutes!=null?it.runtime_minutes+' min':null]:['Volumes',it.volumes],
+    ['Community',it.avg_score!=null?fmtScore(it.avg_score):null],['Status',inLib?STATUS_LABEL[it.status]:null],
+  ].filter(m=>m[1]!=null&&m[1]!=='');
   const divergence=rated?(it.rating.overall-it.avg_score):0;
 
   // No overflow:hidden on the hero: the Status/Progress menus hang below it
