@@ -39,6 +39,30 @@ Python version below still works during the transition.
    `library.db` there (the schema is identical, nothing is migrated). Or point
    it anywhere with the `MYANIMERANK_DB` environment variable.
 
+### Setup (macOS / Linux)
+
+Login works the same way: no setup needed.
+
+- **macOS:** run `xcode-select --install`, then install Rust from
+  <https://rustup.rs>. The app's files live in
+  `~/Library/Application Support/com.erikgastelum.myanimerank/`.
+- **Linux:** install Rust from <https://rustup.rs>, plus the WebKitGTK
+  libraries Tauri builds against. On Debian/Ubuntu (tested):
+
+  ```bash
+  sudo apt install build-essential pkg-config libssl-dev libgtk-3-dev \
+    libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+    librsvg2-dev libayatana-appindicator3-dev
+  ```
+
+  For other distros, see Tauri's list at
+  <https://v2.tauri.app/start/prerequisites/#linux>. The library database
+  lives in `~/.local/share/com.erikgastelum.myanimerank/` and an optional
+  `local_config.toml` in `~/.config/com.erikgastelum.myanimerank/`.
+
+The commands below are the same on every platform (use `export
+MYANIMERANK_DB=...` instead of PowerShell's `$env:` syntax).
+
 ### Run
 
 ```powershell
