@@ -89,8 +89,8 @@ redirects to `http://localhost:8931/callback` with the token in the URL
 fragment, the callback page hands it to the listener, the token is validated
 with a Viewer query, then saved. The AniList client's redirect URI must stay
 exactly `http://localhost:8931/callback`. Overrides for a different client:
-the `ANILIST_CLIENT_ID` env var, `local_config.toml` in the app config folder,
-or `local_config.py` in the current folder or its parent.
+the `ANILIST_CLIENT_ID` env var, then `local_config.toml` in the app config
+folder; with neither, the built-in ID.
 
 ## Why this is a rebuild, not a patch (read this first)
 

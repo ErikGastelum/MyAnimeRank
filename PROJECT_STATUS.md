@@ -106,8 +106,9 @@ database.
 
 ## 5. Differences from the Python app (deliberate)
 
-- Login uses the implicit grant with a built-in client ID. No secret, no
-  `local_config.py` needed, and the login page opens in the system browser.
+- Login uses the implicit grant with a built-in client ID. No secret and no
+  config file needed, and the login page opens in the system browser. A
+  different client ID can come from `ANILIST_CLIENT_ID` or `local_config.toml`.
 - Adding a title (`POST /media`) now pushes it to AniList right away. Python
   only pushed on the next status/progress/rating change.
 - Pull imports each new entry atomically and skips a failing entry instead of

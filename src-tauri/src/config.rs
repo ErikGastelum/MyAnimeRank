@@ -4,14 +4,12 @@
 //!
 //! Overrides, first hit wins:
 //! 1. the `ANILIST_CLIENT_ID` environment variable
-//! 2. `local_config.toml` in the app's config folder
-//! 3. `local_config.py` in the current folder or its parent (the existing
-//!    Python file works unchanged during development)
+//! 2. `local_config.toml` in the app's config folder (`ANILIST_CLIENT_ID = "..."`)
 //!
-//! Both files use the same `NAME = "value"` lines. With none of them set, the
-//! built-in ID is used, so login never fails for missing config.
+//! With neither set, the built-in ID is used, so login never fails for
+//! missing config.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// This app's AniList API client. Its redirect URI must stay
 /// `http://localhost:8931/callback` (see oauth.rs).
@@ -24,25 +22,16 @@ pub struct Config {
 
 impl Config {
     pub fn load(config_dir: Option<&Path>) -> Config {
-        let mut files = Vec::new();
-        if let Some(dir) = config_dir {
-            files.push(dir.join("local_config.toml"));
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            files.push(cwd.join("local_config.py"));
-            if let Some(parent) = cwd.parent() {
-                files.push(parent.join("local_config.py"));
-            }
-        }
-        Config::from_sources(std::env::var("ANILIST_CLIENT_ID").ok(), &files)
+        let toml = config_dir.map(|dir| dir.join("local_config.toml"));
+        Config::from_sources(std::env::var("ANILIST_CLIENT_ID").ok(), toml.as_deref())
     }
 
-    /// `load` minus the process environment and current folder, so tests can
-    /// drive the lookup order directly.
-    pub fn from_sources(env_value: Option<String>, files: &[PathBuf]) -> Config {
+    /// `load` minus the process environment, so tests can drive the lookup
+    /// order directly.
+    pub fn from_sources(env_value: Option<String>, toml: Option<&Path>) -> Config {
         let client_id = env_value
             .filter(|v| !v.is_empty())
-            .or_else(|| files.iter().find_map(|p| read_value(&std::fs::read_to_string(p).ok()?, "ANILIST_CLIENT_ID")))
+            .or_else(|| read_value(&std::fs::read_to_string(toml?).ok()?, "ANILIST_CLIENT_ID"))
             .unwrap_or_else(|| BUILTIN_CLIENT_ID.to_string());
         Config { client_id }
     }
@@ -65,7 +54,7 @@ mod tests {
     use super::read_value;
 
     #[test]
-    fn reads_python_and_toml_style_lines() {
+    fn reads_quoted_and_commented_lines() {
         let text = "# config\nANILIST_CLIENT_ID = \"12345\"\nOTHER_NAME='abc'  # a comment\n";
         assert_eq!(read_value(text, "ANILIST_CLIENT_ID").as_deref(), Some("12345"));
         assert_eq!(read_value(text, "OTHER_NAME").as_deref(), Some("abc"));
