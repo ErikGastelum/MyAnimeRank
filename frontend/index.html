@@ -394,8 +394,11 @@ function startAuthPolling(){
         clearInterval(_authPollTimer);_authPollTimer=null;
         state.connected=true;state.username=status.username;
         _profileStats=null;_profileFavorites=null;
-        await loadRealLibrary();
-        render();
+        // Leave the login screen now: the pull can take several seconds, and a
+        // login screen that stays up just invites another Connect click.
+        state.pulling=true;render();
+        await pullThenLoadLibrary(); // FR-23: first login imports the AniList lists
+        state.pulling=false;render();
       }
     }catch(e){/* transient network hiccup while polling -- keep trying */}
   },1500);
@@ -2297,18 +2300,21 @@ async function loadRealLibrary(){
   }catch(e){console.error('failed to load real library:',e);}
 }
 
+// Pull first, then load, so the library the user first sees is already
+// post-pull (no stale-then-refreshed flash). Shared by app open and login.
+async function pullThenLoadLibrary(){
+  try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; }
+  catch(e){ /* non-fatal -- a slow/unreachable AniList never blocks login or the library from loading */ }
+  await loadRealLibrary();
+}
+
 (async function boot(){
   let status;
   try{ status=await api.authStatus(); }
   catch(e){ console.error('backend unreachable:',e); state.backendUnreachable=true; render(); return; }
   if(status.connected){
     state.connected=true;state.username=status.username;
-    // Real Pull on every app open (not just the manual button), same order
-    // H.pull() already uses: sync first, then reload, so the library the
-    // user first sees is already post-pull -- no stale-then-refreshed flash.
-    try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; }
-    catch(e){ /* non-fatal -- a slow/unreachable AniList never blocks login or the library from loading */ }
-    await loadRealLibrary();
+    await pullThenLoadLibrary(); // real Pull on every app open, not just the manual button
   }
   render();
 })();
