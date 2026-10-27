@@ -1448,6 +1448,9 @@ function libraryView(){
 function emptyRow(){return `<div style="padding:12px 26px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:11px;">nothing here yet</div>`;}
 function libRow(it){
   const rep=it.repeat_count>0;
+  // Nothing left to count once a known total is reached; an empty slot of the
+  // same width keeps the score badges lined up with rows that still have +1.
+  const total=totalCount(it),done=total!=null&&it.progress>=total;
   const repLabel=(it.media_type==='anime'?'↺ ':'↺ ')+it.repeat_count+'×';
   return `<div data-act="openDetail" data-arg="${it.id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:8px 4px 8px 26px;border-radius:10px;cursor:pointer;">
     <div style="flex:0 0 40px;height:56px;border-radius:6px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);">
@@ -1461,7 +1464,7 @@ function libRow(it){
       </div>
     </div>
     ${it.rating?`<span style="font-family:'Overpass Mono',monospace;font-size:13px;font-weight:700;color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);border-radius:7px;padding:4px 9px;flex:0 0 auto;">${fmtScore(it.rating.overall)}</span>`:''}
-    <div data-act="incProgress" data-arg="${it.id}" title="+1 progress" data-hover="border-color:var(--accent);color:var(--t1)" style="width:30px;height:30px;border-radius:8px;background:var(--s3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:var(--t2);flex:0 0 auto;">+1</div>
+    ${done?'<div style="flex:0 0 30px;"></div>':`<div data-act="incProgress" data-arg="${it.id}" title="+1 progress" data-hover="border-color:var(--accent);color:var(--t1)" style="width:30px;height:30px;border-radius:8px;background:var(--s3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:var(--t2);flex:0 0 auto;">+1</div>`}
   </div>`;
 }
 
