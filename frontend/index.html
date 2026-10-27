@@ -2314,10 +2314,13 @@ function studioView(){
 function userView(){
   const u=state.user;if(!u)return searchView();
   const joined=u.created_at?new Date(u.created_at*1000).getFullYear():null;
+  // AniList's meanScore is on a 0-100 scale; shown /10 like every other score
+  // in the app (78.4 -> 7.8). 0 means nothing scored yet, shown as "—".
+  const mean10=(m)=>m?m/10:null;
   const stats=[
-    {label:'Anime',value:String(u.anime_count)},{label:'Anime Score',value:fmtScore(u.anime_mean_score)},
+    {label:'Anime',value:String(u.anime_count)},{label:'Anime Score',value:fmtScore(mean10(u.anime_mean_score))},
     {label:'Episodes',value:String(u.anime_episodes_watched)},
-    {label:'Manga',value:String(u.manga_count)},{label:'Manga Score',value:fmtScore(u.manga_mean_score)},
+    {label:'Manga',value:String(u.manga_count)},{label:'Manga Score',value:fmtScore(mean10(u.manga_mean_score))},
     {label:'Chapters',value:String(u.manga_chapters_read)},
   ];
   const f=u.favorites||{anime:[],manga:[],characters:[],staff:[],studios:[]};
