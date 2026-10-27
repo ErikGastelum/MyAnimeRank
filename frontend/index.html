@@ -249,16 +249,24 @@ const SEARCH_FETCHERS={
   studio:(q)=>api.searchStudios(q),
   user:(q)=>api.searchUsers(q),
 };
-let _searchDebounce=null;
-async function runSearch(kind,q,arg){
-  if(!q||!q.trim()){_searchResults[kind]=[];render();return;}
-  try{ const resp=await SEARCH_FETCHERS[kind](q,arg); _searchResults[kind]=resp.results; }
-  catch(e){ console.error(`${kind} search failed:`,e); _searchResults[kind]=[]; }
+// _searchPending is true from a keystroke until that query's results land, so
+// the views say "Searching…" instead of "no titles match" meanwhile. _searchSeq
+// makes the latest query win: a slower earlier response is dropped.
+let _searchDebounce=null,_searchSeq=0,_searchPending=false;
+async function runSearch(kind,q,arg,seq){
+  if(!q||!q.trim()){_searchResults[kind]=[];_searchPending=false;render();return;}
+  let results=[];
+  try{ const resp=await SEARCH_FETCHERS[kind](q,arg); results=resp.results; }
+  catch(e){ console.error(`${kind} search failed:`,e); }
+  if(seq!==_searchSeq)return;
+  _searchResults[kind]=results;_searchPending=false;
   render();
 }
 function triggerSearch(kind,q,arg){
   clearTimeout(_searchDebounce);
-  _searchDebounce=setTimeout(()=>runSearch(kind,q,arg),350);
+  const seq=++_searchSeq;
+  _searchPending=!!(q&&q.trim());
+  _searchDebounce=setTimeout(()=>runSearch(kind,q,arg,seq),350);
 }
 // Full Search screen: route state.query to the fetcher for state.searchCategory.
 function triggerCategorySearch(){
@@ -1497,9 +1505,10 @@ function discoverView(){
 }
 
 /* ---- catalog search (full page + modal share results) ---- */
-function catalogResults(compact){
-  // _searchResults.media is already server-filtered by type+q via triggerSearch()
-  const res=_searchResults.media;
+function catalogResults(compact,q){
+  // _searchResults.media is already server-filtered by type+q via triggerSearch().
+  // Nothing shows for an empty box, even results left over from an earlier query.
+  const res=q.trim()?_searchResults.media:[];
   if(!res.length) return {html:'',empty:true,count:0};
   const html=res.map(r=>{
     const inLib=library.some(x=>x.anilist_id===r.anilist_id);
@@ -1532,31 +1541,32 @@ function searchView(){
   const isStudio=state.searchCategory==='studio';
   const isUser=state.searchCategory==='user';
   const personCard=(id,act,name,img)=>`<div data-act="${act}" data-arg="${id}" style="flex:0 0 130px;cursor:pointer;"><div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div></div>`;
-  let bodyHtml,countLabel,emptyMsg;
+  // Before anything is typed there's no count and no "no match" line; while a
+  // query is in flight the count reads "Searching…" instead.
+  const q=state.query.trim();
+  let bodyHtml,count,countNoun,emptyNoun;
   if(isPerson){
-    const results=_searchResults.person;
-    countLabel=`${results.length} ${catLabel.toLowerCase()} results`;
-    emptyMsg=state.query.trim()?`no ${catLabel.toLowerCase()} match "${esc(state.query)}"`:'';
+    const results=q?_searchResults.person:[];
+    count=results.length;countNoun=emptyNoun=catLabel.toLowerCase();
     bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:16px;">${results.map(p=>`<div data-act="openPerson" data-arg="${p.anilist_id}" data-kind="${state.searchCategory}" style="flex:0 0 130px;cursor:pointer;"><div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(p.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(p.name))}</span>${povr(p.image_url,p.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.name)}</div></div>`).join('')}</div>`;
   }else if(isStudio){
-    const results=_searchResults.studio;
-    countLabel=`${results.length} studio results`;
-    emptyMsg=state.query.trim()?`no studios match "${esc(state.query)}"`:'';
+    const results=q?_searchResults.studio:[];
+    count=results.length;countNoun='studio';emptyNoun='studios';
     // Studio has no image field on AniList's schema at all (confirmed via live
     // introspection) -- chip-style results, same as the Favorite Studios shelf
     // elsewhere in the app, not a broken/placeholder image slot.
     bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:10px;">${results.map(s=>`<div data-act="openStudio" data-arg="${s.anilist_id}" data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(s.name)}</span></div>`).join('')}</div>`;
   }else if(isUser){
-    const results=_searchResults.user;
-    countLabel=`${results.length} user results`;
-    emptyMsg=state.query.trim()?`no users match "${esc(state.query)}"`:'';
+    const results=q?_searchResults.user:[];
+    count=results.length;countNoun='user';emptyNoun='users';
     bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:16px;">${results.map(u=>personCard(u.anilist_id,'openUser',u.name,u.avatar_url)).join('')}</div>`;
   }else{
-    const {html,empty,count}=catalogResults(false);
-    countLabel=`${count} catalog results`;
-    emptyMsg=empty?`no titles match "${esc(state.query)}"`:'';
-    bodyHtml=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;">${html}</div>`;
+    const cat=catalogResults(false,state.query);
+    count=cat.count;countNoun='catalog';emptyNoun='titles';
+    bodyHtml=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;">${cat.html}</div>`;
   }
+  const countLabel=!q?'':_searchPending?'Searching…':`${count} ${countNoun} results`;
+  const emptyMsg=q&&!_searchPending&&!count?`no ${emptyNoun} match "${esc(state.query)}"`:'';
   return `<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;">
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px;">
       <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">GET /search</div>
@@ -1572,7 +1582,7 @@ function searchView(){
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--t3);"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       <input id="in-query" data-input="searchQuery" value="${esc(state.query)}" placeholder="Search ${catLabel.toLowerCase()}…" style="width:100%;height:50px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:0 18px 0 44px;font-size:15px;color:var(--t1);outline:none;" />
     </div>
-    <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-bottom:20px;">${countLabel}</div>
+    <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-bottom:20px;">${countLabel||'&nbsp;'}</div>
     ${bodyHtml}
     ${emptyMsg?`<div style="text-align:center;padding:80px 20px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:13px;">${emptyMsg}</div>`:''}
   </div>`;
@@ -1580,7 +1590,8 @@ function searchView(){
 function discoverSearchModal(){
   if(!state.discoverSearchOpen)return '';
   const seg=(t,lbl)=>{const on=state.searchType===t;return `<div data-act="setSearchType" data-arg="${t}" style="padding:7px 14px;border-radius:7px;cursor:pointer;font-weight:600;font-size:12.5px;background:${on?'var(--accent)':'transparent'};color:${on?'#04121d':'var(--t3)'};">${lbl}</div>`;};
-  const {html,empty}=catalogResults(true);
+  const {html,empty}=catalogResults(true,state.dquery);
+  const msg=!empty||!state.dquery.trim()?'':_searchPending?'Searching…':`no titles match "${esc(state.dquery)}"`;
   return `<div data-act="closeDiscoverSearch" style="position:fixed;inset:0;z-index:70;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;background:rgba(4,5,7,.78);backdrop-filter:blur(4px);animation:rk-fade .18s ease;overflow-y:auto;">
     <div data-act="stop" style="width:820px;max-width:100%;background:var(--s1);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 30px 80px rgba(0,0,0,.6);animation:rk-pop .2s ease;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:14px;">
@@ -1595,7 +1606,7 @@ function discoverSearchModal(){
         </div>
       </div>
       <div style="max-height:56vh;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;padding-right:4px;">${html}</div>
-      ${empty?`<div style="text-align:center;padding:50px 20px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:12px;">no titles match "${esc(state.dquery)}"</div>`:''}
+      ${msg?`<div style="text-align:center;padding:50px 20px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:12px;">${msg}</div>`:''}
     </div>
   </div>`;
 }
