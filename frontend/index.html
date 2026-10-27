@@ -329,6 +329,7 @@ const state = {
   // modals
   importItem:null, importStatus:'planning',
   profileSettingsOpen:false, pulling:false, backendUnreachable:false,
+  loginError:null,           // shown on the login screen when start_login fails
   // detail
   current:null,             // {source:'lib'|'catalog', item}
   detailMenuOpen:false, editStatus:false, editProgress:false, rewatchConfirm:null,
@@ -401,11 +402,13 @@ function startAuthPolling(){
 }
 H.connect = async ()=>{
   if(TAURI){
+    // Shown in the page, not alert(): alert() does nothing in the macOS Tauri window.
     try{await TAURI.core.invoke('start_login');}
-    catch(e){console.error('login failed to start:',e);alert(String(e));return;}
+    catch(e){console.error('login failed to start:',e);state.loginError=String(e);render();return;}
   }else{
     window.open(API_BASE+'/auth/anilist/login','_blank');
   }
+  if(state.loginError){state.loginError=null;render();}
   startAuthPolling();
 };
 H.retryBackend = ()=>{location.reload();};
@@ -1207,6 +1210,7 @@ function loginGate(){
       <div data-act="connect" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:15px 24px;border-radius:12px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14.5px;box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 30%,transparent);">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>Connect AniList
       </div>
+      ${state.loginError?`<p style="font-size:13px;color:#e57373;line-height:1.5;margin-top:18px;">Couldn't start login: ${esc(state.loginError)}</p>`:''}
     </div>
   </div>`;
 }

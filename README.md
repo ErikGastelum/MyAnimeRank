@@ -24,11 +24,15 @@ Python version below still works during the transition.
 
 1. Install Rust from <https://rustup.rs> (it sets up the MSVC build tools it
    needs). WebView2 is already part of Windows 10/11.
-2. AniList credentials: the existing `local_config.py` in the project root is
-   picked up automatically when you run from `src-tauri/`. For the installed
-   app, copy it to `local_config.toml` (same contents) in
-   `%APPDATA%\com.erikgastelum.myanimerank\`. Environment variables
-   `ANILIST_CLIENT_ID` / `ANILIST_CLIENT_SECRET` also work.
+2. AniList login: no setup needed. Log in with your own AniList account; the
+   app's AniList client ID is built in and there is no client secret.
+
+   To use a different AniList client instead, set its ID in the
+   `ANILIST_CLIENT_ID` environment variable, or as `ANILIST_CLIENT_ID = "12345"`
+   in `local_config.toml` in `%APPDATA%\com.erikgastelum.myanimerank\` (or
+   `local_config.py` in the folder you run from, or its parent). Whichever
+   client is used, its redirect URI on AniList must stay exactly
+   `http://localhost:8931/callback`.
 3. Your library: the app keeps its database at
    `%APPDATA%\com.erikgastelum.myanimerank\library.db`. To bring your
    existing library over, close the app and **copy** your current

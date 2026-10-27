@@ -89,7 +89,7 @@ async fn api(
 #[tauri::command]
 async fn start_login(app: tauri::AppHandle, state: tauri::State<'_, Shared>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let url = api::begin_login(state.inner())?;
+    let url = api::begin_login(state.inner());
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
@@ -111,9 +111,6 @@ pub fn run() {
             log::info!("library database: {}", db_path.display());
             let config_dir = app.path().app_config_dir().ok();
             let config = config::Config::load(config_dir.as_deref());
-            if !config.is_complete() {
-                log::warn!("{}", config.missing_message());
-            }
             let state = AppState::new(db::Db::open(&db_path)?, anilist::AniList::default(), config);
             app.manage(api::router(state.clone()));
             app.manage(state.clone());
@@ -139,9 +136,6 @@ pub fn serve(port: u16) {
         log::info!("library database: {}", db_path.display());
         let db = db::Db::open(&db_path).expect("open database");
         let config = config::Config::load(None);
-        if !config.is_complete() {
-            log::warn!("{}", config.missing_message());
-        }
         let state = AppState::new(db, anilist::AniList::default(), config);
         tokio::spawn(sync::retry_loop(state.clone()));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.expect("bind dev port");

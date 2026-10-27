@@ -9,9 +9,9 @@ use axum::http::Request;
 use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use myanimerank_lib::anilist::{self, AlError, AniList};
-use myanimerank_lib::config::Config;
+use myanimerank_lib::config::{self, Config};
 use myanimerank_lib::db::{self, Db, MediaFields, Scores, SyncOutcome};
-use myanimerank_lib::{api, sync, AppState, Shared};
+use myanimerank_lib::{api, oauth, sync, AppState, Shared};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -61,8 +61,8 @@ async fn fake_anilist(handler: impl Fn(&str, &Value) -> Reply + Send + Sync + 's
 }
 
 fn state_with(fake: &Fake) -> Shared {
-    let config = Config { client_id: Some("1".into()), client_secret: Some("s".into()), searched: vec![] };
-    AppState::new(Db::open_in_memory().unwrap(), AniList::with_urls(&fake.url, &format!("{}/token", fake.url)), config)
+    let config = Config { client_id: "1".into() };
+    AppState::new(Db::open_in_memory().unwrap(), AniList::with_url(&fake.url), config)
 }
 
 fn login(st: &Shared) {
@@ -401,17 +401,17 @@ async fn http_429_honors_retry_after_and_is_bounded() {
         if *n == 1 { (429, json!({}), Some("0.01")) } else { (200, json!({"data": {"Page": {"studios": [{"id": 1, "name": "Bones"}]}}}), None) }
     })
     .await;
-    let al = AniList::with_urls(&fake.url, "http://unused");
+    let al = AniList::with_url(&fake.url);
     assert_eq!(al.search_studios("b").await.unwrap(), json!([{"anilist_id": 1, "name": "Bones"}]));
     assert_eq!(*hits.lock().unwrap(), 2);
 
     let always = fake_anilist(|_, _| (429, json!({}), Some("0.01"))).await;
-    let al = AniList::with_urls(&always.url, "http://unused");
+    let al = AniList::with_url(&always.url);
     assert!(matches!(al.search_studios("b").await, Err(AlError::Network(_))));
     assert_eq!(always.calls().len(), 3); // 1 try + 2 retries
 
     let too_long = fake_anilist(|_, _| (429, json!({}), Some("120"))).await;
-    let al = AniList::with_urls(&too_long.url, "http://unused");
+    let al = AniList::with_url(&too_long.url);
     assert!(matches!(al.search_studios("b").await, Err(AlError::Network(_))));
     assert_eq!(too_long.calls().len(), 1); // fails fast instead of blocking
 }
@@ -609,10 +609,86 @@ async fn library_rankings_and_insights_return_prd_shapes() {
     assert_eq!(insights["distribution"]["anime"].as_array().unwrap().len(), 18);
 }
 
+// ---------------------------------------------------------------------- login ----
+
+/// One request to the OAuth listener's router: (status, body, whether the
+/// listener was told to shut down).
+async fn oauth_call(st: &Shared, path: &str) -> (u16, String, bool) {
+    let (done, mut closed) = tokio::sync::oneshot::channel();
+    let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+    let resp = oauth::router(st.clone(), done).oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned(), closed.try_recv().is_ok())
+}
+
+#[tokio::test]
+async fn token_from_the_callback_page_is_checked_with_anilist_then_saved() {
+    let fake = fake_anilist(|q, _| {
+        if q.contains("Viewer") {
+            (200, json!({"data": {"Viewer": {"id": 42, "name": "Alice", "mediaListOptions": {"scoreFormat": "POINT_100"}}}}), None)
+        } else {
+            (500, json!({}), None)
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    let (s, _, closed) = oauth_call(&st, "/token?access_token=good-token&expires_in=31536000").await;
+    assert_eq!((s, closed), (200, true));
+    assert_eq!(call(&st, "GET", "/auth/status", None).await, (200, json!({"connected": true, "username": "Alice"})));
+
+    let auth = st.db.get_auth().unwrap().unwrap();
+    assert_eq!((auth.access_token.as_str(), auth.anilist_user_id), ("good-token", 42));
+    let expires = chrono::DateTime::parse_from_rfc3339(auth.token_expires_at.as_deref().unwrap()).unwrap();
+    assert!((expires.timestamp() - chrono::Utc::now().timestamp() - 31_536_000).abs() < 60);
+    // FR-25: the account's current format is stored as-is, never changed here.
+    assert_eq!(auth.score_format.as_deref(), Some("POINT_100"));
+    assert!(fake.calls_containing("UpdateUser").is_empty());
+}
+
+#[tokio::test]
+async fn a_token_anilist_rejects_saves_nothing() {
+    let fake = fake_anilist(|_, _| (400, json!({"data": null, "errors": [{"message": "Invalid token", "status": 400}]}), None)).await;
+    let st = state_with(&fake);
+    let (s, body, closed) = oauth_call(&st, "/token?access_token=bad-token&expires_in=31536000").await;
+    assert_ne!(s, 200);
+    assert!(body.contains("Invalid token"), "{body}");
+    assert!(closed);
+    assert!(st.db.get_auth().unwrap().is_none());
+    assert_eq!(call(&st, "GET", "/auth/status", None).await, (200, json!({"connected": false, "username": null})));
+
+    let (s, _, _) = oauth_call(&st, "/token").await;
+    assert_eq!(s, 400);
+    assert!(st.db.get_auth().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn callback_page_never_reflects_query_text_as_html() {
+    let st = offline_state().await;
+    let (s, page, closed) = oauth_call(&st, "/callback").await;
+    assert_eq!((s, closed), (200, false)); // still waiting for the page to send the token
+    assert!(page.contains("location.hash") && page.contains("textContent") && !page.contains("innerHTML"));
+
+    let injected = "/callback?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&error_description=%3Cimg%20src%3Dx%20onerror%3Dalert(2)%3E";
+    let (s, error_page, closed) = oauth_call(&st, injected).await;
+    assert_eq!((s, closed), (400, true)); // AniList refused: nothing left to wait for
+    assert_eq!(error_page, page); // static: nothing from the request is written into it
+    assert!(!error_page.contains("alert("));
+}
+
 #[test]
-fn oauth_error_text_is_escaped() {
+fn config_falls_back_to_the_builtin_client_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [dir.path().join("local_config.toml"), dir.path().join("local_config.py")];
+    assert_eq!(Config::from_sources(None, &files).client_id, config::BUILTIN_CLIENT_ID);
+    assert_eq!(Config::from_sources(Some(String::new()), &files).client_id, config::BUILTIN_CLIENT_ID);
     assert_eq!(
-        myanimerank_lib::oauth::html_escape("<script>alert('x')</script>&"),
-        "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;&amp;"
+        anilist::authorize_url(config::BUILTIN_CLIENT_ID),
+        format!("https://anilist.co/api/v2/oauth/authorize?client_id={}&response_type=token", config::BUILTIN_CLIENT_ID)
     );
+
+    // Overrides: a file, then the environment variable over it.
+    std::fs::write(&files[1], "ANILIST_CLIENT_ID = \"777\"\n").unwrap();
+    assert_eq!(Config::from_sources(None, &files).client_id, "777");
+    assert_eq!(Config::from_sources(Some("888".into()), &files).client_id, "888");
 }
