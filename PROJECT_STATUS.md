@@ -1,170 +1,131 @@
 # MyAnimeRank — Project Status
 
-*Updated 2026-10-25, after the cleanup (phases 1–3) and hardening (phases 4–7) passes. This replaces the 2026-10-20 reconnaissance snapshot; that version is in git history (`bb0119b`).*
+*Updated 2026-10-27, after the port to Tauri 2 + Rust. This replaces the
+2026-10-25 Python status (cleanup and hardening, phases 1–7); that version is
+in git history (`bea0e17`).*
 
 ---
 
 ## 1. What this project is
 
-A personal, locally-hosted desktop app for ranking anime and manga through **anchored relative scoring**. You score each title on several criteria by comparing it against titles you've already scored in the same genre and media type. It's also an AniList client: login is required (FR-47), and status, progress and overall score sync both ways. Discover, Feed, Characters/Staff/Studios/Users, Favorites, Profile and Insights screens are all backed by AniList's GraphQL API. The spec is `docs/PRD.md` (v2, now including M9).
+A personal, local desktop app for ranking anime and manga through **anchored
+relative scoring**: you score each title on several criteria by comparing it
+against titles you've already scored in the same genre and media type. It's
+also an AniList client: login is required (FR-47), status, progress and
+overall score sync both ways, and Discover, Feed, Characters/Staff/Studios/
+Users, Favorites, Profile and Insights are backed by AniList's GraphQL API.
+The spec is `docs/PRD.md` (v2, through M9).
 
-| Layer | Tech | Version (pinned = installed) |
-|---|---|---|
-| Language | Python | 3.14.3 locally (README says 3.12+) |
-| API server | FastAPI (lifespan startup) | 0.136.3 (Starlette 1.10.0) |
-| ASGI server | uvicorn | 0.49.0 |
-| Validation | pydantic | 2.13.4 |
-| HTTP client | httpx | 0.28.1 |
-| Desktop shell | pywebview (frameless) | 6.2.1 |
-| DB | SQLite via stdlib `sqlite3` | — |
-| Frontend | single vanilla HTML/JS file, no build step | — |
-| Test / lint | pytest, ruff (in `requirements-dev.txt`) | 9.0.3 / 0.17.2 |
+| Layer | Tech |
+|---|---|
+| Desktop shell | Tauri 2 (frameless window, custom titlebar) |
+| Language | Rust (edition 2021) |
+| API | axum router, run in-process through one Tauri command (no server, no port) |
+| HTTP client | reqwest (native TLS) |
+| DB | SQLite via rusqlite (bundled), same schema as the Python app |
+| Frontend | single vanilla HTML/JS file, no build step |
+| Login | AniList implicit grant, built-in client ID, no secret |
+| Tests / lint | `cargo test` (36), `cargo clippy --all-targets` (clean) |
+
+Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
 ---
 
-## 2. How it's organized
+## 2. Why the port happened
+
+The goal was a lighter, faster app. The Python version ran three things: a
+Python interpreter, a uvicorn server in a subprocess, and a pywebview window
+talking to it over HTTP. The Rust version is one native process (an ~8.5 MB
+release binary) plus the OS webview. On Windows the whole app measured about
+100 MB in Task Manager.
+
+Tauri was chosen over a pure-Rust UI (GPUI, Iced, Slint) because it keeps the
+existing frontend, which made the port a backend rewrite rather than a full
+UI rebuild. A native UI would use less memory still, at the cost of
+rebuilding every screen.
+
+---
+
+## 3. How it's organized
 
 ```text
-main.py               FastAPI app: 37 API routes + GET / (frontend); lifespan starts DB + retry loop; AniList error handlers
-database.py           schema, queries, rating math, sync helpers (detect_conflict, apply_remote_entry)
-models.py             Pydantic request/response models (PRD §7)
-anilist.py            ALL AniList GraphQL via one _graphql() (errors/404/429 handling); AniListError, AniListNotFound
-sync.py               Pull, guarded push (one-request pre-check), conflict resolution, in-memory retry queue
-oauth_listener.py     one-shot OAuth callback listener, fixed port 8931 (escaped error pages)
-cache.py              60s TTL cache for Discover/Feed
-app.py                pywebview shell: uvicorn subprocess on a free port + frameless window
-frontend/index.html   entire UI (real API only; "can't reach backend" screen if the API is down)
-tests/                pytest: 174 tests, 9 test files + conftest (temp DB per test, AniList always faked)
-requirements.txt      runtime dependencies (direct imports only)
-requirements-dev.txt  requirements.txt + pytest + ruff
-docs/PRD.md           product contract (authoritative)
-docs/anilist-api-notes.md  AniList schema notes and gotchas
-README.md             what it is, setup, run, test
-pyproject.toml        ruff config
-.claude/              CLAUDE.md (agent instructions), hooks, settings, launch.json, plans/
-local_config.py       ANILIST_CLIENT_ID / ANILIST_CLIENT_SECRET (gitignored)
-library.db            live user data (gitignored); *.db.bak* backups also gitignored
-myanimrank.db         v1 database (gitignored), only useful for migrating v1 ratings
-backups/*.json        v1 JSON backups (committed)
+src-tauri/src/main.rs     entry point; `--serve <port>` = browser dev mode
+src-tauri/src/lib.rs      app state, Tauri setup, `api` and `start_login` commands
+src-tauri/src/api.rs      every route (same paths/JSON/status codes as PRD §7), auth gate
+src-tauri/src/db.rs       schema, migration of older DBs, rating math, queries
+src-tauri/src/anilist.rs  all GraphQL through one graphql() (errors/404/429 handling)
+src-tauri/src/sync.rs     Pull, guarded push, conflicts, in-memory retry queue
+src-tauri/src/oauth.rs    one-shot callback listener on 8931 (implicit grant)
+src-tauri/src/cache.rs    60s TTL cache for Discover/Feed
+src-tauri/src/config.rs   built-in AniList client ID + optional overrides
+src-tauri/tests/backend.rs  integration tests: in-memory DB, fake AniList server
+frontend/index.html       entire UI; talks to the API via Tauri, or fetch under --serve
 ```
 
-**Data flow:** the frontend calls same-origin `fetch()` against `main.py` routes. `require_auth` gates everything except `/`, `/auth/status`, `/auth/anilist/login` and `/auth/logout`; a test enumerates every route to enforce this. Routes use `database.py` (SQLite) and `anilist.py` (GraphQL). Local edits write SQLite, then queue `sync.push_now_guarded` as a background task.
+**Data flow:** the page calls `apiFetch(path)`. In the app that becomes
+`invoke('api', {method, path, body})`, which hands the request to the axum
+router in-process. In `--serve` mode it's a normal same-origin fetch. Every
+route except `/`, `/auth/status`, `/auth/anilist/login` and `/auth/logout` is
+behind the login gate. Local edits (status, progress, repeat, rating, import)
+write SQLite, then push to AniList in the background with a pre-push conflict
+check (FR-58).
 
-**Config:** no environment variables. Secrets live in `local_config.py`. The AniList client's redirect URI must be `http://localhost:8931/callback`.
-
----
-
-## 3. How to run it
-
-```powershell
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt   # runtime deps + pytest + ruff (requirements.txt alone to just run)
-python app.py                         # desktop window
-uvicorn main:app --port 8420          # browser dev
-python -m pytest -q                   # tests
-ruff check .                          # lint
-```
-
-**Current results (2026-10-25):**
-- `pytest`: **174 passed**, 1 warning. The warning is Starlette 1.10's TestClient deprecation, asking for a different HTTP client package for tests; not installed, see §7.
-- `ruff check .`: app and test code clean. 3 findings remain in `.claude/hooks/`, deliberately untouched (see §6).
-- Boot smoke test (TestClient on a temp DB): starts cleanly; `/` 200, `/auth/status` 200, protected routes 401.
-- Live run (Phase 3, against a temp copy of the DB and your real AniList account, read-only screens only): boot, library, Discover, Feed, Profile, Insights, detail, character/VA chain, catalog/studio/user search all worked with zero console errors.
+**Where data lives:** `library.db` in the OS app-data folder for
+`com.erikgastelum.myanimerank` (Windows: `%APPDATA%\com.erikgastelum.myanimerank\`),
+or wherever `MYANIMERANK_DB` points. The app creates the folder if it's
+missing, and shows an error dialog instead of crashing if it can't open the
+database.
 
 ---
 
-## 4. Git state
+## 4. How it was verified
 
-- **Branch `rebuild`**, pushed through `5bab9ce` (Phase 7). The post-Phase-7 follow-ups below are uncommitted.
-- `main` and `archive/broken-v1` are unchanged at `c6ac79c` (v1).
-
-| Commit | Phase | What |
-|---|---|---|
-| `3010521` | 1 | Gitignore (now UTF-8; it was UTF-16 and ignored nothing), dev tooling, rewritten CLAUDE.md |
-| `bb0119b` | 1 | First commit of the whole v2 app, which had been untracked for months |
-| `e8f6bc0` | 2 | CORS removed, OAuth error HTML escaped, stale comments fixed |
-| `67a3f77` | 3 | Frontend mock/offline mode removed; backend-unreachable screen |
-| `ff2339b` | 4 | media_type taken from AniList on import; strict `_to_media_type`; NULL-criterion anchors |
-| `8f4dd87` | 5 | False-conflict-after-import fix; ratings seeded from AniList scores; sync test coverage |
-| `1fce4f4` | 6 | AniList client hardening; one-request pre-push check |
-| `5bab9ce` | 7 | Lifespan, ruff config + trivial fixes, README, release.yml deleted, status docs |
-| *(uncommitted)* | follow-up | Status validation (FR-17), `requirements-dev.txt`, venv setup in README, `.venv/` ignored |
+- **Parity with the Python app:** both backends were run on copies of the same
+  fixture database and sent the same requests, including writes and error
+  cases. Responses and final database state were identical (46/46 in the first
+  run, 80 requests in a later review), apart from error-detail wording.
+- **Tests:** 36 Rust tests, covering overall computation (including Python's
+  half-to-even rounding), media_type immutability, anchors, progress
+  auto-complete, conflict detection, Pull/push against a fake AniList, the
+  login gate on every route, rating/status validation, 429 handling, login,
+  and opening an older-schema database.
+- **By hand:** Windows (window controls, library, login, writes, adding a
+  title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
+  config, an existing library, login URL).
 
 ---
 
-## 5. What was done (phases 1–7)
+## 5. Differences from the Python app (deliberate)
 
-**Phase 1: docs and instructions**
-- The PRD now covers M9 (§4.11, FR-64–FR-67: Studios & Users search and profiles, read-only).
-- FR-6 now says non-zero manga audio is rejected with 422.
-- CLAUDE.md is rewritten to match the PRD's scope. AGENTS.md and `.codex/` are deleted.
-
-**Phase 2: security**
-- Wildcard CORS removed. Any website could previously call the API, including endpoints that delete from your AniList account.
-- OAuth callback error text is now escaped.
-- Five stale comments fixed.
-
-**Phase 3: frontend**
-- Mock data, fixtures, `BACKEND_AVAILABLE` branches, the localStorage library cache (cleared on load) and the demo-only "simulate drift" UI are removed.
-- If the backend is down, a single "can't reach the backend" screen shows.
-- Fixed along the way:
-  - A failed import used to add a fake library row, so every later write 404'd.
-  - Progress edits stamped the literal date `2026-07-02`.
-
-**Phase 4: media_type invariant**
-- `_to_media_type` raises on anything except ANIME/MANGA.
-- `POST /media` stores AniList's `media_type`. A disagreeing client value is ignored and logged rather than rejected, the same way FR-9 treats `overall`.
-- Anchors skip rows with a NULL criterion (previously a 500).
-- All tests get a temp DB through an autouse fixture.
-
-**Phase 5: sync coverage, plus a real bug**
-- Fixed: every Pull-imported title looked locally edited, so the next AniList-side change raised a false conflict. Import now goes through `apply_remote_entry`, which means:
-  - AniList values are copied exactly (no local auto-complete).
-  - The AniList score seeds a rating, with criteria snapped to 0.5 steps; `overall` keeps AniList's exact score so the next push doesn't rewrite it.
-- Confirmed by test: pushing an unrated title never sends a score, so an AniList score can't be cleared.
-
-**Phase 6: AniList robustness**
-- `_graphql` changes:
-  - A GraphQL `errors` payload → `AniListError` (route → 502 with AniList's message).
-  - HTTP 404 → `AniListNotFound` (route → 404).
-  - 429 → honors Retry-After, at most 2 retries and 30s per wait.
-  - 5xx stays retryable.
-- Fixed: AniList 404s unknown ids rather than returning null, so `get_by_id` returned errors instead of `None`. The 404s from `/media/by-anilist` and import now work end to end.
-- Pre-push check per edit went from 3 requests (including your **entire** list) to 2. scoreFormat rides along in the entry lookup, so it's still re-checked on every push (FR-28) without a cache.
-- Fixed: edits made offline were never queued for retry (FR-26).
-- `retry_loop` logs failures instead of swallowing them.
-
-**Phase 7: housekeeping**
-- Environment synced to `requirements.txt`.
-- The `on_event` startup hook is replaced by a `lifespan` handler, which also cancels the retry loop on shutdown. Warnings went 299 → 1.
-- Ruff config added, with trivial fixes (UTC alias, import sorting, `collections.abc`, exception chaining, unused imports). FastAPI's `Depends` is allowlisted for B008.
-- README added; v1 `release.yml` deleted.
-- `.gitignore` widened to `*.db.bak*`. Your dated backup `library.db.bak-20261025` was *not* ignored before this.
-
-**Follow-ups after Phase 7**
-- Status validation: a status must be valid for the title's media type (FR-17, PRD §7), checked on both status edits and import, before anything is stored or pushed. The valid set comes from the existing AniList-enum mapping (`anilist.local_statuses()`), so there's one source of truth.
-- `requirements-dev.txt` (runtime deps + pytest + ruff), venv setup in the README, `.venv/` gitignored.
-- Checked, no change needed: `app.py` already launches uvicorn with `sys.executable`.
-
-**Tests:** 23 → 174. They now cover `detect_conflict`, Pull/push paths, `apply_remote_entry`, progress auto-complete, anchors, the media_type invariant, AniList error/404/429 handling, auth on every route, CORS, OAuth escaping and lifespan.
+- Login uses the implicit grant with a built-in client ID. No secret, no
+  `local_config.py` needed, and the login page opens in the system browser.
+- Adding a title (`POST /media`) now pushes it to AniList right away. Python
+  only pushed on the next status/progress/rating change.
+- Pull imports each new entry atomically and skips a failing entry instead of
+  aborting the whole pull, and it runs right after login.
+- `/insights` treats a NULL criterion as 0, where Python returned 500.
+- The database lives in the app-data folder, not the repo.
+- Expanded/collapsed library sections persist between launches (the page
+  origin is now fixed).
+- Error-detail text on 422s is a single string, not FastAPI's list.
 
 ---
 
-## 6. Health assessment
+## 6. Git state
 
-**In good shape:**
-- AniList-only and the single `media` table hold, and media_type is now enforced at every entry point.
-- Sync logic has real test coverage.
-- No mock paths remain.
-- Failures from AniList surface clearly instead of as 500s.
+- Default branch: **`main`**. `rebuild` and `tauri-port` were merged in and
+  deleted.
 
-**Remaining risks:**
-1. ~~**Old credentials in public git history.**~~ **Resolved (2026-10-25):** the old AniList token has been revoked and the old client secret deleted, so the copies still in commit `403be7e` (`_secrets.py`, `myanimrank.db`) are dead. Scrubbing them from history is optional cleanup, not urgent.
-2. **FR-25/FR-28 score-format flow isn't wired in the frontend.** Nothing calls `POST /auth/score-format/confirm`, and a drift result from a push is never shown. If your account isn't on POINT_10_DECIMAL, pushes silently skip.
-3. **Write paths weren't exercised live after Phase 3.** Status, progress, rating, favorite, import and delete are covered by backend tests, but haven't been clicked through in the real UI since the mock removal. Try one of each once.
-4. **The retry queue is in-memory.** Queued pushes are lost on app close. An item that becomes permanently failing logs a traceback every 30s.
-
-**Ruff findings left in `.claude/hooks/`** (not app code, left untouched on purpose): I001 import order and BLE001 blind except in `pre_bash.py` (your security gate); PLW1510 `subprocess.run` without `check` in `session_end.py`.
+| Commit | What |
+|---|---|
+| `7c54c06` | Port the desktop app to Tauri 2 + Rust (`src-tauri/`) |
+| `bc9f2e1` | Unclip detail Status/Progress menus; require title on import; clippy |
+| `fe9c2c3` | Hooks use `$CLAUDE_PROJECT_DIR` |
+| `6a6a9a8`, `29504b4` | Login: implicit grant, built-in client ID; Pull after login |
+| `c948df3` | Pull: atomic per-entry import, skip failures |
+| `8995800` | Create a missing DB folder; error dialog instead of panic |
+| `5e322b1` | Push a newly added title to AniList (FR-24) |
+| `1d9cd8c` | README: macOS and Linux setup |
 
 ---
 
@@ -172,18 +133,28 @@ ruff check .                          # lint
 
 Roughly by priority:
 
-1. ~~Rotate the old AniList client secret and revoke the old token~~ **Done.** Optional, not urgent: scrub `403be7e` from history with `git filter-repo` and a force-push.
-2. ~~Push `rebuild` and commit Phase 7~~ **Done** (`5bab9ce`, pushed).
-3. **Wire FR-25/FR-28:** the consent dialog on first login, and a drift dialog when a push reports `score_format_drift`.
-4. ~~Validate status values~~ **Done:** `PUT /media/{id}/status` and `POST /media` now return 422 unless the status is one of the FR-17 values for that title's media type.
-5. **Token expiry** (PRD §11 open question): `token_expires_at` is stored but never checked; show a clear re-login prompt.
-6. **Click-test the write paths** in the real app once (see §6.3).
-7. **Frontend `anchorsFor()`** treats a NULL criterion as score 0 (the client-side twin of the Phase 4 server fix).
-8. **Request volume follow-ups:**
-   - Debounce rapid +1 progress clicks; each click is currently its own push.
-   - Use the single-entry lookup in `sync.resolve(winner="remote")` and `get_pending_conflicts`, which still fetch the whole list.
-9. **Schema defects** (each needs a migration against live data): nullable `rating.animation`, no `ON DELETE CASCADE`.
-10. **Persist the retry queue** across restarts (FR-26).
-11. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
-12. **v2 packaging** (PyInstaller or similar) as its own task, now that the v1 workflow is gone.
-13. **Test-client warning:** decide whether to add the HTTP client package Starlette 1.10's TestClient now asks for (a new dev dependency).
+1. **Downloadable builds for friends:** a GitHub Actions release workflow
+   (tauri-action) that builds Windows/macOS/Linux installers on a version tag.
+   There is no `.github/` yet. Builds will be unsigned (SmartScreen and
+   Gatekeeper warnings on first launch).
+2. **Retire the Python app:** delete `*.py`, `tests/*.py`, `requirements*.txt`,
+   `pyproject.toml`, the pywebview branches in `frontend/index.html`, the
+   Python sections of the README, and `.claude/launch.json` (still runs
+   uvicorn against the repo's `library.db`). Do this once the Rust app has
+   been in daily use for a while.
+3. **`--serve` defaults to `./library.db`.** Run from the repo root, that's
+   the old Python app's real library. Consider requiring `MYANIMERANK_DB` in
+   that mode.
+4. **Wire FR-25/FR-28:** the score-format consent dialog on first login, and a
+   drift message when a push reports `score_format_drift`.
+5. **Token expiry:** `token_expires_at` is stored but never checked (implicit
+   grant tokens last about a year); show a clear re-login prompt.
+6. **Persist the retry queue** across restarts (FR-26).
+7. **macOS look:** the custom Windows-style titlebar buttons; consider native
+   traffic-light controls on macOS only.
+8. **Schema defects** (each a migration against live data): nullable
+   `rating.animation`, no `ON DELETE CASCADE`.
+9. **Hero tint CSS** is invalid and silently dropped; fixing it changes the look.
+10. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
+11. **Request volume:** debounce rapid +1 progress clicks; use the single-entry
+    lookup in `resolve(remote)` and pending conflicts instead of the whole list.
