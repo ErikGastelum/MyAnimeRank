@@ -22,7 +22,7 @@ MyAnimeRank is a personal, locally-hosted desktop app for ranking anime and mang
 
 Example: if Naruto's Story is anchored at 8.0, adding Jujutsu Kaisen surfaces Naruto and other action anime you've rated so you can decide whether JJK's story is better or worse, and by how much. Manga anchors only against other manga — a manga is never compared against an anime's Animation/Audio criteria, because manga doesn't have those criteria.
 
-The app runs entirely on your machine: a Python/FastAPI backend, a local SQLite database, a pywebview desktop shell, and metadata pulled live from AniList's public GraphQL API. An active AniList login is required to use the app at all — see 4.6 — so the local library is always a mirror of a real AniList account, never a standalone dataset.
+The app runs entirely on your machine: a Rust backend running in-process inside a Tauri 2 desktop shell, a local SQLite database, and metadata pulled live from AniList's public GraphQL API. An active AniList login is required to use the app at all — see 4.6 — so the local library is always a mirror of a real AniList account, never a standalone dataset.
 
 # 2. Goals & Non-Goals
 
@@ -241,7 +241,7 @@ SQLite, three tables. One row per title regardless of media type — this is the
 
 ## anilist_auth
 
-Single row (id=1). Holds the local OAuth session — never synced anywhere, never exposed outside this app. The client_secret used to exchange the authorization code (Python app only; the desktop app's implicit grant has none) is NOT stored here — it lives in local_config.py (gitignored, imported as a module, not named secrets.py), since it's a static app credential, not per-session user state.
+Single row (id=1). Holds the local OAuth session — never synced anywhere, never exposed outside this app. There is no client_secret: the implicit grant (FR-22) needs only the public client_id, which is built into the app.
 
 | **Field** | **Type** | **Notes** |
 | --- | --- | --- |
@@ -255,13 +255,13 @@ Single row (id=1). Holds the local OAuth session — never synced anywhere, neve
 
 | **Layer** | **Choice** | **Notes** |
 | --- | --- | --- |
-| Backend | Python + FastAPI | All routes; the only caller of the AniList API |
-| Database | SQLite | Single local file (`library.db`), zero-config |
+| Backend | Rust (axum router, `src-tauri/src/api.rs`) | All routes; `src-tauri/src/anilist.rs` is the only caller of the AniList API |
+| Database | SQLite (rusqlite, `src-tauri/src/db.rs`) | Single local file (`library.db`) in the OS app-data folder, or `MYANIMERANK_DB`; zero-config |
 | Metadata source | AniList GraphQL only | `graphql.anilist.co` — search + by-id lookups |
-| Frontend | Single-file HTML/React | Built separately (Claude Design), served by FastAPI |
-| Desktop shell | pywebview | Frameless native window (`app.py`); `main.py` runs headless for browser use |
-| Hosting | Uvicorn on localhost | Dynamic free port via `app.py` |
-| Auth | AniList OAuth (Authorization Code in the Python app; Implicit Grant in the desktop app) | Fixed dedicated local port for the callback only (not app.py's dynamic port); the desktop app has a built-in client_id and no secret; the Python app's client_secret lives in local_config.py, gitignored — deliberately NOT named secrets.py, which would shadow Python's own built-in secrets module and risk other libraries importing the wrong one — per FR-22 |
+| Frontend | Single-file vanilla HTML/JS (`frontend/index.html`) | Same page in the desktop window and in a browser under `--serve` |
+| Desktop shell | Tauri 2 | Frameless native window with a custom titlebar (WebView2 / WebKit / WebKitGTK) |
+| Hosting | In-process, no server | The page reaches the router through one Tauri command, so no port is open; `cargo run -- --serve <port>` binds it to localhost for browser development |
+| Auth | AniList OAuth, Implicit Grant | Fixed dedicated local port for the callback only (`src-tauri/src/oauth.rs`); built-in public client_id, no client_secret — per FR-22 |
 
 # 7. API Contract (for frontend integration)
 
@@ -352,7 +352,7 @@ Response: { "results": [ { ...media fields, status, progress, rating: {...} | nu
 ## GET /auth/anilist/login
 
 ```
-Opens AniList's OAuth authorize page in the pywebview window; redirects locally on approval.
+Opens AniList's OAuth authorize page in the system browser; redirects locally on approval.
 ```
 
 ## GET /auth/anilist/callback?code=
@@ -522,7 +522,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 
 - Typeface: Overpass (display/body) + Overpass Mono (data/labels).
 - Palette: near-black background (#0c0d10 / #060709), surfaces in #131419–#1e212a, single blue accent (#34a8f0 family), muted text scale (#eef1f6 → #474d5a).
-- Frameless custom titlebar (minimize/maximize/close), since this runs inside a pywebview window, not a browser chrome.
+- Frameless custom titlebar (minimize/maximize/close), since this runs inside a Tauri window, not a browser chrome.
 
 **Bottom nav is five tabs, matching AniList's own client apps: Anime, Manga, Discover, Feed, Profile. Search (AniList catalog, for import) and Rankings (anchored-score sort) are NOT separate tabs — they live inside the Anime/Manga tabs as described below. None of these five tabs is reachable until login (FR-47) — the Login/Connect screen is what a fresh launch actually shows first.**
 
@@ -542,14 +542,14 @@ The existing app has an established dark visual identity — keep it, don't rede
 - **User profile (FR-66)** — avatar, banner, about, stats block, favorite shelves. Read-only (FR-67).
 - **Insights (optional)** — genre breakdown, score distribution, community-score divergence.
 
-*Design deliverable: a single-file HTML/React mockup (or component set) using the API contract in Section 7 as the data shape, so wiring it to the real FastAPI backend afterward is a drop-in, not a rewrite.*
+*Design deliverable: a single-file HTML/React mockup (or component set) using the API contract in Section 7 as the data shape, so wiring it to the real backend afterward is a drop-in, not a rewrite.*
 
 # 9. Build Milestones
 
 | **Phase** | **Deliverable** |
 | --- | --- |
 | M1 | Frontend design pass in Claude Design against Section 8, using mock data shaped per Section 7. |
-| M2 | FastAPI skeleton + SQLite schema (Section 5); /search and /media working against AniList only. |
+| M2 | Backend skeleton + SQLite schema (Section 5); /search and /media working against AniList only. |
 | M3 | Rating endpoints with server-side media-type-aware overall computation; anchors endpoint with media_type + genre filtering; status/progress endpoints (4.5). |
 | M4 | AniList OAuth login, Pull, and automatic push sync (4.6). |
 | M5 | Discover, Feed, and Characters/Staff/Favorites endpoints (4.7–4.9) — all live pass-throughs to AniList, no schema changes needed. |
@@ -570,7 +570,7 @@ You asked for MyAniList (a third-party AniList client) to be used as a reference
 | Follow friends, see their lists/favorites | In scope — v2 | This is now Feed (4.8) — live pass-through to AniList's Activity API, scoped to the connected account's own follow graph. |
 | Mark series/characters/VAs as favorites | In scope — v2 | Section 4.9 — favoriting is a live toggle on the real AniList account, not local state. |
 | Custom app theme / list style / icon | Non-goal — v2 | The app has one established dark theme (Section 8) that's intentionally being carried forward, not made user-configurable, for this rebuild. |
-| Live broadcast/episode-airing notifications | Non-goal — v2 | Needs background polling of AniList's airing schedule plus OS-level notifications — separate subsystem, not part of the FastAPI/SQLite/pywebview core being rebuilt here. |
+| Live broadcast/episode-airing notifications | Non-goal — v2 | Needs background polling of AniList's airing schedule plus OS-level notifications — separate subsystem, not part of the Rust/SQLite/Tauri core being rebuilt here. |
 
 *If any "Non-goal" row above is actually wanted for v2, say so explicitly and it goes into the data model and API contract before frontend work starts on it — that's the discipline this rebuild is meant to enforce.*
 
