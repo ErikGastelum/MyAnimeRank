@@ -183,10 +183,13 @@ async function loadCommunity(it,inLib){
   catch(e){ console.error('community fetch failed:',e); _communityCache[it.id]=null; }
   render();
 }
+// _feedCache[type]: undefined = loading, false = last fetch failed (opening the
+// tab again retries), array = loaded (possibly empty).
 let _feedCache={};
 async function loadFeed(type){
+  delete _feedCache[type];
   try{ const resp=await api.getFeed(type); _feedCache[type]=resp.activities; }
-  catch(e){ console.error('feed fetch failed:',e); _feedCache[type]=[]; }
+  catch(e){ console.error('feed fetch failed:',e); _feedCache[type]=false; }
   render();
 }
 let _insights=null;
@@ -525,8 +528,9 @@ async function openTitleByAnilistId(anilistId){
     openDetail({source:'catalog',item:mk(Object.assign({},item,{rating:null}))});
   }catch(e){ console.error('open title by anilist id failed:',e); }
 }
-// Discover shelf, Profile favorite Anime/Manga card (FR-54) and Relations
-// shelf card all carry a real anilist_id in data-arg (FR-55), never title text.
+// Discover shelf, Profile favorite Anime/Manga card (FR-54), Relations shelf
+// card and Feed row (FR-35) all carry a real anilist_id in data-arg (FR-55),
+// never title text.
 H.openDiscover = (el)=>openTitleByAnilistId(+el.dataset.arg);
 H.openFavTitle = (el)=>openTitleByAnilistId(+el.dataset.arg);
 H.openRelation = (el)=>openTitleByAnilistId(+el.dataset.arg);
@@ -1628,12 +1632,35 @@ function importModal(){
 }
 
 /* ---- feed ---- */
+// AniList ListActivity: status is a verb phrase ("watched episode", "read
+// chapter", "completed", "plans to watch", "dropped", ...) and progress a bare
+// number or range ("27 - 28"). Returns the text either side of the title:
+// "watched episodes 27–28 of" | Frieren, "completed" | Punpun, or for a verb
+// that doesn't name the unit, "dropped" | Vagabond | " at chapter 12".
+function feedPhrase(a){
+  const verb=String(a.verb||'').trim();
+  const range=String(a.progress_range||'').trim().replace(/\s*-\s*/g,'–');
+  if(!range)return {before:verb,after:''};
+  const plural=range.includes('–')?'s':'';
+  const m=verb.match(/^(.*)\b(episode|chapter)$/);
+  if(m)return {before:`${m[1]}${m[2]}${plural} ${range} of`,after:''};
+  return {before:verb,after:` at ${a.media_type==='manga'?'chapter':'episode'}${plural} ${range}`};
+}
+function feedSkeleton(){
+  const bar=(h,w,mt)=>`<div style="height:${h}px;width:${w};margin-top:${mt}px;border-radius:4px;background:var(--line);animation:rk-pulse 1.2s ease-in-out infinite;"></div>`;
+  return Array(5).fill(0).map(()=>`<div style="display:flex;align-items:center;gap:14px;padding:14px 6px;border-bottom:1px solid var(--line2);">
+    <div style="flex:1;">${bar(13,'70%',0)}${bar(10,'90px',9)}</div>
+    <div style="flex:0 0 46px;height:64px;border-radius:6px;background:var(--line);animation:rk-pulse 1.2s ease-in-out infinite;"></div>
+  </div>`).join('');
+}
 function feedView(){
   const tabs=[['your','Your Feed'],['following','Following'],['global','Global']];
-  const items=(_feedCache[state.feedType]||[]).map(a=>({
-    user:a.username,verb:a.verb,title:a.title,title_english:a.title_english,mt:a.media_type,cover_url:a.cover_url,
-    hasRange:!!a.progress_range,range:a.progress_range?`ep ${a.progress_range}`:'',tsLabel:timeAgo(a.occurred_at),
-  }));
+  const acts=_feedCache[state.feedType];
+  const items=(acts||[]).map(a=>Object.assign({
+    user:a.username,title:a.title,title_english:a.title_english,cover_url:a.cover_url,anilist_id:a.anilist_id,
+    tsLabel:timeAgo(a.occurred_at),
+  },feedPhrase(a)));
+  const note=(msg)=>`<div style="text-align:center;padding:60px 20px;color:var(--t4);font-family:'Overpass Mono',monospace;font-size:12px;">${msg}</div>`;
   return `<div style="max-width:680px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;flex-wrap:wrap;">
       <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">GET /feed?type=${state.feedType}</div>
@@ -1643,9 +1670,10 @@ function feedView(){
       </div>
     </div>
     <div style="display:flex;flex-direction:column;">
-      ${items.map(a=>`<div data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:14px;padding:14px 6px;border-bottom:1px solid var(--line2);cursor:pointer;">
+      ${acts===undefined?feedSkeleton():acts===false?note("Couldn't load activity -- open Feed again to retry."):!items.length?note('No activity yet'):''}
+      ${items.map(a=>`<div ${a.anilist_id?`data-act="openRelation" data-arg="${a.anilist_id}" `:''}data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:14px;padding:14px 6px;border-bottom:1px solid var(--line2);${a.anilist_id?'cursor:pointer;':''}">
         <div style="min-width:0;flex:1;">
-          <div style="font-size:13.5px;line-height:1.5;color:var(--t2);"><span style="font-weight:700;color:var(--t1);">${esc(a.user)}</span> ${esc(a.verb)} <span style="font-weight:600;color:var(--t1);">${esc(displayTitle(a))}</span>${a.hasRange?`<span style="color:var(--t4);"> &middot; ${esc(a.range)}</span>`:''}</div>
+          <div style="font-size:13.5px;line-height:1.5;color:var(--t2);"><span style="font-weight:700;color:var(--t1);">${esc(a.user)}</span> ${esc(a.before)} <span style="font-weight:600;color:var(--t1);">${esc(displayTitle(a))}</span>${esc(a.after)}</div>
           <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:5px;">${esc(a.tsLabel)}</div>
         </div>
         <div style="flex:0 0 46px;height:64px;border-radius:6px;position:relative;overflow:hidden;background:${cover(a.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:12px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(a)))}</span>${povr(a.cover_url,displayTitle(a))}</div>
