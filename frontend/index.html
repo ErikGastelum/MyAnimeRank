@@ -1601,7 +1601,7 @@ function searchView(){
   const isPerson=state.searchCategory==='character'||state.searchCategory==='staff';
   const isStudio=state.searchCategory==='studio';
   const isUser=state.searchCategory==='user';
-  const personCard=(id,act,name,img)=>`<div data-act="${act}" data-arg="${id}" style="flex:0 0 130px;cursor:pointer;"><div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div></div>`;
+  const personCard=(id,act,name,img)=>`<div data-act="${act}" data-arg="${id}" style="flex:0 0 130px;width:130px;min-width:0;cursor:pointer;"><div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div></div>`;
   // Before anything is typed there's no count and no "no match" line; while a
   // query is in flight the count reads "Searching…" instead.
   const q=state.query.trim();
@@ -1609,7 +1609,7 @@ function searchView(){
   if(isPerson){
     const results=q?_searchResults.person:[];
     count=results.length;countNoun=emptyNoun=catLabel.toLowerCase();
-    bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:16px;">${results.map(p=>`<div data-act="openPerson" data-arg="${p.anilist_id}" data-kind="${state.searchCategory}" style="flex:0 0 130px;cursor:pointer;"><div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(p.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(p.name))}</span>${povr(p.image_url,p.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.name)}</div></div>`).join('')}</div>`;
+    bodyHtml=`<div style="display:flex;flex-wrap:wrap;gap:16px;">${results.map(p=>`<div data-act="openPerson" data-arg="${p.anilist_id}" data-kind="${state.searchCategory}" style="flex:0 0 130px;width:130px;min-width:0;cursor:pointer;"><div style="aspect-ratio:2/3;border-radius:12px;position:relative;overflow:hidden;background:${cover(p.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(p.name))}</span>${povr(p.image_url,p.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.name)}</div></div>`).join('')}</div>`;
   }else if(isStudio){
     const results=q?_searchResults.studio:[];
     count=results.length;countNoun='studio';emptyNoun='studios';
@@ -1872,12 +1872,23 @@ function staffBioFields(p){
 }
 
 /* ---- profile ---- */
+// Banner across the top of a profile page, full content width, fading into
+// the page background so the header over its bottom edge stays readable.
+// '' when there's no banner, so the page keeps its plain header instead of
+// an empty box. A failed load leaves the cover() gradient behind, like povr().
+function profileBanner(url,seed){
+  if(!url)return '';
+  return `<div style="position:relative;height:180px;border-radius:14px;overflow:hidden;background:${cover(seed)};">
+    <img src="${esc(url)}" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
+    <div style="position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,color-mix(in srgb,var(--bg1) 70%,transparent) 72%,var(--bg1));"></div>
+  </div>`;
+}
 function realShelfCover(label,items,actFn){
   return `<div style="margin-bottom:28px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><h2 style="font-size:16px;font-weight:700;">${label}</h2></div>
     <div data-shelf="${esc(label)}" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
-      ${items.map(it=>{const key=it.title||it.name;const name=displayTitle(it)||it.name;const img=it.cover_url||it.image_url;return `<div ${actFn(it)} style="flex:0 0 110px;cursor:pointer;">
-        <div style="height:140px;border-radius:12px;position:relative;overflow:hidden;background:${cover(key)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div>
+      ${items.map(it=>{const key=it.title||it.name;const name=displayTitle(it)||it.name;const img=it.cover_url||it.image_url;return `<div ${actFn(it)} style="flex:0 0 110px;width:110px;min-width:0;cursor:pointer;">
+        <div style="aspect-ratio:2/3;border-radius:12px;position:relative;overflow:hidden;background:${cover(key)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(name))}</span>${povr(img,name)}</div>
         <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div>
       </div>`;}).join('')}
     </div></div>`;
@@ -1887,9 +1898,10 @@ function profileView(){
     <div style="display:flex;flex-wrap:wrap;gap:10px;">${arr.map(n=>`<div ${actFn?actFn(n):''} data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(n.name)}</span></div>`).join('')}</div></div>`;
 
   const username=state.username||'';
-  let shelves='',statsArr=[],statsLoading=false;
+  let shelves='',statsArr=[],statsLoading=false,avatarUrl=null,banner='';
   if(_profileStats&&_profileFavorites){
     const s=_profileStats;
+    avatarUrl=s.avatar_url;banner=profileBanner(s.banner_url,username);
     statsArr=[
       {label:'Anime',value:String(s.total_anime)},{label:'Manga',value:String(s.total_manga)},
       {label:'Days Watched',value:String(s.days_watched)},{label:'Chapters Read',value:String(s.chapters_read)},
@@ -1906,10 +1918,14 @@ function profileView(){
     statsLoading=true;
   }
 
+  // With a banner the avatar grows and overlaps its bottom edge; without one
+  // (or while stats load) the header is the plain row.
+  const av=banner?88:56,align=banner?'flex-end':'center';
   return `<div style="max-width:900px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px;">
-      <div style="display:flex;align-items:center;gap:14px;">
-        <div style="width:56px;height:56px;border-radius:14px;background:${cover(username)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:20px;color:rgba(255,255,255,.85);">${esc(initials(username))}</span></div>
+    ${banner}
+    <div style="display:flex;align-items:${align};justify-content:space-between;gap:16px;margin-bottom:28px;${banner?`position:relative;margin-top:-${av/2}px;padding:0 20px;`:''}">
+      <div style="display:flex;align-items:${align};gap:14px;">
+        <div style="width:${av}px;height:${av}px;border-radius:${banner?18:14}px;position:relative;overflow:hidden;background:${cover(username)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)${banner?',0 10px 30px rgba(0,0,0,.45)':''};"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${banner?28:20}px;color:rgba(255,255,255,.85);">${esc(initials(username))}</span>${povr(avatarUrl,username)}</div>
         <div><div style="font-size:19px;font-weight:700;">${esc(username)}</div>
         <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:#6bd08a;margin-top:3px;">● Connected</div></div>
       </div>
@@ -2264,7 +2280,7 @@ function detailView(){
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 30px;">
       <div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">Characters</div>
-      <div data-shelf="characters" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,140):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;cursor:pointer;"><div style="height:140px;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url,c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(enumLabel(c.role))}</div></div>`).join('')}</div>
+      <div data-shelf="characters" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${commLoading?skeletonShelf(4,110,165):comm.characters.map(c=>`<div data-act="openPerson" data-arg="${c.anilist_id||''}" data-kind="character" style="flex:0 0 110px;width:110px;min-width:0;cursor:pointer;"><div style="aspect-ratio:2/3;border-radius:11px;position:relative;overflow:hidden;background:${cover(c.name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(c.name))}</span>${povr(c.image_url,c.name)}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.name)}</div><div style="font-family:'Overpass Mono',monospace;font-size:9.5px;letter-spacing:.5px;color:var(--t4);text-transform:uppercase;margin-top:2px;">${esc(enumLabel(c.role))}</div></div>`).join('')}</div>
     </div>
 
     <div style="max-width:1180px;margin:0 auto;padding:0 38px 60px;">
@@ -2347,7 +2363,7 @@ function personView(){
     <div style="margin-bottom:30px;"><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${p.favType==='staff'?'Characters Voiced':esc(p.shelfLabel)}</div>
       ${p.favType==='staff'
         ?characterRoleListView(p.charactersVoiced,{searchValue:state.charListSearch,onMyListValue:state.charListOnMyList,searchAct:'charListSearch',onMyListAct:'toggleCharListOnMyList'})
-        :`<div data-shelf="voice-actors" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;${s[3]?'cursor:pointer;':''}"><div style="height:130px;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2],s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
+        :`<div data-shelf="voice-actors" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:6px;">${p.shelfItems.map(s=>`<div ${s[3]?`data-act="openPerson" data-arg="${s[3]}" data-kind="${p.shelfKind}"`:''} style="flex:0 0 130px;width:130px;min-width:0;${s[3]?'cursor:pointer;':''}"><div style="aspect-ratio:2/3;border-radius:11px;position:relative;overflow:hidden;background:${cover(s[0])};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:22px;color:rgba(255,255,255,.78);">${esc(initials(s[0]))}</span>${povr(s[2],s[0])}</div><div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s[0])}</div><div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${esc(s[1])}</div></div>`).join('')}</div>`}
     </div>
     <div><div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;margin-bottom:12px;">${esc(p.appearancesLabel)}</div>
       ${mediaListView(p.appearances,{searchValue:state.workListSearch,onMyListValue:state.workListOnMyList,searchAct:'workListSearch',onMyListAct:'toggleWorkListOnMyList'})}
@@ -2394,6 +2410,7 @@ function userView(){
     {label:'Chapters',value:String(u.manga_chapters_read)},
   ];
   const f=u.favorites||{anime:[],manga:[],characters:[],staff:[],studios:[]};
+  const banner=profileBanner(u.banner_url,u.name);
   let shelves='';
   if(f.anime.length) shelves+=realShelfCover('Favorite Anime',f.anime,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="anime"`);
   if(f.manga.length) shelves+=realShelfCover('Favorite Manga',f.manga,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="manga"`);
@@ -2405,7 +2422,8 @@ function userView(){
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
       <div data-act="backUser" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t2);"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back</div>
     </div>
-    <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;">
+    ${banner}
+    <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;${banner?'position:relative;margin-top:-50px;padding:0 20px;':''}">
       <div style="flex:0 0 100px;height:100px;border-radius:14px;position:relative;overflow:hidden;background:${cover(u.name)};display:flex;align-items:center;justify-content:center;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.85);">${esc(initials(u.name))}</span>${povr(u.avatar_url,u.name)}</div>
       <div style="flex:1;min-width:0;padding-bottom:4px;"><h1 style="font-size:30px;font-weight:800;letter-spacing:-.5px;">${esc(u.name)}</h1>${joined?`<div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t4);text-transform:uppercase;margin-top:8px;">Joined ${joined}</div>`:''}</div>
     </div>
