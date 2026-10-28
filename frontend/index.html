@@ -110,6 +110,8 @@ function displayTitle(it){if(typeof it==='string')return it;return (it&&it.title
 function cover(seed){let h=0;seed=String(seed||'');for(let i=0;i<seed.length;i++)h=(h*31+seed.charCodeAt(i))>>>0;const a=h%360,b=(a+42)%360;return `linear-gradient(135deg,hsl(${a} 46% 30%),hsl(${b} 52% 17%))`;}
 function initials(t){t=String(t||'').trim();if(!t)return '?';const w=t.split(/\s+/).filter(Boolean);return ((w[0]||'')[0]+(w[1]?w[1][0]:'')).toUpperCase();}
 function fmtScore(n){return (n==null)?'—':Number(n).toFixed(1);}
+// Counts with thousands separators, the same in every locale: 114457 -> "114,457".
+function fmtCount(n){return Number(n).toLocaleString('en-US');}
 // Joins only the parts of a meta line that exist ("TV · ⭐ 8.5" when year is
 // null), so a missing field never prints as "null" or leaves a stray separator.
 function joinMeta(parts){return parts.filter(p=>p!=null&&p!=='').join(' · ');}
@@ -722,6 +724,35 @@ async function walkChain(startItem,relType){
   }
   return chain;
 }
+// FR-69: a title's franchise among library rows, for the "Same Series"
+// calibration scope -- PREQUEL/SEQUEL walked multi-hop by walkChain() (same
+// hop cap, cycle guard and media_type filter as Rate Series) plus one hop of
+// the edges below from the title itself. Relations come through
+// fetchCommunityByAnilist(), so titles already in _communityCache this
+// session cost no request. _seriesIds[id]: undefined = not loaded, null =
+// loading, array = library ids (the title itself excluded).
+const SERIES_ONE_HOP=['PARENT','SIDE_STORY','ALTERNATIVE','SPIN_OFF','SUMMARY'];
+let _seriesIds={};
+async function loadSeries(it){
+  if(_seriesIds[it.id]!==undefined)return;
+  _seriesIds[it.id]=null;
+  // The title's own relations first, so both walks start from the cache
+  // instead of each requesting it.
+  const comm=await fetchCommunityByAnilist(it.anilist_id,it);
+  const [prequels,sequels]=await Promise.all([walkChain(it,'PREQUEL'),walkChain(it,'SEQUEL')]);
+  const ids=new Set([...prequels,...sequels].filter(x=>typeof x!=='object'));
+  ((comm&&comm.relations)||[]).filter(r=>SERIES_ONE_HOP.includes(r.type)&&r.media_type===it.media_type).forEach(r=>{
+    const m=library.find(x=>x.anilist_id===r.anilist_id&&x.media_type===it.media_type);
+    if(m)ids.add(m.id);
+  });
+  ids.delete(it.id);
+  _seriesIds[it.id]=[...ids];
+  // Fast path, same as setMenuOpen: the pill is already in the DOM, hidden,
+  // so showing it is a display flip with no render() and no layout shift.
+  const pill=document.getElementById('rs-pill-series');
+  if(pill&&state.view==='rating'&&state.rating&&curRatingItem()===it)pill.style.display=hasSeriesAnchors(it)?'block':'none';
+}
+function hasSeriesAnchors(it){return (_seriesIds[it.id]||[]).some(id=>{const x=byId(id);return x&&x.rating;});}
 H.startRatingChain = async ()=>{
   if(state.chainLoading)return;
   const it=state.current.item;
@@ -743,6 +774,9 @@ H.startRatingChain = async ()=>{
 // 'rating') rather than snapshotting state.detailReturn directly, so this is
 // correct even when rating was opened from somewhere other than Detail.
 H.cancelRating = ()=>{
+  // The unrated queue (FR-68) always goes back to the Library, even when an
+  // older state.current is still around from a detail page opened earlier.
+  if(state.rating&&state.rating.queue){state.rating=null;go('library');return;}
   const returnView=state.rating&&state.rating.returnView;
   state.rating=null;
   if(state.current){openDetail(state.current);state.detailReturn=returnView;}
@@ -759,16 +793,17 @@ H.setVariant = (el)=>{
   if(trackBtn){trackBtn.style.background=v==='track'?'var(--accent)':'transparent';trackBtn.style.color=v==='track'?'#04121d':'var(--t3)';}
   if(dialBtn){dialBtn.style.background=v==='dial'?'var(--accent)':'transparent';dialBtn.style.color=v==='dial'?'#04121d':'var(--t3)';}
 };
-// FR-8: re-filter anchors (Same Genre <-> All Anime/Manga). Touches only the scope,
+// FR-8: re-filter anchors (Same Genre / All Anime|Manga / Same Series). Touches only the scope,
 // so step index and entered scores are preserved — the stepper does not reset.
 // FR-8 pill toggle: fast path, same reasoning as setMenuOpen — only the pill
 // highlight + anchor list/tick marks change, so mutate those directly instead of
 // a full render() (which would destroy the poster/title/steps-nav for no reason).
 H.setAnchorScope = (el)=>{
   const scope=el.dataset.arg;state.rating.anchorScope=scope;
-  const genre=document.getElementById('rs-pill-genre'),all=document.getElementById('rs-pill-all');
-  if(genre){genre.style.background=scope==='genre'?'var(--accent)':'transparent';genre.style.color=scope==='genre'?'#04121d':'var(--t3)';}
-  if(all){all.style.background=scope==='all'?'var(--accent)':'transparent';all.style.color=scope==='all'?'#04121d':'var(--t3)';}
+  ['genre','all','series'].forEach(s=>{
+    const pill=document.getElementById('rs-pill-'+s);
+    if(pill){pill.style.background=scope===s?'var(--accent)':'transparent';pill.style.color=scope===s?'#04121d':'var(--t3)';}
+  });
   const anchors=renderAnchorList();renderSliderAnchors(anchors);
 };
 H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();let v=(r.scores[c.key]||5)+d;v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;updateScoreDisplay();renderStepsNav();};
@@ -780,15 +815,39 @@ H.nextStep = async ()=>{const r=state.rating;const cs=crits(curRatingItem().medi
   // content change — title/poster/anchors all change — so it keeps the full render()
   await commitRating();
   r.lastRealId=curRatingItem().id;
+  if(r.queue)r.queue[r.lastRealId]='rated';
   if(r.idx<r.ids.length-1){
     r.idx++;
     // The next chain position may be a not-yet-imported {pending:true} marker
     // (no local id yet) -- render() dispatches those to pendingImportView()
     // instead of the normal stepper, so there's no score/step to prime here.
     if(typeof r.ids[r.idx]!=='object'){r.step=0;r.scores=existingScores(curRatingItem());}
-  }else{ finishChain();return; }
+  }else{ if(r.queue)finishQueue();else finishChain();return; }
   render();
 };
+// FR-68: this tab's titles with no rating that have been started (every
+// status but Planning), most recently updated first, same comparison as the
+// Library's Last Updated sort. Grouping by franchise would need an AniList
+// request per title before the first one could show, so the queue doesn't.
+function unratedQueue(mt){
+  return library.filter(x=>x.media_type===mt && !x.rating && x.status!=='planning' && STATUS[mt].includes(x.status))
+    .sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at)));
+}
+// r.queue maps each title id to 'rated' or 'skipped' for this run only; it
+// is never stored, so a skipped title is back in the queue next time.
+H.startUnratedQueue = ()=>{
+  const ids=unratedQueue(state.mediaType).map(x=>x.id);
+  if(ids.length)openRating(ids,{queue:{}});
+};
+// Moves on without saving. A title rated earlier in this run and reached
+// again through Back a Season keeps its saved rating, so it stays 'rated'.
+H.queueSkip = ()=>{
+  const r=state.rating;const id=r.ids[r.idx];
+  if(r.queue[id]!=='rated')r.queue[id]='skipped';
+  if(r.idx<r.ids.length-1){r.idx++;r.step=0;r.scores=existingScores(curRatingItem());render();}
+  else finishQueue();
+};
+function finishQueue(){state.rating.done=true;render();}
 H.backSeason = ()=>{
   const r=state.rating;let i=r.idx-1;
   // Skip backward past pending/skipped markers -- "undo a skip" isn't a
@@ -1058,8 +1117,9 @@ function openDetail(cur){
   go('detail');
 }
 
-function openRating(ids){
-  // anchorScope: 'genre' (shared-genre anchors, FR-8 default) | 'all' (same media_type, no genre filter).
+function openRating(ids,extra){
+  // anchorScope: 'genre' (shared-genre anchors, FR-8 default) | 'all' (same media_type, no genre filter)
+  // | 'series' (the title's franchise, FR-69).
   // Fresh per openRating call, so it resets to 'genre' for each new title (incl. Rate Series advance).
   // returnView: captured NOW, while state.view still genuinely reflects where
   // the user came from -- by the time rating finishes, state.view is stuck at
@@ -1074,7 +1134,7 @@ function openRating(ids){
   // ids[0] is always a real local id -- Rate Series only ever starts from an
   // in-library title's own Detail page; only interior/tail hops discovered by
   // walkChain() can be {pending:true} not-yet-imported markers.
-  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,lastRealId:ids[0]};
+  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,lastRealId:ids[0],...extra};
   go('rating');
 }
 function curRatingItem(){const r=state.rating;return byId(r.ids[r.idx]);}
@@ -1096,9 +1156,11 @@ async function commitRating(){
 }
 function anchorsFor(it,critKey,scope){
   // FR-8: 'genre' scope keeps only titles sharing >=1 genre; 'all' drops the genre filter
-  // entirely (same media_type only). Sort desc by the criterion either way.
+  // entirely (same media_type only); 'series' keeps the title's franchise (FR-69,
+  // loadSeries()). Sort desc by the criterion either way.
+  const series=scope==='series'?(_seriesIds[it.id]||[]):null;
   return library.filter(x=>x.media_type===it.media_type && x.id!==it.id && x.rating
-      && (scope==='all' || x.genres.some(g=>it.genres.includes(g))))
+      && (scope==='all' || (series?series.includes(x.id):x.genres.some(g=>it.genres.includes(g)))))
     .map(x=>({title:x.title,title_english:x.title_english,score:x.rating[critKey]||0,cover_url:x.cover_url,media_type:x.media_type}))
     .sort((a,b)=>b.score-a.score).slice(0,6);
 }
@@ -1353,7 +1415,7 @@ function shell(){
     case 'feed': body=feedView(); break;
     case 'profile': body=profileView(); break;
     case 'search': body=searchView(); break;
-    case 'rating': body=(state.rating&&typeof state.rating.ids[state.rating.idx]==='object')?pendingImportView():ratingView(); break;
+    case 'rating': body=state.rating&&state.rating.done?queueSummaryView():(state.rating&&typeof state.rating.ids[state.rating.idx]==='object')?pendingImportView():ratingView(); break;
     case 'detail': body=detailView(); break;
     case 'insights': body=insightsView(); break;
     case 'person': body=personView(); break;
@@ -1396,6 +1458,7 @@ function libraryView(){
     .filter(o=>!(mt==='manga'&&o[0]==='audio'));
   const sortOpts=[['score','By Score'],['title','By Title'],['progress','By Progress'],['updated','Last Updated'],...critSortOpts];
   const tabItems=library.filter(x=>x.media_type===mt);
+  const unratedCount=unratedQueue(mt).length;
   const genreOpts=[...new Set(tabItems.flatMap(x=>x.genres||[]))].sort();
   const yearOpts=[...new Set(tabItems.map(x=>x.year).filter(Boolean))].sort((a,b)=>b-a);
   const q=state.libSearch.trim().toLowerCase();
@@ -1428,6 +1491,7 @@ function libraryView(){
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="position:absolute;left:13px;top:50%;transform:translateY(-50%);color:var(--t4);"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <input id="in-libSearch" data-input="libSearch" value="${esc(state.libSearch)}" placeholder="Search your ${label}&hellip;" style="width:100%;height:42px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:0 14px 0 38px;font-size:13px;color:var(--t1);outline:none;" />
       </div>
+      ${unratedCount?`<div data-act="startUnratedQueue" title="Rate the ${label} you've started but not rated" data-hover="border-color:var(--accent);color:var(--t1)" style="flex:0 0 auto;height:42px;padding:0 14px;border-radius:10px;background:color-mix(in srgb,var(--accent) 12%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));display:flex;align-items:center;gap:7px;cursor:pointer;color:var(--accent);font-weight:700;font-size:13px;white-space:nowrap;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>Rate ${unratedCount} unrated</div>`:''}
       <div style="position:relative;flex:0 0 auto;">
         <div data-act="openSearch" title="Search AniList to import" data-hover="border-color:var(--accent);color:var(--t1)" style="width:42px;height:42px;border-radius:10px;background:var(--s1);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -2031,11 +2095,30 @@ function pendingImportView(){
     </div>
   </div>`;
 }
+// FR-68: end of the unrated queue. Each rating was saved as its title finished.
+function queueSummaryView(){
+  const outcomes=Object.values(state.rating.queue);
+  const rated=outcomes.filter(v=>v==='rated').length,skipped=outcomes.filter(v=>v==='skipped').length;
+  return `<div style="padding:60px 38px;max-width:520px;margin:0 auto;animation:rk-fade .25s ease;">
+    <div style="background:var(--s1);border:1px solid var(--line);border-radius:16px;padding:32px;text-align:center;">
+      <div style="font-weight:700;font-size:19px;">Queue finished</div>
+      <div style="font-family:'Overpass Mono',monospace;font-size:13px;color:var(--t2);margin-top:10px;">Rated ${rated} &middot; Skipped ${skipped}</div>
+      <div data-act="cancelRating" style="display:inline-block;margin-top:24px;padding:13px 26px;border-radius:11px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14px;">Back to Library</div>
+    </div>
+  </div>`;
+}
 function ratingView(){
   const r=state.rating;const it=curRatingItem();const cs=crits(it.media_type);const c=cs[r.step];
   const score=r.scores[c.key]||5;
   const overall=computeOverall(it.media_type,r.scores);
-  const isChain=r.ids.length>1;
+  const isChain=r.ids.length>1||!!r.queue;
+  // Same Series (FR-8/FR-69) needs this title's relations, which arrive after
+  // this render; loadSeries() shows the pill then. Until the title has a
+  // rated franchise entry, a 'series' scope carried over from the previous
+  // title falls back to the default.
+  if(_seriesIds[it.id]===undefined)loadSeries(it);
+  const seriesShown=hasSeriesAnchors(it);
+  if(r.anchorScope==='series'&&!seriesShown)r.anchorScope='genre';
   const anchors=anchorsFor(it,c.key,r.anchorScope);
   const allLabel='All '+(it.media_type==='manga'?'Manga':'Anime');
   const scPct=pct(score-1,9);
@@ -2080,8 +2163,9 @@ function ratingView(){
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2v6m0 0l3-3m-3 3L9 5M5 12H2m20 0h-3M12 22v-3"/><circle cx="12" cy="12" r="3"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1px;color:var(--t2);text-transform:uppercase;">Your calibration</span></div>
     <p style="font-size:11.5px;color:var(--t4);line-height:1.45;margin-bottom:12px;">How you scored <b id="rs-anchor-crit-label" style="color:var(--t3);">${c.label}</b> on similar ${it.media_type==='manga'?'manga':'anime'}. Place this title against them.</p>
     <div style="display:flex;background:var(--s2);border:1px solid var(--line);border-radius:9px;padding:3px;gap:3px;margin-bottom:14px;">
-      <div id="rs-pill-genre" data-act="setAnchorScope" data-arg="genre" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;background:${r.anchorScope==='genre'?'var(--accent)':'transparent'};color:${r.anchorScope==='genre'?'#04121d':'var(--t3)'};transition:all .14s;">Same Genre</div>
-      <div id="rs-pill-all" data-act="setAnchorScope" data-arg="all" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;background:${r.anchorScope==='all'?'var(--accent)':'transparent'};color:${r.anchorScope==='all'?'#04121d':'var(--t3)'};transition:all .14s;">${allLabel}</div>
+      <div id="rs-pill-genre" data-act="setAnchorScope" data-arg="genre" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='genre'?'var(--accent)':'transparent'};color:${r.anchorScope==='genre'?'#04121d':'var(--t3)'};transition:all .14s;">Same Genre</div>
+      <div id="rs-pill-all" data-act="setAnchorScope" data-arg="all" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='all'?'var(--accent)':'transparent'};color:${r.anchorScope==='all'?'#04121d':'var(--t3)'};transition:all .14s;">${allLabel}</div>
+      <div id="rs-pill-series" data-act="setAnchorScope" data-arg="series" style="display:${seriesShown?'block':'none'};flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='series'?'var(--accent)':'transparent'};color:${r.anchorScope==='series'?'#04121d':'var(--t3)'};transition:all .14s;">Same Series</div>
     </div>
     <div id="rs-anchor-list" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;flex:1;">${anchorListHtml(anchors)}</div>
   </div>`;
@@ -2101,9 +2185,10 @@ function ratingView(){
 
     ${isChain?`<div style="display:flex;align-items:center;gap:12px;background:color-mix(in srgb,var(--accent) 8%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:12px;padding:10px 14px;margin-bottom:18px;">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M4 4v16l13-8z"/><path d="M18 4v16" stroke-linecap="round"/></svg>
-      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">Rate Series &middot; ${r.idx+1} of ${r.ids.length}</span>
+      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">${r.queue?'Rate unrated':'Rate Series'} &middot; ${r.idx+1} of ${r.ids.length}</span>
       <div style="flex:1;"></div>
       <div data-act="backSeason" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:${r.idx>0?'pointer':'default'};opacity:${r.idx>0?1:.4};font-size:11.5px;font-weight:700;color:var(--t2);"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back a Season</div>
+      ${r.queue?`<div data-act="queueSkip" title="Next title, nothing saved" data-hover="border-color:var(--accent);color:var(--t1)" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:pointer;font-size:11.5px;font-weight:700;color:var(--t2);">Skip<svg width="12" height="12" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`:''}
     </div>`:''}
 
     <div style="display:flex;align-items:center;gap:16px;background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:20px;">
@@ -2173,9 +2258,11 @@ function detailView(){
   else if(real===null){commError=true;}
   comm=real?{
     rankingStats:[
-      {label:'Popularity',value:real.popularity!=null?'#'+real.popularity:'—'},
-      {label:'Favourites',value:real.favourites!=null?String(real.favourites):'—'},
-      {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+(real.rank_rated??real.rank_popular):'—'},
+      // AniList's popularity is how many members have the title on their
+      // list, a count, not a rank; only All-time Rank is a position.
+      {label:'Members',value:real.popularity!=null?fmtCount(real.popularity):'—'},
+      {label:'Favourites',value:real.favourites!=null?fmtCount(real.favourites):'—'},
+      {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+fmtCount(real.rank_rated??real.rank_popular):'—'},
     ],
     relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
     characters:real.characters.map(c=>({anilist_id:c.anilist_id,name:c.name||'',role:c.role||'',image_url:c.image_url})),
