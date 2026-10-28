@@ -2410,6 +2410,7 @@ function userView(){
     {label:'Chapters',value:String(u.manga_chapters_read)},
   ];
   const f=u.favorites||{anime:[],manga:[],characters:[],staff:[],studios:[]};
+  const banner=profileBanner(u.banner_url,u.name);
   let shelves='';
   if(f.anime.length) shelves+=realShelfCover('Favorite Anime',f.anime,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="anime"`);
   if(f.manga.length) shelves+=realShelfCover('Favorite Manga',f.manga,it=>`data-act="openFavTitle" data-arg="${it.anilist_id}" data-mt="manga"`);
@@ -2421,7 +2422,8 @@ function userView(){
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
       <div data-act="backUser" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t2);"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back</div>
     </div>
-    <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;">
+    ${banner}
+    <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;${banner?'position:relative;margin-top:-50px;padding:0 20px;':''}">
       <div style="flex:0 0 100px;height:100px;border-radius:14px;position:relative;overflow:hidden;background:${cover(u.name)};display:flex;align-items:center;justify-content:center;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.85);">${esc(initials(u.name))}</span>${povr(u.avatar_url,u.name)}</div>
       <div style="flex:1;min-width:0;padding-bottom:4px;"><h1 style="font-size:30px;font-weight:800;letter-spacing:-.5px;">${esc(u.name)}</h1>${joined?`<div style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1.5px;color:var(--t4);text-transform:uppercase;margin-top:8px;">Joined ${joined}</div>`:''}</div>
     </div>
