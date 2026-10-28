@@ -596,14 +596,16 @@ impl AniList {
 
     // -------------------------------------------------------------- profile ----
 
-    /// FR-42: all six stats live from AniList, not local library counts.
+    /// FR-42: all six stats live from AniList, not local library counts. The
+    /// Profile header's avatar and banner come back on the same Viewer query.
     pub async fn get_profile_stats(&self, token: &str, user_id: i64) -> AlResult<Value> {
         let q = "query ($userId: Int!) {
-            Viewer { statistics { anime { count minutesWatched } manga { count chaptersRead } } }
+            Viewer { avatar { large } bannerImage statistics { anime { count minutesWatched } manga { count chaptersRead } } }
             followersPage: Page(perPage: 1) { pageInfo { total } followers(userId: $userId) { id } }
             followingPage: Page(perPage: 1) { pageInfo { total } following(userId: $userId) { id } } }";
         let data = self.graphql(q, Some(json!({"userId": user_id})), Some(token), 15).await?;
-        let stats = &data["Viewer"]["statistics"];
+        let viewer = &data["Viewer"];
+        let stats = &viewer["statistics"];
         let minutes = stats["anime"]["minutesWatched"].as_f64().unwrap_or(0.0);
         Ok(json!({
             "total_anime": stats["anime"]["count"].as_i64().unwrap_or(0),
@@ -612,6 +614,8 @@ impl AniList {
             "chapters_read": stats["manga"]["chaptersRead"].as_i64().unwrap_or(0),
             "followers": data["followersPage"]["pageInfo"]["total"].as_i64().unwrap_or(0),
             "following": data["followingPage"]["pageInfo"]["total"].as_i64().unwrap_or(0),
+            "avatar_url": str_of(&viewer["avatar"]["large"]),
+            "banner_url": str_of(&viewer["bannerImage"]),
         }))
     }
 }

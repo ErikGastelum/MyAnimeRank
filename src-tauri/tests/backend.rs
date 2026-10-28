@@ -1131,6 +1131,39 @@ async fn library_rankings_and_insights_return_prd_shapes() {
     assert_eq!(insights["distribution"]["anime"].as_array().unwrap().len(), 18);
 }
 
+#[tokio::test]
+async fn profile_stats_carry_the_viewers_avatar_and_banner_or_null() {
+    let cases = [
+        (json!({"large": "https://img/avatar.png"}), json!("https://img/banner.jpg"), json!("https://img/avatar.png"), json!("https://img/banner.jpg")),
+        (json!({"large": null}), Value::Null, Value::Null, Value::Null),
+        (Value::Null, Value::Null, Value::Null, Value::Null),
+    ];
+    for (avatar, banner, want_avatar, want_banner) in cases {
+        let fake = fake_anilist(move |_, _| {
+            let viewer = json!({
+                "avatar": avatar, "bannerImage": banner,
+                "statistics": {"anime": {"count": 3, "minutesWatched": 2880}, "manga": {"count": 2, "chaptersRead": 40}},
+            });
+            (200, json!({"data": {"Viewer": viewer, "followersPage": {"pageInfo": {"total": 5}}, "followingPage": {"pageInfo": {"total": 6}}}}), None)
+        })
+        .await;
+        let st = state_with(&fake);
+        login(&st);
+
+        let (s, body) = call(&st, "GET", "/profile/stats", None).await;
+        assert_eq!(s, 200);
+        assert_eq!(
+            body,
+            json!({
+                "total_anime": 3, "total_manga": 2, "days_watched": 2.0, "chapters_read": 40,
+                "followers": 5, "following": 6, "avatar_url": want_avatar, "banner_url": want_banner,
+            })
+        );
+        // Avatar and banner ride along on the stats query, not a request of their own.
+        assert_eq!(fake.calls().len(), 1);
+    }
+}
+
 // ---------------------------------------------------------------------- login ----
 
 /// One request to the OAuth listener's router: (status, body, whether the
