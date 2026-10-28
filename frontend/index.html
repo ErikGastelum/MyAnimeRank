@@ -722,6 +722,35 @@ async function walkChain(startItem,relType){
   }
   return chain;
 }
+// FR-69: a title's franchise among library rows, for the "Same Series"
+// calibration scope -- PREQUEL/SEQUEL walked multi-hop by walkChain() (same
+// hop cap, cycle guard and media_type filter as Rate Series) plus one hop of
+// the edges below from the title itself. Relations come through
+// fetchCommunityByAnilist(), so titles already in _communityCache this
+// session cost no request. _seriesIds[id]: undefined = not loaded, null =
+// loading, array = library ids (the title itself excluded).
+const SERIES_ONE_HOP=['PARENT','SIDE_STORY','ALTERNATIVE','SPIN_OFF','SUMMARY'];
+let _seriesIds={};
+async function loadSeries(it){
+  if(_seriesIds[it.id]!==undefined)return;
+  _seriesIds[it.id]=null;
+  // The title's own relations first, so both walks start from the cache
+  // instead of each requesting it.
+  const comm=await fetchCommunityByAnilist(it.anilist_id,it);
+  const [prequels,sequels]=await Promise.all([walkChain(it,'PREQUEL'),walkChain(it,'SEQUEL')]);
+  const ids=new Set([...prequels,...sequels].filter(x=>typeof x!=='object'));
+  ((comm&&comm.relations)||[]).filter(r=>SERIES_ONE_HOP.includes(r.type)&&r.media_type===it.media_type).forEach(r=>{
+    const m=library.find(x=>x.anilist_id===r.anilist_id&&x.media_type===it.media_type);
+    if(m)ids.add(m.id);
+  });
+  ids.delete(it.id);
+  _seriesIds[it.id]=[...ids];
+  // Fast path, same as setMenuOpen: the pill is already in the DOM, hidden,
+  // so showing it is a display flip with no render() and no layout shift.
+  const pill=document.getElementById('rs-pill-series');
+  if(pill&&state.view==='rating'&&state.rating&&curRatingItem()===it)pill.style.display=hasSeriesAnchors(it)?'block':'none';
+}
+function hasSeriesAnchors(it){return (_seriesIds[it.id]||[]).some(id=>{const x=byId(id);return x&&x.rating;});}
 H.startRatingChain = async ()=>{
   if(state.chainLoading)return;
   const it=state.current.item;
@@ -762,16 +791,17 @@ H.setVariant = (el)=>{
   if(trackBtn){trackBtn.style.background=v==='track'?'var(--accent)':'transparent';trackBtn.style.color=v==='track'?'#04121d':'var(--t3)';}
   if(dialBtn){dialBtn.style.background=v==='dial'?'var(--accent)':'transparent';dialBtn.style.color=v==='dial'?'#04121d':'var(--t3)';}
 };
-// FR-8: re-filter anchors (Same Genre <-> All Anime/Manga). Touches only the scope,
+// FR-8: re-filter anchors (Same Genre / All Anime|Manga / Same Series). Touches only the scope,
 // so step index and entered scores are preserved — the stepper does not reset.
 // FR-8 pill toggle: fast path, same reasoning as setMenuOpen — only the pill
 // highlight + anchor list/tick marks change, so mutate those directly instead of
 // a full render() (which would destroy the poster/title/steps-nav for no reason).
 H.setAnchorScope = (el)=>{
   const scope=el.dataset.arg;state.rating.anchorScope=scope;
-  const genre=document.getElementById('rs-pill-genre'),all=document.getElementById('rs-pill-all');
-  if(genre){genre.style.background=scope==='genre'?'var(--accent)':'transparent';genre.style.color=scope==='genre'?'#04121d':'var(--t3)';}
-  if(all){all.style.background=scope==='all'?'var(--accent)':'transparent';all.style.color=scope==='all'?'#04121d':'var(--t3)';}
+  ['genre','all','series'].forEach(s=>{
+    const pill=document.getElementById('rs-pill-'+s);
+    if(pill){pill.style.background=scope===s?'var(--accent)':'transparent';pill.style.color=scope===s?'#04121d':'var(--t3)';}
+  });
   const anchors=renderAnchorList();renderSliderAnchors(anchors);
 };
 H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();let v=(r.scores[c.key]||5)+d;v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;updateScoreDisplay();renderStepsNav();};
@@ -1086,7 +1116,8 @@ function openDetail(cur){
 }
 
 function openRating(ids,extra){
-  // anchorScope: 'genre' (shared-genre anchors, FR-8 default) | 'all' (same media_type, no genre filter).
+  // anchorScope: 'genre' (shared-genre anchors, FR-8 default) | 'all' (same media_type, no genre filter)
+  // | 'series' (the title's franchise, FR-69).
   // Fresh per openRating call, so it resets to 'genre' for each new title (incl. Rate Series advance).
   // returnView: captured NOW, while state.view still genuinely reflects where
   // the user came from -- by the time rating finishes, state.view is stuck at
@@ -1123,9 +1154,11 @@ async function commitRating(){
 }
 function anchorsFor(it,critKey,scope){
   // FR-8: 'genre' scope keeps only titles sharing >=1 genre; 'all' drops the genre filter
-  // entirely (same media_type only). Sort desc by the criterion either way.
+  // entirely (same media_type only); 'series' keeps the title's franchise (FR-69,
+  // loadSeries()). Sort desc by the criterion either way.
+  const series=scope==='series'?(_seriesIds[it.id]||[]):null;
   return library.filter(x=>x.media_type===it.media_type && x.id!==it.id && x.rating
-      && (scope==='all' || x.genres.some(g=>it.genres.includes(g))))
+      && (scope==='all' || (series?series.includes(x.id):x.genres.some(g=>it.genres.includes(g)))))
     .map(x=>({title:x.title,title_english:x.title_english,score:x.rating[critKey]||0,cover_url:x.cover_url,media_type:x.media_type}))
     .sort((a,b)=>b.score-a.score).slice(0,6);
 }
@@ -2077,6 +2110,13 @@ function ratingView(){
   const score=r.scores[c.key]||5;
   const overall=computeOverall(it.media_type,r.scores);
   const isChain=r.ids.length>1||!!r.queue;
+  // Same Series (FR-8/FR-69) needs this title's relations, which arrive after
+  // this render; loadSeries() shows the pill then. Until the title has a
+  // rated franchise entry, a 'series' scope carried over from the previous
+  // title falls back to the default.
+  if(_seriesIds[it.id]===undefined)loadSeries(it);
+  const seriesShown=hasSeriesAnchors(it);
+  if(r.anchorScope==='series'&&!seriesShown)r.anchorScope='genre';
   const anchors=anchorsFor(it,c.key,r.anchorScope);
   const allLabel='All '+(it.media_type==='manga'?'Manga':'Anime');
   const scPct=pct(score-1,9);
@@ -2121,8 +2161,9 @@ function ratingView(){
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 2v6m0 0l3-3m-3 3L9 5M5 12H2m20 0h-3M12 22v-3"/><circle cx="12" cy="12" r="3"/></svg><span style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:1px;color:var(--t2);text-transform:uppercase;">Your calibration</span></div>
     <p style="font-size:11.5px;color:var(--t4);line-height:1.45;margin-bottom:12px;">How you scored <b id="rs-anchor-crit-label" style="color:var(--t3);">${c.label}</b> on similar ${it.media_type==='manga'?'manga':'anime'}. Place this title against them.</p>
     <div style="display:flex;background:var(--s2);border:1px solid var(--line);border-radius:9px;padding:3px;gap:3px;margin-bottom:14px;">
-      <div id="rs-pill-genre" data-act="setAnchorScope" data-arg="genre" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;background:${r.anchorScope==='genre'?'var(--accent)':'transparent'};color:${r.anchorScope==='genre'?'#04121d':'var(--t3)'};transition:all .14s;">Same Genre</div>
-      <div id="rs-pill-all" data-act="setAnchorScope" data-arg="all" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;background:${r.anchorScope==='all'?'var(--accent)':'transparent'};color:${r.anchorScope==='all'?'#04121d':'var(--t3)'};transition:all .14s;">${allLabel}</div>
+      <div id="rs-pill-genre" data-act="setAnchorScope" data-arg="genre" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='genre'?'var(--accent)':'transparent'};color:${r.anchorScope==='genre'?'#04121d':'var(--t3)'};transition:all .14s;">Same Genre</div>
+      <div id="rs-pill-all" data-act="setAnchorScope" data-arg="all" style="flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='all'?'var(--accent)':'transparent'};color:${r.anchorScope==='all'?'#04121d':'var(--t3)'};transition:all .14s;">${allLabel}</div>
+      <div id="rs-pill-series" data-act="setAnchorScope" data-arg="series" style="display:${seriesShown?'block':'none'};flex:1;text-align:center;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11.5px;font-weight:600;white-space:nowrap;background:${r.anchorScope==='series'?'var(--accent)':'transparent'};color:${r.anchorScope==='series'?'#04121d':'var(--t3)'};transition:all .14s;">Same Series</div>
     </div>
     <div id="rs-anchor-list" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;flex:1;">${anchorListHtml(anchors)}</div>
   </div>`;
