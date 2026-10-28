@@ -484,7 +484,7 @@ Response: { "anime": [...], "manga": [...], "characters": [...], "staff": [...],
 ## GET /profile/stats
 
 ```
-Response: { "total_anime": number, "total_manga": number, "days_watched": number, "chapters_read": number, "followers": number, "following": number }
+Response: { "total_anime": number, "total_manga": number, "days_watched": number, "chapters_read": number, "followers": number, "following": number, "avatar_url": string | null, "banner_url": string | null }
 // No connected flag needed — this endpoint is only ever reachable while logged in, per FR-47.
 ```
 
@@ -534,7 +534,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 - **Discover tab** — horizontal shelves per FR-32: Currently Trending, Current/Upcoming Season, Top Ranked, Top Ranked Movies, Popular — scoped to whichever of Anime/Manga is active. This is also where AniList-catalog Search lives (a search icon opens it, per FR-1/FR-2) — separate from the search-within-tab field on Anime/Manga.
 - **Feed tab** — Your/Following/Global picker (FR-34), activity list with cover thumbnails and relative timestamps (FR-35), tap-through to detail.
 - **Rating stepper** — must visibly differ by media type: 5 steps with "Animation" + "Audio" for anime, 4 steps with "Art" and no Audio step for manga. Score control snaps to 0.5 steps. Anchors panel beside each step, headed "Your calibration — how you scored [Criterion] on similar anime/manga. Place this title against them," with a genre/all pill switch (FR-8). Opened from a title's score pill, not a separate tab. Rate Series mode (FR-44–46) chains this across a title's prequel/sequel entries, with a season-level back control distinct from the per-criterion back.
-- **Profile tab** — stats block (FR-42: total anime/manga, days watched, chapters read, followers/following), one favorite shelf per non-empty category — Anime, Manga, Characters, Staff, Studios (FR-40) — settings/gear icon opening Account/Sync (FR-43: connect/disconnect, Pull button, connection status).
+- **Profile tab** — avatar and banner (the banner across the top with the avatar overlapping its bottom edge; no banner area when the account has none), stats block (FR-42: total anime/manga, days watched, chapters read, followers/following), one favorite shelf per non-empty category — Anime, Manga, Characters, Staff, Studios (FR-40) — settings/gear icon opening Account/Sync (FR-43: connect/disconnect, Pull button, connection status).
 - **Detail view (anime/manga)** — full criteria breakdown, series info stats, tags vs. genres, producers, relations, rankings/popularity, favorite heart, edit/delete. Two states: in-library shows quick status/progress/score pills; not-yet-imported (reached via Discover, FR-52) shows an "Add to Library" action with a status picker instead.
 - **Character / Staff detail** — cover, favorite heart, member-favorites count, bio, voice-actors-by-language (characters) or filmography (staff), appearances (FR-38).
 - **Catalog Search categories (FR-64)** — a category picker on the Search screen: Anime, Manga, Characters, Staff, Studios, Users.

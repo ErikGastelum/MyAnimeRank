@@ -1872,6 +1872,17 @@ function staffBioFields(p){
 }
 
 /* ---- profile ---- */
+// Banner across the top of a profile page, full content width, fading into
+// the page background so the header over its bottom edge stays readable.
+// '' when there's no banner, so the page keeps its plain header instead of
+// an empty box. A failed load leaves the cover() gradient behind, like povr().
+function profileBanner(url,seed){
+  if(!url)return '';
+  return `<div style="position:relative;height:180px;border-radius:14px;overflow:hidden;background:${cover(seed)};">
+    <img src="${esc(url)}" alt="" onerror="this.remove()" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;">
+    <div style="position:absolute;inset:0;background:linear-gradient(180deg,transparent 30%,color-mix(in srgb,var(--bg1) 70%,transparent) 72%,var(--bg1));"></div>
+  </div>`;
+}
 function realShelfCover(label,items,actFn){
   return `<div style="margin-bottom:28px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><h2 style="font-size:16px;font-weight:700;">${label}</h2></div>
@@ -1887,9 +1898,10 @@ function profileView(){
     <div style="display:flex;flex-wrap:wrap;gap:10px;">${arr.map(n=>`<div ${actFn?actFn(n):''} data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(n.name)}</span></div>`).join('')}</div></div>`;
 
   const username=state.username||'';
-  let shelves='',statsArr=[],statsLoading=false;
+  let shelves='',statsArr=[],statsLoading=false,avatarUrl=null,banner='';
   if(_profileStats&&_profileFavorites){
     const s=_profileStats;
+    avatarUrl=s.avatar_url;banner=profileBanner(s.banner_url,username);
     statsArr=[
       {label:'Anime',value:String(s.total_anime)},{label:'Manga',value:String(s.total_manga)},
       {label:'Days Watched',value:String(s.days_watched)},{label:'Chapters Read',value:String(s.chapters_read)},
@@ -1906,10 +1918,14 @@ function profileView(){
     statsLoading=true;
   }
 
+  // With a banner the avatar grows and overlaps its bottom edge; without one
+  // (or while stats load) the header is the plain row.
+  const av=banner?88:56,align=banner?'flex-end':'center';
   return `<div style="max-width:900px;margin:0 auto;padding:24px 24px 60px;animation:rk-fade .25s ease;">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px;">
-      <div style="display:flex;align-items:center;gap:14px;">
-        <div style="width:56px;height:56px;border-radius:14px;background:${cover(username)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:20px;color:rgba(255,255,255,.85);">${esc(initials(username))}</span></div>
+    ${banner}
+    <div style="display:flex;align-items:${align};justify-content:space-between;gap:16px;margin-bottom:28px;${banner?`position:relative;margin-top:-${av/2}px;padding:0 20px;`:''}">
+      <div style="display:flex;align-items:${align};gap:14px;">
+        <div style="width:${av}px;height:${av}px;border-radius:${banner?18:14}px;position:relative;overflow:hidden;background:${cover(username)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)${banner?',0 10px 30px rgba(0,0,0,.45)':''};"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${banner?28:20}px;color:rgba(255,255,255,.85);">${esc(initials(username))}</span>${povr(avatarUrl,username)}</div>
         <div><div style="font-size:19px;font-weight:700;">${esc(username)}</div>
         <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:#6bd08a;margin-top:3px;">● Connected</div></div>
       </div>
