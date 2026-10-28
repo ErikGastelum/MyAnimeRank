@@ -110,6 +110,8 @@ function displayTitle(it){if(typeof it==='string')return it;return (it&&it.title
 function cover(seed){let h=0;seed=String(seed||'');for(let i=0;i<seed.length;i++)h=(h*31+seed.charCodeAt(i))>>>0;const a=h%360,b=(a+42)%360;return `linear-gradient(135deg,hsl(${a} 46% 30%),hsl(${b} 52% 17%))`;}
 function initials(t){t=String(t||'').trim();if(!t)return '?';const w=t.split(/\s+/).filter(Boolean);return ((w[0]||'')[0]+(w[1]?w[1][0]:'')).toUpperCase();}
 function fmtScore(n){return (n==null)?'—':Number(n).toFixed(1);}
+// Counts with thousands separators, the same in every locale: 114457 -> "114,457".
+function fmtCount(n){return Number(n).toLocaleString('en-US');}
 // Joins only the parts of a meta line that exist ("TV · ⭐ 8.5" when year is
 // null), so a missing field never prints as "null" or leaves a stray separator.
 function joinMeta(parts){return parts.filter(p=>p!=null&&p!=='').join(' · ');}
@@ -2256,9 +2258,11 @@ function detailView(){
   else if(real===null){commError=true;}
   comm=real?{
     rankingStats:[
-      {label:'Popularity',value:real.popularity!=null?'#'+real.popularity:'—'},
-      {label:'Favourites',value:real.favourites!=null?String(real.favourites):'—'},
-      {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+(real.rank_rated??real.rank_popular):'—'},
+      // AniList's popularity is how many members have the title on their
+      // list, a count, not a rank; only All-time Rank is a position.
+      {label:'Members',value:real.popularity!=null?fmtCount(real.popularity):'—'},
+      {label:'Favourites',value:real.favourites!=null?fmtCount(real.favourites):'—'},
+      {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+fmtCount(real.rank_rated??real.rank_popular):'—'},
     ],
     relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
     characters:real.characters.map(c=>({anilist_id:c.anilist_id,name:c.name||'',role:c.role||'',image_url:c.image_url})),
