@@ -743,6 +743,9 @@ H.startRatingChain = async ()=>{
 // 'rating') rather than snapshotting state.detailReturn directly, so this is
 // correct even when rating was opened from somewhere other than Detail.
 H.cancelRating = ()=>{
+  // The unrated queue (FR-68) always goes back to the Library, even when an
+  // older state.current is still around from a detail page opened earlier.
+  if(state.rating&&state.rating.queue){state.rating=null;go('library');return;}
   const returnView=state.rating&&state.rating.returnView;
   state.rating=null;
   if(state.current){openDetail(state.current);state.detailReturn=returnView;}
@@ -780,15 +783,39 @@ H.nextStep = async ()=>{const r=state.rating;const cs=crits(curRatingItem().medi
   // content change — title/poster/anchors all change — so it keeps the full render()
   await commitRating();
   r.lastRealId=curRatingItem().id;
+  if(r.queue)r.queue[r.lastRealId]='rated';
   if(r.idx<r.ids.length-1){
     r.idx++;
     // The next chain position may be a not-yet-imported {pending:true} marker
     // (no local id yet) -- render() dispatches those to pendingImportView()
     // instead of the normal stepper, so there's no score/step to prime here.
     if(typeof r.ids[r.idx]!=='object'){r.step=0;r.scores=existingScores(curRatingItem());}
-  }else{ finishChain();return; }
+  }else{ if(r.queue)finishQueue();else finishChain();return; }
   render();
 };
+// FR-68: this tab's titles with no rating that have been started (every
+// status but Planning), most recently updated first, same comparison as the
+// Library's Last Updated sort. Grouping by franchise would need an AniList
+// request per title before the first one could show, so the queue doesn't.
+function unratedQueue(mt){
+  return library.filter(x=>x.media_type===mt && !x.rating && x.status!=='planning' && STATUS[mt].includes(x.status))
+    .sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at)));
+}
+// r.queue maps each title id to 'rated' or 'skipped' for this run only; it
+// is never stored, so a skipped title is back in the queue next time.
+H.startUnratedQueue = ()=>{
+  const ids=unratedQueue(state.mediaType).map(x=>x.id);
+  if(ids.length)openRating(ids,{queue:{}});
+};
+// Moves on without saving. A title rated earlier in this run and reached
+// again through Back a Season keeps its saved rating, so it stays 'rated'.
+H.queueSkip = ()=>{
+  const r=state.rating;const id=r.ids[r.idx];
+  if(r.queue[id]!=='rated')r.queue[id]='skipped';
+  if(r.idx<r.ids.length-1){r.idx++;r.step=0;r.scores=existingScores(curRatingItem());render();}
+  else finishQueue();
+};
+function finishQueue(){state.rating.done=true;render();}
 H.backSeason = ()=>{
   const r=state.rating;let i=r.idx-1;
   // Skip backward past pending/skipped markers -- "undo a skip" isn't a
@@ -1058,7 +1085,7 @@ function openDetail(cur){
   go('detail');
 }
 
-function openRating(ids){
+function openRating(ids,extra){
   // anchorScope: 'genre' (shared-genre anchors, FR-8 default) | 'all' (same media_type, no genre filter).
   // Fresh per openRating call, so it resets to 'genre' for each new title (incl. Rate Series advance).
   // returnView: captured NOW, while state.view still genuinely reflects where
@@ -1074,7 +1101,7 @@ function openRating(ids){
   // ids[0] is always a real local id -- Rate Series only ever starts from an
   // in-library title's own Detail page; only interior/tail hops discovered by
   // walkChain() can be {pending:true} not-yet-imported markers.
-  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,lastRealId:ids[0]};
+  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,lastRealId:ids[0],...extra};
   go('rating');
 }
 function curRatingItem(){const r=state.rating;return byId(r.ids[r.idx]);}
@@ -1353,7 +1380,7 @@ function shell(){
     case 'feed': body=feedView(); break;
     case 'profile': body=profileView(); break;
     case 'search': body=searchView(); break;
-    case 'rating': body=(state.rating&&typeof state.rating.ids[state.rating.idx]==='object')?pendingImportView():ratingView(); break;
+    case 'rating': body=state.rating&&state.rating.done?queueSummaryView():(state.rating&&typeof state.rating.ids[state.rating.idx]==='object')?pendingImportView():ratingView(); break;
     case 'detail': body=detailView(); break;
     case 'insights': body=insightsView(); break;
     case 'person': body=personView(); break;
@@ -1396,6 +1423,7 @@ function libraryView(){
     .filter(o=>!(mt==='manga'&&o[0]==='audio'));
   const sortOpts=[['score','By Score'],['title','By Title'],['progress','By Progress'],['updated','Last Updated'],...critSortOpts];
   const tabItems=library.filter(x=>x.media_type===mt);
+  const unratedCount=unratedQueue(mt).length;
   const genreOpts=[...new Set(tabItems.flatMap(x=>x.genres||[]))].sort();
   const yearOpts=[...new Set(tabItems.map(x=>x.year).filter(Boolean))].sort((a,b)=>b-a);
   const q=state.libSearch.trim().toLowerCase();
@@ -1428,6 +1456,7 @@ function libraryView(){
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="position:absolute;left:13px;top:50%;transform:translateY(-50%);color:var(--t4);"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <input id="in-libSearch" data-input="libSearch" value="${esc(state.libSearch)}" placeholder="Search your ${label}&hellip;" style="width:100%;height:42px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:0 14px 0 38px;font-size:13px;color:var(--t1);outline:none;" />
       </div>
+      ${unratedCount?`<div data-act="startUnratedQueue" title="Rate the ${label} you've started but not rated" data-hover="border-color:var(--accent);color:var(--t1)" style="flex:0 0 auto;height:42px;padding:0 14px;border-radius:10px;background:color-mix(in srgb,var(--accent) 12%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));display:flex;align-items:center;gap:7px;cursor:pointer;color:var(--accent);font-weight:700;font-size:13px;white-space:nowrap;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>Rate ${unratedCount} unrated</div>`:''}
       <div style="position:relative;flex:0 0 auto;">
         <div data-act="openSearch" title="Search AniList to import" data-hover="border-color:var(--accent);color:var(--t1)" style="width:42px;height:42px;border-radius:10px;background:var(--s1);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t3);">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -2031,11 +2060,23 @@ function pendingImportView(){
     </div>
   </div>`;
 }
+// FR-68: end of the unrated queue. Each rating was saved as its title finished.
+function queueSummaryView(){
+  const outcomes=Object.values(state.rating.queue);
+  const rated=outcomes.filter(v=>v==='rated').length,skipped=outcomes.filter(v=>v==='skipped').length;
+  return `<div style="padding:60px 38px;max-width:520px;margin:0 auto;animation:rk-fade .25s ease;">
+    <div style="background:var(--s1);border:1px solid var(--line);border-radius:16px;padding:32px;text-align:center;">
+      <div style="font-weight:700;font-size:19px;">Queue finished</div>
+      <div style="font-family:'Overpass Mono',monospace;font-size:13px;color:var(--t2);margin-top:10px;">Rated ${rated} &middot; Skipped ${skipped}</div>
+      <div data-act="cancelRating" style="display:inline-block;margin-top:24px;padding:13px 26px;border-radius:11px;background:var(--accent);color:#04121d;cursor:pointer;font-weight:700;font-size:14px;">Back to Library</div>
+    </div>
+  </div>`;
+}
 function ratingView(){
   const r=state.rating;const it=curRatingItem();const cs=crits(it.media_type);const c=cs[r.step];
   const score=r.scores[c.key]||5;
   const overall=computeOverall(it.media_type,r.scores);
-  const isChain=r.ids.length>1;
+  const isChain=r.ids.length>1||!!r.queue;
   const anchors=anchorsFor(it,c.key,r.anchorScope);
   const allLabel='All '+(it.media_type==='manga'?'Manga':'Anime');
   const scPct=pct(score-1,9);
@@ -2101,9 +2142,10 @@ function ratingView(){
 
     ${isChain?`<div style="display:flex;align-items:center;gap:12px;background:color-mix(in srgb,var(--accent) 8%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:12px;padding:10px 14px;margin-bottom:18px;">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M4 4v16l13-8z"/><path d="M18 4v16" stroke-linecap="round"/></svg>
-      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">Rate Series &middot; ${r.idx+1} of ${r.ids.length}</span>
+      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">${r.queue?'Rate unrated':'Rate Series'} &middot; ${r.idx+1} of ${r.ids.length}</span>
       <div style="flex:1;"></div>
       <div data-act="backSeason" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:${r.idx>0?'pointer':'default'};opacity:${r.idx>0?1:.4};font-size:11.5px;font-weight:700;color:var(--t2);"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back a Season</div>
+      ${r.queue?`<div data-act="queueSkip" title="Next title, nothing saved" data-hover="border-color:var(--accent);color:var(--t1)" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:pointer;font-size:11.5px;font-weight:700;color:var(--t2);">Skip<svg width="12" height="12" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`:''}
     </div>`:''}
 
     <div style="display:flex;align-items:center;gap:16px;background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:20px;">
