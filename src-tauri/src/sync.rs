@@ -3,8 +3,7 @@
 //! db.rs stays pure data access, anilist.rs stays a pure external-API client,
 //! and this module is where the two meet.
 
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -16,10 +15,6 @@ const PUSH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// FR-80: one queue turn (one friend, two requests) at most this often:
 /// 10 requests a minute, a third of AniList's 30.
 pub const FRIEND_QUEUE_SPACING: Duration = Duration::from_secs(12);
-/// FR-80: a friend whose fetch failed other than by not reaching AniList
-/// (say, the account is gone) is skipped this long, so it can't hold up
-/// everyone behind it.
-const FRIEND_FAILED_RETRY: Duration = Duration::from_secs(3600);
 
 #[derive(Debug)]
 pub enum SyncError {
@@ -334,11 +329,13 @@ pub async fn get_pending_conflicts(st: &Shared) -> SyncResult<Vec<Value>> {
 // ---------------------------------------------------------------- friends ----
 
 /// FR-79: imports who you follow (everyone, or mutual follows only, per the
-/// setting). Uses only your user id, never the token, and fetches no lists.
+/// setting), and fetches no lists. Logged out, except that mutual only reads
+/// your own following list with your token (see AniList::get_following).
 pub async fn sync_friends(st: &Shared) -> SyncResult<()> {
     let auth = auth(st)?;
     let (mutual_only, _) = st.db.friend_sync_state()?;
-    let followed = st.anilist.get_following(auth.anilist_user_id, mutual_only).await?;
+    let token = mutual_only.then_some(auth.access_token.as_str());
+    let followed = st.anilist.get_following(auth.anilist_user_id, mutual_only, token).await?;
     st.db.sync_followed(&followed, &now_iso())?;
     Ok(())
 }
@@ -407,12 +404,7 @@ pub async fn friend_queue_step(st: &Shared) -> SyncResult<Option<i64>> {
     if !st.db.is_connected() || !st.anilist.is_quiet() {
         return Ok(None);
     }
-    let skip: HashSet<i64> = {
-        let mut retry_at = st.friend_retry_at.lock().unwrap_or_else(|e| e.into_inner());
-        retry_at.retain(|_, at| *at > Instant::now());
-        retry_at.keys().copied().collect()
-    };
-    let Some((id, name)) = st.db.next_friend_to_fetch(&skip)? else { return Ok(None) };
+    let Some((id, name)) = st.db.next_friend_to_fetch()? else { return Ok(None) };
     let failed = match fetch_friend(st, &name, Some(id)).await {
         Ok(FriendLookup::NoSuchUser) => true,
         Ok(_) => false,
@@ -423,7 +415,7 @@ pub async fn friend_queue_step(st: &Shared) -> SyncResult<Option<i64>> {
         Err(e) => return Err(e),
     };
     if failed {
-        st.friend_retry_at.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Instant::now() + FRIEND_FAILED_RETRY);
+        st.db.skip_friend(id)?;
     }
     Ok(Some(id))
 }

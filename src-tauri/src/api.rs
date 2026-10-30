@@ -221,6 +221,7 @@ pub fn router(st: Shared) -> Router {
         .route("/friends/settings", put(friends_settings))
         .route("/friends/{id}", delete(friends_delete))
         .route("/friends/{id}/refresh", post(friends_refresh))
+        .route("/friends/{id}/unhide", post(friends_unhide))
         .route("/friends/{id}/compare", get(friends_compare))
         .route("/media/by-anilist/{id}/friend-scores", get(media_friend_scores))
         // FR-47: nothing below is usable without a stored token.
@@ -614,7 +615,7 @@ fn friends_json(st: &Shared) -> ApiResult {
         f.list_status = "fetching".into();
     }
     let (mutual_only, synced_at) = st.db.friend_sync_state()?;
-    ok(json!({"friends": friends, "synced_at": synced_at, "mutual_only": mutual_only}))
+    ok(json!({"friends": friends, "hidden": st.db.get_hidden_friends()?, "synced_at": synced_at, "mutual_only": mutual_only}))
 }
 
 async fn friends_list(State(st): State<Shared>) -> ApiResult {
@@ -670,6 +671,21 @@ async fn fetched_friend(st: &Shared, auth: &Auth, name: &str, id: Option<i64>) -
         FriendLookup::NoSuchUser => Err(ApiError::new(404, format!("No AniList user named {name}"))),
         FriendLookup::Private(name) => Err(private_list(&name)),
     }
+}
+
+/// FR-70: whether you still follow them decides, so a sync follows right
+/// away: still followed, they're back; not, the hidden record goes. If
+/// AniList can't be reached they stay unhidden, and the next sync settles it.
+async fn friends_unhide(State(st): State<Shared>, Id(id): Id) -> ApiResult {
+    if !st.db.unhide_friend(id)? {
+        return Err(ApiError::new(404, "no hidden friend with that id"));
+    }
+    if let Err(e) = sync::sync_friends(&st).await {
+        log::warn!("friend sync after unhiding {id} failed: {e}");
+    }
+    let Json(mut out) = friends_json(&st)?;
+    out["unhidden"] = json!(st.db.get_friend(id)?.is_some());
+    ok(out)
 }
 
 /// FR-70: a friend from AniList is hidden rather than deleted.

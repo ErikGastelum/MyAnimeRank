@@ -19,7 +19,8 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------- fake AniList ----
 
 type Reply = (u16, Value, Option<&'static str>);
-type Handler = Arc<dyn Fn(&str, &Value) -> Reply + Send + Sync>;
+/// (query, variables, Authorization header) -> reply.
+type Handler = Arc<dyn Fn(&str, &Value, Option<&str>) -> Reply + Send + Sync>;
 
 struct Fake {
     url: String,
@@ -46,6 +47,12 @@ impl Fake {
 }
 
 async fn fake_anilist(handler: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static) -> Fake {
+    fake_anilist_seeing_auth(move |q, v, _| handler(q, v)).await
+}
+
+/// `fake_anilist` for a handler that answers by who's asking, as AniList
+/// does for viewer-relative fields like `isFollower`.
+async fn fake_anilist_seeing_auth(handler: impl Fn(&str, &Value, Option<&str>) -> Reply + Send + Sync + 'static) -> Fake {
     let handler: Handler = Arc::new(handler);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let auths = Arc::new(Mutex::new(Vec::new()));
@@ -58,12 +65,13 @@ async fn fake_anilist(handler: impl Fn(&str, &Value) -> Reply + Send + Sync + 's
         let times = times2.clone();
         async move {
             times.lock().unwrap().push(Instant::now());
-            auths.lock().unwrap().push(headers.get("authorization").and_then(|h| h.to_str().ok()).map(str::to_string));
+            let auth = headers.get("authorization").and_then(|h| h.to_str().ok()).map(str::to_string);
+            auths.lock().unwrap().push(auth.clone());
             let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             let query = body["query"].as_str().unwrap_or_default().to_string();
             let vars = body["variables"].clone();
             calls.lock().unwrap().push((query.clone(), vars.clone()));
-            let (status, json, retry_after) = handler(&query, &vars);
+            let (status, json, retry_after) = handler(&query, &vars, auth.as_deref());
             let mut resp = (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(json)).into_response();
             if let Some(ra) = retry_after {
                 resp.headers_mut().insert("Retry-After", ra.parse().unwrap());
@@ -1306,7 +1314,9 @@ fn friend_reply(q: &str, v: &Value, pal_private: bool) -> Reply {
 
 /// The logged-in account's (tester, id 1) follow graph, plus switches for
 /// AniList's moods: the next request gets a 429, every request fails, follow
-/// pages from this one on fail, or Discover doesn't answer until released.
+/// pages from this one on fail, Discover doesn't answer until released, the
+/// token is rejected, or a request with the token is answered as if logged
+/// out (no Viewer, `isFollower` false).
 #[derive(Default)]
 struct Follows {
     following: Vec<i64>,
@@ -1315,13 +1325,17 @@ struct Follows {
     down: bool,
     failing_page: Option<usize>,
     hold_discover: bool,
+    reject_token: bool,
+    token_ignored: bool,
 }
 
 /// `friend_anilist`'s users and lists, plus `Page.following` / `Page.followers`
 /// two users per page (so even a short list spans pages), the Viewer lookup
-/// behind login, Pull's own (empty) lists and Discover.
+/// behind login, Pull's own (empty) lists and Discover. As recorded live,
+/// `isFollower` is relative to whoever the token says is asking, and false
+/// for everyone when nobody is.
 async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
-    fake_anilist(move |q, v| {
+    fake_anilist_seeing_auth(move |q, v, auth| {
         let mut g = graph.lock().unwrap();
         if std::mem::take(&mut g.throttle_next) {
             return (429, json!({}), Some("0.01"));
@@ -1329,7 +1343,7 @@ async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
         if g.down {
             return (500, json!({}), None);
         }
-        if q.contains("Viewer") {
+        if q.contains("Viewer { id name") {
             return (200, json!({"data": {"Viewer": {"id": 1, "name": "tester", "mediaListOptions": {"scoreFormat": "POINT_10_DECIMAL"}}}}), None);
         }
         if q.contains("media(type:") {
@@ -1356,16 +1370,28 @@ async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
                 if g.failing_page.is_some_and(|p| page >= p) {
                     return (500, json!({}), None);
                 }
+                if auth.is_some() && g.reject_token {
+                    return (400, json!({"data": null, "errors": [{"message": "Invalid token", "status": 400}]}), None);
+                }
+                let viewer = (auth == Some("Bearer test-token") && !g.token_ignored).then_some(1);
                 let users: Vec<Value> = ids
                     .iter()
                     .skip((page - 1) * 2)
                     .take(2)
                     .map(|id| {
                         let (id, name, _) = friend_user(&json!({"id": id}));
-                        json!({"id": id, "name": name, "avatar": {"large": format!("https://img/{id}.png")}})
+                        let mut u = json!({"id": id, "name": name, "avatar": {"large": format!("https://img/{id}.png")}});
+                        if q.contains("isFollower") {
+                            u["isFollower"] = json!(viewer.is_some() && g.followers.contains(&id));
+                        }
+                        u
                     })
                     .collect();
-                return (200, json!({"data": {"Page": {"pageInfo": {"hasNextPage": page * 2 < ids.len()}, field: users}}}), None);
+                let mut data = json!({"Page": {"pageInfo": {"hasNextPage": page * 2 < ids.len()}, field: users}});
+                if q.contains("Viewer") {
+                    data["viewer"] = viewer.map_or(Value::Null, |id| json!({"id": id}));
+                }
+                return (200, json!({"data": data}), None);
             }
         }
         drop(g);
@@ -1485,13 +1511,13 @@ async fn unknown_users_private_lists_and_your_own_account_are_refused_and_store_
         before = fake.calls().len();
     }
     assert!(fake.auths().iter().all(Option::is_none), "{:?}", fake.auths());
-    assert_eq!(call(&st, "GET", "/friends", None).await, (200, json!({"friends": [], "synced_at": null, "mutual_only": false})));
+    assert_eq!(call(&st, "GET", "/friends", None).await, (200, json!({"friends": [], "hidden": [], "synced_at": null, "mutual_only": false})));
     assert!(st.db.friend_entries(43, "anime").unwrap().is_empty());
 
     let offline = offline_state().await;
     login(&offline);
     assert_eq!(call(&offline, "POST", "/friends", Some(json!({"username": "pal"}))).await.0, 502);
-    assert_eq!(call(&offline, "GET", "/friends", None).await, (200, json!({"friends": [], "synced_at": null, "mutual_only": false})));
+    assert_eq!(call(&offline, "GET", "/friends", None).await, (200, json!({"friends": [], "hidden": [], "synced_at": null, "mutual_only": false})));
 }
 
 #[tokio::test]
@@ -1790,7 +1816,7 @@ fn a_friend_table_from_before_friend_sync_is_migrated_without_changing_a_value()
     let before: Vec<_> = tables.iter().map(|t| dump(&conn, t)).collect();
     drop(conn);
 
-    type Row = (i64, String, Option<String>, String, String, Option<String>, Option<String>, i64);
+    type Row = (i64, String, Option<String>, String, String, Option<String>, Option<String>, i64, Option<String>);
     for _ in 0..2 {
         // Opening migrates once; opening again changes nothing.
         drop(Db::open(&path).unwrap());
@@ -1798,12 +1824,12 @@ fn a_friend_table_from_before_friend_sync_is_migrated_without_changing_a_value()
         assert_eq!(tables.iter().map(|t| dump(&conn, t)).collect::<Vec<_>>(), before);
         let cols: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('friend')").unwrap()
             .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        assert_eq!(cols, ["anilist_user_id", "name", "avatar_url", "added_at", "source", "fetched_at", "private_at", "hidden"]);
+        assert_eq!(cols, ["anilist_user_id", "name", "avatar_url", "added_at", "source", "fetched_at", "private_at", "hidden", "retry_at"]);
         // Every old value where it was; the old fetch time also fills the new fetched_at.
         let rows: Vec<Row> = conn.prepare("SELECT * FROM friend ORDER BY anilist_user_id").unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))
             .unwrap().map(Result::unwrap).collect();
-        let row = |id, name: &str, avatar: Option<&str>, at: &str| (id, name.into(), avatar.map(Into::into), at.into(), "manual".into(), Some(at.into()), None, 0);
+        let row = |id, name: &str, avatar: Option<&str>, at: &str| (id, name.into(), avatar.map(Into::into), at.into(), "manual".into(), Some(at.into()), None, 0, None);
         assert_eq!(rows, vec![
             row(42, "Pal", Some("https://img/u.png"), "2026-01-01T00:00:00.000000+00:00"),
             row(43, "amy", None, "2026-02-01T00:00:00.000000+00:00"),
@@ -1812,6 +1838,29 @@ fn a_friend_table_from_before_friend_sync_is_migrated_without_changing_a_value()
     let friends = Db::open(&path).unwrap().get_friends().unwrap();
     let seen: Vec<_> = friends.iter().map(|f| (f.anilist_user_id, f.source.as_str(), f.list_status.as_str(), f.anime_count + f.manga_count)).collect();
     assert_eq!(seen, vec![(43, "manual", "fetched", 1), (42, "manual", "fetched", 1)]);
+}
+
+#[test]
+fn a_friend_table_without_retry_at_only_gains_that_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(Db::open(&path).unwrap());
+    // `friend` as the first friend-sync build created it.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE friend_entry; DROP TABLE friend;
+         CREATE TABLE friend (anilist_user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, avatar_url TEXT, added_at TEXT NOT NULL,
+             source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('anilist','manual')), fetched_at TEXT, private_at TEXT,
+             hidden INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO friend VALUES (42, 'Pal', NULL, '2026-01-01T00:00:00.000000+00:00', 'anilist', NULL, '2026-01-02T00:00:00.000000+00:00', 1);",
+    )
+    .unwrap();
+    let before = dump(&conn, "friend");
+    drop(conn);
+    drop(Db::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let after = dump(&conn, "friend");
+    assert_eq!(after, before.iter().map(|r| format!("{r}|Null")).collect::<Vec<_>>());
 }
 
 // ---------------------------------------------------------------- friend sync ----
@@ -1899,33 +1948,77 @@ async fn friend_sync_imports_every_page_of_who_you_follow_and_fetches_no_lists()
     assert!(fake.auths().iter().all(Option::is_none), "{:?}", fake.auths());
 }
 
+fn friend_ids(b: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = b["friends"].as_array().unwrap().iter().map(|f| f["anilist_user_id"].as_i64().unwrap()).collect();
+    ids.sort();
+    ids
+}
+
+/// Each request since `from`: (which follow list, whether it carried the token).
+fn follow_requests(fake: &Fake, from: usize) -> Vec<(&'static str, bool)> {
+    fake.calls()[from..].iter().zip(&fake.auths()[from..])
+        .map(|((q, _), auth)| (if q.contains("following(") { "following" } else if q.contains("followers(") { "followers" } else { "other" }, auth.is_some()))
+        .collect()
+}
+
 #[tokio::test]
-async fn mutual_only_keeps_the_people_you_follow_who_follow_you_back() {
+async fn mutual_only_reads_your_own_following_list_with_your_token_and_no_followers() {
     let graph = follows(&[100, 101, 102], &[101, 102, 103]);
     let fake = follow_anilist(graph).await;
     let st = state_with(&fake);
     login(&st);
-    let ids = |b: &Value| {
-        let mut ids: Vec<i64> = b["friends"].as_array().unwrap().iter().map(|f| f["anilist_user_id"].as_i64().unwrap()).collect();
-        ids.sort();
-        ids
-    };
 
     assert_eq!(call(&st, "PUT", "/friends/settings", Some(json!({"mutual_only": true}))).await, (200, json!({"mutual_only": true})));
     assert!(fake.calls().is_empty()); // the setting alone is local
     let (s, b) = call(&st, "POST", "/friends/sync", None).await;
-    assert_eq!((s, &b["mutual_only"], ids(&b)), (200, &json!(true), vec![101, 102]));
-    // Both pages of following, then both of followers.
-    let kinds: Vec<&str> = fake.calls().iter().map(|(q, _)| if q.contains("following(") { "following" } else { "followers" }).collect();
-    assert_eq!(kinds, ["following", "following", "followers", "followers"]);
+    assert_eq!((s, &b["mutual_only"], friend_ids(&b)), (200, &json!(true), vec![101, 102]));
+    // As many requests as an everyone sync: both following pages, read with
+    // your token so AniList can say who follows you back. No followers pages.
+    assert_eq!(follow_requests(&fake, 0), [("following", true), ("following", true)]);
+    assert!(fake.calls().iter().all(|(q, _)| q.contains("isFollower") && q.contains("Viewer")));
+    assert_eq!(fake.auths()[0].as_deref(), Some("Bearer test-token"));
 
-    // Everyone again brings 100 back; mutual only takes them away again.
+    // The token is for your own following list only: friends' lists never
+    // get it, and an everyone sync doesn't need it.
+    let n = fake.calls().len();
+    assert_eq!(call(&st, "POST", "/friends/101/refresh", None).await.0, 200);
     call(&st, "PUT", "/friends/settings", Some(json!({"mutual_only": false}))).await;
-    assert_eq!(ids(&call(&st, "POST", "/friends/sync", None).await.1), vec![100, 101, 102]);
+    assert_eq!(friend_ids(&call(&st, "POST", "/friends/sync", None).await.1), vec![100, 101, 102]);
+    assert!(fake.auths()[n..].iter().all(Option::is_none), "{:?}", fake.auths());
     call(&st, "PUT", "/friends/settings", Some(json!({"mutual_only": true}))).await;
-    assert_eq!(ids(&call(&st, "POST", "/friends/sync", None).await.1), vec![101, 102]);
+    assert_eq!(friend_ids(&call(&st, "POST", "/friends/sync", None).await.1), vec![101, 102]);
     assert_eq!(call(&st, "PUT", "/friends/settings", Some(json!({"mutual_only": "yes"}))).await.0, 422);
-    assert!(fake.auths().iter().all(Option::is_none));
+    assert!(fake.calls().iter().all(|(q, _)| !q.contains("mutation")));
+}
+
+#[tokio::test]
+async fn mutual_only_falls_back_to_your_followers_list_when_anilist_does_not_vouch_for_is_follower() {
+    let graph = follows(&[100, 101, 102], &[101, 102, 103]);
+    let fake = follow_anilist(graph.clone()).await;
+    let st = state_with(&fake);
+    login(&st);
+    call(&st, "PUT", "/friends/settings", Some(json!({"mutual_only": true}))).await;
+
+    // The token answered as if logged out: no Viewer, isFollower false for
+    // everyone. Trusting that would drop every friend; the followers list decides.
+    graph.lock().unwrap().token_ignored = true;
+    let (s, b) = call(&st, "POST", "/friends/sync", None).await;
+    assert_eq!((s, friend_ids(&b)), (200, vec![101, 102]));
+    assert_eq!(follow_requests(&fake, 0), [("following", true), ("following", true), ("followers", false), ("followers", false)]);
+
+    // The token rejected outright: your following list is read again, logged out.
+    let n = fake.calls().len();
+    {
+        let mut g = graph.lock().unwrap();
+        g.token_ignored = false;
+        g.reject_token = true;
+    }
+    let (s, b) = call(&st, "POST", "/friends/sync", None).await;
+    assert_eq!((s, friend_ids(&b)), (200, vec![101, 102]));
+    assert_eq!(
+        follow_requests(&fake, n),
+        [("following", true), ("following", false), ("following", false), ("followers", false), ("followers", false)]
+    );
 }
 
 #[tokio::test]
@@ -2130,6 +2223,66 @@ async fn friends_sync_after_login_and_after_pull_without_the_token() {
     for ((q, _), auth) in calls.iter().zip(&auths) {
         assert_eq!(auth.is_some(), !q.contains("following("), "{q}");
     }
+}
+
+#[tokio::test]
+async fn unhiding_brings_back_a_friend_you_still_follow_and_drops_one_you_no_longer_do() {
+    let graph = follows(&[100, 101], &[]);
+    let fake = follow_anilist(graph.clone()).await;
+    let st = state_with(&fake);
+    login(&st);
+    call(&st, "POST", "/friends/sync", None).await;
+    for id in [100, 101] {
+        assert_eq!(call(&st, "DELETE", &format!("/friends/{id}"), None).await.1, json!({"deleted": true, "hidden": true}));
+    }
+    let hidden = |id: i64| json!({"anilist_user_id": id, "name": format!("u{id}"), "avatar_url": format!("https://img/{id}.png")});
+    let (_, b) = call(&st, "GET", "/friends", None).await;
+    assert_eq!((&b["friends"], &b["hidden"]), (&json!([]), &json!([hidden(100), hidden(101)])));
+
+    // You unfollowed 101 on AniList since the last sync: unhiding just drops them.
+    graph.lock().unwrap().following = vec![100];
+    let n = fake.calls().len();
+    let (s, b) = call(&st, "POST", "/friends/101/unhide", None).await;
+    assert_eq!((s, &b["unhidden"]), (200, &json!(false)), "{b}");
+    assert_eq!((&b["friends"], &b["hidden"]), (&json!([]), &json!([hidden(100)])));
+    assert_eq!(follow_requests(&fake, n), [("following", false)]); // deciding took one sync
+    // Still followed: back on the spot, their list next in line.
+    let (s, b) = call(&st, "POST", "/friends/100/unhide", None).await;
+    assert_eq!((s, &b["unhidden"], &b["hidden"]), (200, &json!(true), &json!([])));
+    assert_eq!(friend_rows(&st).await, vec![row(100, "anilist", "pending")]);
+    assert_eq!(call(&st, "POST", "/friends/100/unhide", None).await.0, 404); // not hidden now
+    assert_eq!(call(&st, "POST", "/friends/7/unhide", None).await.0, 404);
+
+    // With AniList down they're still unhidden; the next sync settles it.
+    call(&st, "DELETE", "/friends/100", None).await;
+    graph.lock().unwrap().down = true;
+    let (s, b) = call(&st, "POST", "/friends/100/unhide", None).await;
+    assert_eq!((s, &b["unhidden"]), (200, &json!(true)));
+    assert!(fake.auths().iter().all(Option::is_none));
+}
+
+#[tokio::test]
+async fn the_queue_remembers_whom_it_set_aside_across_a_restart() {
+    let fake = follow_anilist(follows(&[48, 49, 100], &[])).await;
+    let (st, dir) = file_state(&fake);
+    call(&st, "POST", "/friends/sync", None).await;
+    // 48 is private and 49's account is gone: both set aside.
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), Some(48));
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), Some(49));
+
+    // Restart: a new app on the same database goes straight to 100.
+    drop(st);
+    let db = Db::open(&dir.path().join("library.db")).unwrap();
+    let st = AppState::new(db, AniList::with_url(&fake.url), Config { client_id: "1".into() });
+    let n = fake.calls().len();
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), Some(100));
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), None);
+    assert_eq!(fake.calls().len(), n + 2);
+    // An hour on, 49 is tried again; 48 still waits out its week.
+    let an_hour_ago = (chrono::Utc::now() - chrono::Duration::minutes(61)).to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+    sql(&dir, &format!("UPDATE friend SET retry_at = '{an_hour_ago}' WHERE anilist_user_id = 49"));
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), Some(49));
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), None);
 }
 
 // ---------------------------------------------------------------------- login ----
