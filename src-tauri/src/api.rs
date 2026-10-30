@@ -806,7 +806,7 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         let left: Vec<i64> = planning.iter().copied().filter(|id| !shown.contains(id)).collect();
         if left.is_empty() {
             // No AniList call: there's nothing to ask about.
-            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null, "next_up_for": null, "blocked": false}));
+            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null, "next_up_for": null, "blocked": false, "requests": 0}));
         }
         PickPool::Only(left)
     } else {
@@ -830,6 +830,6 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
     let size = picked.size.map(|s| json!({"lo": s.lo, "hi": s.hi, "shown": body.exclude.len()}));
     ok(json!({
         "result": picked.result, "pool": picked.pool, "pool_exact": picked.pool_exact, "exhausted": exhausted,
-        "size": size, "next_up_for": picked.next_up_for, "blocked": picked.blocked,
+        "size": size, "next_up_for": picked.next_up_for, "blocked": picked.blocked, "requests": picked.requests,
     }))
 }

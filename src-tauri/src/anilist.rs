@@ -154,6 +154,16 @@ impl AniList {
     }
 
     async fn graphql(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64) -> AlResult<Value> {
+        self.graphql_within(query, variables, token, timeout, &mut (MAX_429_RETRIES + 1)).await
+    }
+
+    /// The one path to AniList, for graphql() and every Pick an anime
+    /// request. It counts as running for the friend-list queue (FR-80) until
+    /// it returns, and any 429 pauses that queue. It sends at most `budget`
+    /// HTTP requests, 429 retries included (and never more than
+    /// MAX_429_RETRIES of those), taking each one it sends out of `budget`.
+    /// `budget` must be at least 1.
+    async fn graphql_within(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64, budget: &mut usize) -> AlResult<Value> {
         let _running = InFlight::new(&self.in_flight);
         let mut payload = json!({ "query": query });
         if let Some(v) = variables {
@@ -169,6 +179,7 @@ impl AniList {
             if let Some(t) = token {
                 req = req.bearer_auth(t);
             }
+            *budget -= 1;
             let response = req.send().await?;
             if response.status().as_u16() != 429 {
                 break response;
@@ -176,7 +187,7 @@ impl AniList {
             let wait = retry_after_seconds(&response);
             let pause = Duration::try_from_secs_f64(wait.min(3600.0)).map_or(QUEUE_PAUSE_AFTER_429, |w| w.max(QUEUE_PAUSE_AFTER_429));
             *self.queue_paused_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + pause);
-            if attempt == MAX_429_RETRIES || wait > MAX_RETRY_WAIT_SECONDS {
+            if attempt == MAX_429_RETRIES || wait > MAX_RETRY_WAIT_SECONDS || *budget == 0 {
                 break response; // a shorter wait would only earn another 429
             }
             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -830,7 +841,8 @@ impl AniList {
     }
 
     /// FR-70/FR-71: one random anime from everything the filters match in
-    /// `pool`, never a sequel you aren't caught up on unless `check` is None.
+    /// `pool`, never a sequel you aren't caught up on unless `check` is None,
+    /// in at most PICK_BUDGET requests to AniList, 429 retries included.
     ///
     /// Page 1 comes first, alone: a pool that fits on it is counted exactly
     /// in one request. pageInfo.total isn't a count (notes #17), so a bigger
@@ -844,30 +856,44 @@ impl AniList {
     pub async fn pick(&self, filters: &PickFilters, pool: &PickPool, roll: f64, known: Option<PickSize>, check: Option<&PickCheck>) -> AlResult<Picked> {
         let mut vars = pick_variables(filters, pool);
         vars["sort"] = json!(["ID"]);
-        let mut run = PickRun { vars, filters, check, draws: Draws::new(roll) };
+        let mut run = PickRun { vars, filters, check, draws: Draws::new(roll), budget: PICK_BUDGET };
+        let mut picked = self.pick_within(&mut run, known).await?;
+        picked.requests = PICK_BUDGET - run.budget;
+        Ok(picked)
+    }
+
+    async fn pick_within(&self, run: &mut PickRun<'_>, known: Option<PickSize>) -> AlResult<Picked> {
         if let Some(size) = known.filter(|s| PICK_PAGE < s.lo && s.lo <= s.hi && s.hi <= PICK_DEPTH) {
-            if let Some(picked) = self.pick_pages(&mut run, size, false, None).await? {
+            if let Some(picked) = self.pick_pages(run, size, false, None).await? {
                 return Ok(picked);
             }
             // The page it tried was empty: the pool shrank more than the hint knew. Size it afresh.
         }
 
-        let (first, more) = self.pick_fetch(&run.vars, 1).await?;
-        if first.is_empty() {
+        let first = match self.pick_fetch(run, 1).await? {
+            Some((first, more)) if !first.is_empty() => Some((first, more)),
+            _ => None,
+        };
+        let Some((first, more)) = first else {
             return Ok(Picked::nothing(0, true, None, false));
-        }
+        };
         let (size, exact) = if more {
             let probes = pick_probes();
             let pages: String = probes.iter().map(|i| pick_probe(*i)).collect();
-            let data = self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(run.vars.clone()), None, 20).await?;
-            let exists = |i: &&usize| !arr(&data[format!("at{i}")]["media"]).is_empty();
-            let lo = probes.iter().take_while(exists).last().map_or(first.len(), |i| i + 1);
-            let hi = probes.iter().find(|i| !exists(i)).copied().unwrap_or(PICK_DEPTH);
-            (PickSize { lo, hi }, false)
+            match self.pick_request(run, &format!("query ({PICK_VARS}) {{{pages} }}"), None).await? {
+                Some(data) => {
+                    let exists = |i: &&usize| !arr(&data[format!("at{i}")]["media"]).is_empty();
+                    let lo = probes.iter().take_while(exists).last().map_or(first.len(), |i| i + 1);
+                    let hi = probes.iter().find(|i| !exists(i)).copied().unwrap_or(PICK_DEPTH);
+                    (PickSize { lo, hi }, false)
+                }
+                // Out of requests to size it: page 1 is all there is to pick from.
+                None => (PickSize { lo: first.len(), hi: first.len() }, false),
+            }
         } else {
             (PickSize { lo: first.len(), hi: first.len() }, true)
         };
-        let picked = self.pick_pages(&mut run, size, exact, Some(&first)).await?;
+        let picked = self.pick_pages(run, size, exact, Some(&first)).await?;
         Ok(picked.unwrap_or_else(|| Picked::nothing(0, true, None, false)))
     }
 
@@ -875,7 +901,7 @@ impl AniList {
     /// titles in random order: the first one the prequel check lets through
     /// is the pick. Landing on a held-back title first walks back its chain
     /// for a next-up (once per pick). A page with nothing usable leads to
-    /// another random page, at most PICK_RETRIES more requests; an empty one
+    /// another random page while the pick has requests left; an empty one
     /// (past the end) to `page_one`, when it's in hand. None when the first
     /// page fetched is empty with no page 1 to fall back on: `size` was stale.
     async fn pick_pages(&self, run: &mut PickRun<'_>, size: PickSize, exact: bool, page_one: Option<&[Value]>) -> AlResult<Option<Picked>> {
@@ -886,23 +912,17 @@ impl AniList {
         let (maybe, sure) = (size.hi.div_ceil(PICK_PAGE), size.lo.div_ceil(PICK_PAGE).max(1));
         let size_hint = (!exact).then_some(size);
         let mut page = 1 + ((run.draws.next() * maybe as f64) as usize).min(maybe - 1);
-        let (mut tried, mut extra, mut walked, mut blocked) = (Vec::new(), 0, false, false);
+        let (mut tried, mut walked, mut blocked) = (Vec::new(), false, false);
         loop {
-            let fetch = page != 1 || in_hand.is_none();
-            if fetch && !tried.is_empty() {
-                if extra == PICK_RETRIES {
-                    break;
-                }
-                extra += 1;
-            }
             tried.push(page);
             let items = match in_hand {
-                Some(first) if !fetch => first.to_vec(),
-                _ => self.pick_fetch(&run.vars, page).await?.0,
+                Some(first) if page == 1 => first.to_vec(),
+                _ => match self.pick_fetch(run, page).await? {
+                    Some((items, _)) if items.is_empty() && page_one.is_none() && tried.len() == 1 => return Ok(None),
+                    Some((items, _)) => items,
+                    None => Vec::new(), // out of requests
+                },
             };
-            if items.is_empty() && page_one.is_none() && tried.len() == 1 {
-                return Ok(None);
-            }
             let mut order: Vec<usize> = (0..items.len()).collect();
             for i in (1..order.len()).rev() {
                 order.swap(i, (run.draws.next() * (i + 1) as f64) as usize);
@@ -917,13 +937,15 @@ impl AniList {
                 blocked = true;
                 if !walked {
                     walked = true;
-                    if let Some(next) = self.next_up(node, prequel, run.filters, check).await {
+                    if let Some(next) = self.next_up(run, node, prequel).await {
                         return Ok(Some(Picked::found(&next, Some(node), size.lo, exact, size_hint)?));
                     }
                 }
             }
             let next = if items.is_empty() && in_hand.is_some() && !tried.contains(&1) {
                 Some(1)
+            } else if run.budget == 0 {
+                None
             } else {
                 let left: Vec<usize> = (1..=sure).filter(|p| !tried.contains(p)).collect();
                 (!left.is_empty()).then(|| left[(run.draws.next() * left.len() as f64) as usize])
@@ -936,33 +958,48 @@ impl AniList {
         Ok(Some(Picked::nothing(size.lo, exact, size_hint, blocked)))
     }
 
-    /// One whole page of the pool, aliased `page{n}`: its titles, and whether more follow.
-    async fn pick_fetch(&self, vars: &Value, page: usize) -> AlResult<(Vec<Value>, bool)> {
+    /// graphql() for a pick: None once the pick's budget is spent, and every
+    /// request it does send, 429 retries included, comes out of that budget.
+    /// `vars` defaults to the pick's filters.
+    async fn pick_request(&self, run: &mut PickRun<'_>, query: &str, vars: Option<Value>) -> AlResult<Option<Value>> {
+        if run.budget == 0 {
+            return Ok(None);
+        }
+        let vars = vars.unwrap_or_else(|| run.vars.clone());
+        self.graphql_within(query, Some(vars), None, 20, &mut run.budget).await.map(Some)
+    }
+
+    /// One whole page of the pool, aliased `page{n}`: its titles, and whether
+    /// more follow. None when the pick is out of requests.
+    async fn pick_fetch(&self, run: &mut PickRun<'_>, page: usize) -> AlResult<Option<(Vec<Value>, bool)>> {
         let q = format!(
             "query ({PICK_VARS}) {{ page{page}: Page(page: {page}, perPage: {PICK_PAGE}) {{ pageInfo {{ hasNextPage }}
                media({PICK_ARGS}) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }} }}"
         );
-        let data = self.graphql(&q, Some(vars.clone()), None, 20).await?;
-        let found = &data[format!("page{page}")];
-        Ok((arr(&found["media"]), found["pageInfo"]["hasNextPage"] == true))
+        Ok(self.pick_request(run, &q, None).await?.map(|data| {
+            let found = &data[format!("page{page}")];
+            (arr(&found["media"]), found["pageInfo"]["hasNextPage"] == true)
+        }))
     }
 
     /// FR-71: the earliest entry you haven't completed in `node`'s PREQUEL
-    /// chain, from its blocking `prequel` back, at most PICK_HOPS entries
-    /// (one request each). None when the chain runs longer, loops or can't be
-    /// read, or ends on an entry the filters rule out or already shown: the
-    /// next-up is only ever a bonus, so a failed lookup never fails the pick.
-    async fn next_up(&self, node: &Value, prequel: i64, filters: &PickFilters, check: &PickCheck) -> Option<Value> {
+    /// chain, from its blocking `prequel` back, one request per entry for as
+    /// long as the pick has requests left. None when the requests run out
+    /// first, the chain loops or can't be read, or it ends on an entry the
+    /// filters rule out or already shown: the next-up is only ever a bonus,
+    /// so a failed lookup never fails the pick.
+    async fn next_up(&self, run: &mut PickRun<'_>, node: &Value, prequel: i64) -> Option<Value> {
+        let (filters, check) = (run.filters, run.check?);
         let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }}");
         let mut visited: HashSet<i64> = node["id"].as_i64().into_iter().collect();
         let mut id = prequel;
-        for _ in 0..PICK_HOPS {
+        loop {
             if !visited.insert(id) {
                 return None;
             }
-            let entry = match self.graphql(&q, Some(json!({"id": id})), None, 15).await {
-                Ok(data) => data["Media"].clone(),
-                Err(AlError::NotFound(_)) => return None,
+            let entry = match self.pick_request(run, &q, Some(json!({"id": id}))).await {
+                Ok(Some(data)) => data["Media"].clone(),
+                Ok(None) | Err(AlError::NotFound(_)) => return None,
                 Err(e) => {
                     log::warn!("next-up lookup for anilist_id={id} failed: {e}");
                     return None;
@@ -976,7 +1013,6 @@ impl AniList {
                 None => return next_up_allowed(&entry, filters, &check.shown).then_some(entry),
             }
         }
-        None
     }
 }
 
@@ -1042,6 +1078,8 @@ pub struct Picked {
     pub next_up_for: Option<Value>,
     /// No result, and titles were tried that FR-71 held back.
     pub blocked: bool,
+    /// AniList requests this pick sent, 429 retries included (at most PICK_BUDGET).
+    pub requests: usize,
 }
 
 impl Picked {
@@ -1049,11 +1087,11 @@ impl Picked {
         let next_up_for = via.map(|v| {
             json!({"anilist_id": v["id"], "title": pick_title(&v["title"]), "title_english": str_of(&v["title"]["english"])})
         });
-        Ok(Picked { result: Some(map_pick(node)?), pool, pool_exact, size, next_up_for, blocked: false })
+        Ok(Picked { result: Some(map_pick(node)?), pool, pool_exact, size, next_up_for, blocked: false, requests: 0 })
     }
 
     fn nothing(pool: usize, pool_exact: bool, size: Option<PickSize>, blocked: bool) -> Self {
-        Picked { result: None, pool, pool_exact, size, next_up_for: None, blocked }
+        Picked { result: None, pool, pool_exact, size, next_up_for: None, blocked, requests: 0 }
     }
 }
 
@@ -1063,6 +1101,8 @@ struct PickRun<'a> {
     filters: &'a PickFilters,
     check: Option<&'a PickCheck>,
     draws: Draws,
+    /// Requests the pick may still send.
+    budget: usize,
 }
 
 /// Every random choice of one pick: the client's roll first, then a
@@ -1105,10 +1145,11 @@ pub const PICK_STATUSES: [&str; 3] = ["FINISHED", "RELEASING", "NOT_YET_RELEASED
 /// AniList won't page past its first 5000 matches (notes #18).
 pub const PICK_DEPTH: usize = 5000;
 const PICK_PAGE: usize = 50;
-/// FR-71: more pages one pick may fetch after the first has nothing usable,
-/// how far back a next-up walk may go, and the prequel formats that count.
-const PICK_RETRIES: usize = 3;
-const PICK_HOPS: usize = 5;
+/// AniList allows 30 requests a minute (notes #24): one pick never sends more
+/// than this many, 429 retries included. Sizing, extra pages and the FR-71
+/// walk back all share it.
+pub const PICK_BUDGET: usize = 4;
+/// FR-71: the prequel formats that count.
 const PREQUEL_FORMATS: [&str; 4] = ["TV", "TV_SHORT", "MOVIE", "ONA"];
 
 const PICK_VARS: &str = "$idIn: [Int], $idNotIn: [Int], $genreIn: [String], $genreNotIn: [String],
