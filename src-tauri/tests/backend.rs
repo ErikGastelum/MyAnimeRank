@@ -1330,6 +1330,175 @@ fn friend_list(anilist_user_id: i64, name: &str, entries: Vec<FriendEntry>) -> F
     FriendList { anilist_user_id, name: name.into(), avatar_url: None, entries }
 }
 
+/// A library title of yours; `overall` None leaves it unrated.
+fn mine(st: &Shared, anilist_id: i64, media_type: &str, status: &str, overall: Option<f64>, genres: &[&str]) {
+    let mut f = fields(anilist_id, media_type);
+    f.genres = genres.iter().map(|g| g.to_string()).collect();
+    let id = st.db.insert_or_update_media(&f, Some(status)).unwrap();
+    if let Some(v) = overall {
+        st.db.upsert_rating(id, &scores(v)).unwrap();
+    }
+}
+
+fn ids(v: &Value) -> Vec<i64> {
+    v.as_array().unwrap().iter().map(|x| x["anilist_id"].as_i64().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn comparison_matches_on_anilist_id_within_one_media_type() {
+    let st = offline_state().await;
+    login(&st);
+    // Shared and rated by both (anime 1-7): deltas +1, 0, -3, -0.5, +3, 0, +2.5.
+    for (id, status, score, genres) in [
+        (1, "completed", 9.0, &["Action"][..]), (2, "completed", 8.0, &["Action", "Drama"]), (3, "completed", 6.0, &["Drama"]),
+        (4, "completed", 7.0, &["Comedy"]), (5, "completed", 10.0, &["Action"]), (6, "completed", 5.0, &["Romance"]),
+        (7, "watching", 8.5, &["Action"]),
+        // Yours only, or only on their Planning list.
+        (20, "completed", 9.0, &["Other"]), (21, "completed", 8.5, &["Other"]),
+        (22, "completed", 7.5, &["Other"]), // under 8.0
+        (23, "dropped", 9.0, &["Other"]),   // not completed
+        (24, "rewatching", 8.0, &["Other"]), // they dropped it: on their list, not Planning
+    ] {
+        mine(&st, id, "anime", status, Some(score), genres);
+    }
+    mine(&st, 30, "anime", "planning", None, &["Other"]);
+    mine(&st, 31, "anime", "dropped", None, &["Other"]);
+    mine(&st, 40, "manga", "completed", Some(9.0), &["Action"]);
+    let mut entries: Vec<FriendEntry> = [(1, "completed", 8.0, &["Action"][..]), (2, "completed", 8.0, &["Action", "Drama"]), (3, "completed", 9.0, &["Drama"]),
+        (4, "completed", 7.5, &["Comedy"]), (5, "completed", 7.0, &["Action"]), (6, "completed", 5.0, &["Romance"]), (7, "watching", 6.0, &["Action"])]
+        .into_iter()
+        .map(|(id, status, score, genres)| their(id, "anime", status, Some(score), genres))
+        .collect();
+    entries.extend([
+        their(21, "anime", "planning", None, &["Other"]),
+        their(24, "anime", "dropped", None, &["Other"]),
+        their(30, "anime", "completed", Some(9.0), &["Other"]),  // only on your Planning list
+        their(31, "anime", "completed", Some(9.5), &["Other"]),  // you dropped it
+        their(32, "anime", "completed", Some(8.0), &["Other"]),
+        their(33, "anime", "rewatching", Some(10.0), &["Other", "Mecha"]),
+        their(34, "anime", "completed", Some(7.5), &["Other"]),  // under 8.0
+        their(35, "anime", "dropped", Some(9.0), &["Other"]),    // not completed
+        their(36, "anime", "completed", None, &["Other"]),       // unscored
+        their(41, "manga", "completed", Some(9.0), &["Horror"]), // the other media type
+    ]);
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let (s, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!((&b["media_type"], &b["friend"]["name"], &b["friend"]["anime_count"], &b["friend"]["manga_count"]), (&json!("anime"), &json!("Pal"), &json!(16), &json!(1)));
+    assert_eq!(b["overlap"], 7);
+    // Mean gap 10/7 -> 100 * (1 - (10/7) / 9) = 84.1 -> 84.
+    assert_eq!(b["taste_match"], json!(84));
+    assert!((b["skew"].as_f64().unwrap() - 3.0 / 7.0).abs() < 1e-9, "{}", b["skew"]);
+    // Gap >= 1.0, largest first; the tie at 3.0 goes to the higher average (5: 8.5 over 3: 7.5).
+    assert_eq!(ids(&b["disagreements"]), vec![5, 3, 7, 1]);
+    // The rest, smallest gap first; the tie at 0 goes to the higher average.
+    assert_eq!(ids(&b["agreements"]), vec![2, 6, 4]);
+    assert_eq!(ids(&b["shared"]), vec![5, 1, 7, 2, 4, 3, 6]);
+    let row = &b["shared"][0];
+    for key in ["anilist_id", "media_id", "media_type", "title", "title_english", "cover_url", "your_score", "their_score", "delta"] {
+        assert!(row.get(key).is_some(), "shared row missing {key}");
+    }
+    assert_eq!((&row["your_score"], &row["their_score"], &row["delta"]), (&json!(10.0), &json!(7.0), &json!(3.0)));
+    assert_eq!(b["disagreements"][1]["delta"], -3.0);
+
+    assert_eq!(ids(&b["they_completed"]), vec![33, 30, 32]);
+    assert_eq!((&b["they_completed"][1]["your_status"], &b["they_completed"][0]["your_status"]), (&json!("planning"), &Value::Null));
+    assert_eq!(b["they_completed"][0]["their_score"], 10.0);
+    assert_eq!(ids(&b["you_completed"]), vec![20, 21]);
+    assert_eq!((&b["you_completed"][1]["their_status"], &b["you_completed"][0]["their_status"]), (&json!("planning"), &Value::Null));
+    assert!(b["you_completed"][0]["media_id"].as_i64().is_some());
+
+    let genres: Vec<(String, Value, i64, Value, i64)> = b["genres"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["genre"].as_str().unwrap().into(), g["your_avg"].clone(), g["your_count"].as_i64().unwrap(), g["their_avg"].clone(), g["their_count"].as_i64().unwrap()))
+        .collect();
+    let close = |v: &Value, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-9;
+    assert_eq!(genres.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(), vec!["Other", "Action", "Drama", "Comedy", "Romance", "Mecha"]);
+    assert!(close(&genres[0].1, 8.4) && genres[0].2 == 5 && close(&genres[0].3, 53.0 / 6.0) && genres[0].4 == 6, "{:?}", genres[0]);
+    assert!(close(&genres[1].1, 8.875) && genres[1].2 == 4 && close(&genres[1].3, 7.25) && genres[1].4 == 4, "{:?}", genres[1]);
+    assert_eq!((&genres[5].1, genres[5].2, genres[5].4), (&Value::Null, 0, 1)); // only they have Mecha
+
+    // Manga is its own comparison: one manga each, no overlap.
+    let (_, m) = call(&st, "GET", "/friends/42/compare?media_type=manga", None).await;
+    assert_eq!((&m["overlap"], &m["taste_match"], &m["skew"]), (&json!(0), &Value::Null, &Value::Null));
+    assert_eq!((ids(&m["they_completed"]), ids(&m["you_completed"])), (vec![41], vec![40]));
+
+    assert_eq!(call(&st, "GET", "/friends/42/compare?media_type=novel", None).await.0, 400);
+    assert_eq!(call(&st, "GET", "/friends/42/compare", None).await.0, 422);
+    assert_eq!(call(&st, "GET", "/friends/7/compare?media_type=anime", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn taste_match_needs_five_shared_titles_and_your_side_is_your_local_overall() {
+    let st = offline_state().await;
+    login(&st);
+    // Manga overall is the unweighted 4-criterion average, half-to-even: 7.25 -> 7.2.
+    let id = st.db.insert_or_update_media(&fields(1, "manga"), Some("completed")).unwrap();
+    st.db.upsert_rating(id, &Scores { story: 7.0, characters: 7.0, animation: 7.5, audio: 0.0, enjoyment: 7.5 }).unwrap();
+    for anilist_id in 2..=4 {
+        mine(&st, anilist_id, "manga", "completed", Some(6.0), &["Drama"]);
+    }
+    let entries = (1..=4).map(|anilist_id| their(anilist_id, "manga", "completed", Some(6.0), &["Drama"])).collect();
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=manga", None).await;
+    assert_eq!((&b["overlap"], &b["taste_match"]), (&json!(4), &Value::Null));
+    assert!((b["skew"].as_f64().unwrap() - 0.3).abs() < 1e-9); // (1.2 + 0 + 0 + 0) / 4
+    assert_eq!((&b["shared"][0]["your_score"], &b["shared"][0]["delta"]), (&json!(7.2), &json!(1.2)));
+
+    mine(&st, 5, "manga", "completed", Some(6.0), &["Drama"]);
+    let entries = (1..=5).map(|anilist_id| their(anilist_id, "manga", "completed", Some(6.0), &["Drama"])).collect();
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=manga", None).await;
+    // Mean gap 1.2 / 5 = 0.24 -> 100 * (1 - 0.24 / 9) = 97.3 -> 97.
+    assert_eq!((&b["overlap"], &b["taste_match"]), (&json!(5), &json!(97)));
+}
+
+#[tokio::test]
+async fn friend_routes_return_prd_shapes_and_remove_is_local_only() {
+    let fake = fake_anilist(|_, _| (500, json!({}), None)).await;
+    let st = state_with(&fake);
+    login(&st);
+    st.db.replace_friend_list(
+        &friend_list(42, "Pal", vec![their(3, "anime", "completed", Some(7.5), &[]), their(4, "anime", "planning", None, &[])]),
+        "2026-01-01T00:00:00+00:00",
+    ).unwrap();
+    st.db.replace_friend_list(&friend_list(43, "amy", vec![their(3, "anime", "watching", Some(9.0), &[])]), "2026-01-02T00:00:00+00:00").unwrap();
+
+    let (s, b) = call(&st, "GET", "/friends", None).await;
+    assert_eq!(s, 200);
+    // Alphabetical, ignoring case.
+    assert_eq!(
+        b["friends"],
+        json!([
+            {"anilist_user_id": 43, "name": "amy", "avatar_url": null, "fetched_at": "2026-01-02T00:00:00+00:00", "anime_count": 1, "manga_count": 0},
+            {"anilist_user_id": 42, "name": "Pal", "avatar_url": null, "fetched_at": "2026-01-01T00:00:00+00:00", "anime_count": 2, "manga_count": 0},
+        ])
+    );
+
+    // The detail view's friend scores: scored entries only, highest first.
+    // Titles not in your library work too.
+    let (s, b) = call(&st, "GET", "/media/by-anilist/3/friend-scores", None).await;
+    assert_eq!(s, 200);
+    assert_eq!(
+        b,
+        json!({"scores": [
+            {"anilist_user_id": 43, "name": "amy", "avatar_url": null, "status": "watching", "score": 9.0},
+            {"anilist_user_id": 42, "name": "Pal", "avatar_url": null, "status": "completed", "score": 7.5},
+        ]})
+    );
+    assert_eq!(call(&st, "GET", "/media/by-anilist/4/friend-scores", None).await, (200, json!({"scores": []})));
+
+    assert_eq!(call(&st, "DELETE", "/friends/42", None).await, (200, json!({"deleted": true})));
+    assert_eq!(call(&st, "DELETE", "/friends/42", None).await.0, 404);
+    let (_, b) = call(&st, "GET", "/media/by-anilist/3/friend-scores", None).await;
+    assert_eq!(b["scores"].as_array().unwrap().len(), 1);
+    assert!(fake.calls().is_empty()); // none of this calls AniList
+}
+
 /// Every row of a table, as text, in rowid order.
 fn dump(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
     let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();

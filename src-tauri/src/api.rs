@@ -219,6 +219,8 @@ pub fn router(st: Shared) -> Router {
         .route("/friends", get(friends_list).post(friends_add))
         .route("/friends/{id}", delete(friends_delete))
         .route("/friends/{id}/refresh", post(friends_refresh))
+        .route("/friends/{id}/compare", get(friends_compare))
+        .route("/media/by-anilist/{id}/friend-scores", get(media_friend_scores))
         // FR-47: nothing below is usable without a stored token.
         .route_layer(middleware::from_fn_with_state(st.clone(), require_auth));
 
@@ -641,4 +643,15 @@ async fn friends_delete(State(st): State<Shared>, Id(id): Id) -> ApiResult {
         return Err(ApiError::new(404, "friend not found"));
     }
     ok(json!({"deleted": true}))
+}
+
+async fn friends_compare(State(st): State<Shared>, Id(id): Id, q: Params) -> ApiResult {
+    let media_type = required(&q, "media_type")?;
+    check_media_type(Some(media_type), "media_type")?;
+    found(st.db.compare_with_friend(id, media_type)?, "friend")
+}
+
+/// FR-78: works whether or not the title is in the library.
+async fn media_friend_scores(State(st): State<Shared>, Id(anilist_id): Id) -> ApiResult {
+    ok(json!({"scores": st.db.friend_scores(anilist_id)?}))
 }
