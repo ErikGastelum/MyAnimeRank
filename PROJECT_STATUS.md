@@ -25,7 +25,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (76), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (81), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -101,7 +101,7 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
-- **Friend Comparison (M10):** 24 more tests (75 in `tests/backend.rs`): the
+- **Friend Comparison (M10):** 30 more tests (80 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, the pre-FR-79 `friend` table migrated without a value
   changing, cascade on removal, no token and no mutation on friend fetches,
@@ -112,13 +112,22 @@ database.
   list queue (one friend per turn, pauses for other calls and after a 429, a
   failing friend doesn't block it, private friends wait a week, both waits
   survive a restart), a
-  comparison fetching first, sync after login and Pull, and every PRD §7
-  shape. The UI was driven in headless Chromium against the real router.
+  comparison fetching first, sync after login and Pull, the comparison's
+  rules (always the 5 largest gaps, "rarely disagree", completed lists tied
+  by popularity, rows carrying your criteria and whether you rated in the
+  app), Pull recording popularity, the `rating.source` migration leaving
+  every row intact, and every PRD §7 shape. The UI was driven in headless
+  Chromium against the real router: before/after screenshots of each
+  comparison change against a fake AniList, the bottom nav on every page at
+  900 and 1440 px, Back keeping scroll and open rows, and "Rate it now"
+  saving through the stepper.
   Checked against the live AniList API (logged out) on temp DBs: public,
   private, unknown and empty-list users, every score format, lists of 11,905
   and 19,944 entries, add/compare/refresh/remove, two requests per fetch, a
   56-follow sync, mutual only, the queue's pace, a comparison jumping the
-  queue, and the migration on a database the earlier build wrote. Findings in
+  queue, the migration on a database the earlier build wrote, and the
+  comparison page with real data (no requests while expanding rows or
+  showing whole lists). Findings in
   `docs/anilist-api-notes.md` #17 and #18.
 
 ---
@@ -190,14 +199,21 @@ Roughly by priority:
     pending conflicts instead of the whole list. Discover fires its 6 shelves
     in parallel per media type (12 with the toggle), and the push retry loop
     retries every queued title each 30 s without stopping at a 429, so a long
-    queue can keep the account rate-limited.
+    queue can keep the account rate-limited. Opening a title's detail view
+    fetches its community data twice (a second render starts another fetch
+    before the first returns), on `main` too.
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
-    detail page); adding a private user *by name* (only by id was possible);
-    a real 429's `Retry-After`; whether AniList lists private users in a
+    detail page, expanding rows, "Rate it now", the bottom nav highlight),
+    and WebKit/WebKitGTK rendering of the two-card grid; adding a private
+    user *by name* (only by id was possible); a real 429's `Retry-After`; whether AniList lists private users in a
     following list at all.
 13. **Mutual only with a real token is unverified:** it reads your own
     following list with your token for `isFollower` (`docs/anilist-api-notes.md`
     #18), tested only against the fake server. If AniList doesn't confirm the
     viewer, it falls back to reading every followers page, which a popular
     account can't afford in one minute.
+14. **`rating.source` backfill can misfile old ratings:** a rating made in the
+    app before the column existed, with every criterion equal (all 8s), is
+    classed as from AniList, so the comparison offers "Rate it now" for it
+    instead of showing its criteria until it's rated again (PRD §5).
