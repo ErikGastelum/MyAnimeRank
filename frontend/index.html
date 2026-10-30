@@ -1145,7 +1145,9 @@ H.removeFriend = async (el)=>{
   _friendScores={};render();
 };
 function openCompare(friendId,mediaType){
-  state.compareReturn=state.view;
+  // From a title opened out of the comparison, keep the comparison's own Back
+  // target: otherwise Back would bounce between the two pages forever.
+  if(!(state.view==='detail'&&state.detailReturn==='compare'))state.compareReturn=state.view;
   state.compare={friendId,mediaType:mediaType||state.mediaType};
   state.compareSort={key:'your_score',dir:-1};
   if(state.friendError&&state.friendError.id!==friendId)state.friendError=null;
