@@ -1174,42 +1174,60 @@ fn friend_media(anilist_id: i64, al_type: &str) -> Value {
     })
 }
 
-fn friend_node(anilist_id: i64, al_type: &str, status: &str, score: f64) -> Value {
+/// `score` as AniList sends it: a whole converted score is a JSON integer
+/// (`9`, `0`), not `9.0`.
+fn friend_node(anilist_id: i64, al_type: &str, status: &str, score: Value) -> Value {
     json!({"status": status, "score": score, "media": friend_media(anilist_id, al_type)})
 }
 
-/// AniList as seen for friends: `User` by name or id, then both lists in one
-/// aliased query. "ghost" doesn't exist; "locked" is private at the user
-/// lookup; "hidden" (id 43) exists but its lists are private; "tester" is
-/// the logged-in account (id 1); anything else is Pal (id 42). The first
-/// request gets a 429, and `private_lists` makes Pal's lists private too.
+/// AniList as seen for friends, answering with the shapes recorded from the
+/// live API: `User` by name or id, then both lists in one aliased query. The
+/// `User` lookup says "Not Found." for a private user exactly as for a
+/// missing one; only `MediaListCollection` tells them apart ("Private User"
+/// vs "User not found"). "ghost" doesn't exist; "locked" is private;
+/// "hidden" (id 43) is found but its lists come back private; "empty" (id 44)
+/// is public with nothing listed; "tester" is the logged-in account (id 1);
+/// anything else is Pal (id 42). The first request gets a 429, and
+/// `private_lists` makes Pal private.
 async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fake {
     let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     fake_anilist(move |q, v| {
         if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return (429, json!({}), Some("0.01"));
         }
-        let private = || (404, json!({"data": null, "errors": [{"message": "Private User", "status": 404}]}), None);
+        let pal_private = private_lists.load(std::sync::atomic::Ordering::SeqCst) && (v["id"] == 42 || v["userId"] == 42);
+        let private = v["name"] == "locked" || pal_private;
+        let error = |message: &str, data: Value| (404, json!({"data": data, "errors": [{"message": message, "status": 404}]}), None);
         if q.contains("User(") {
+            if private || v["name"] == "ghost" {
+                return error("Not Found.", json!({"User": null}));
+            }
             let user = |id: i64, name: &str| (200, json!({"data": {"User": {"id": id, "name": name, "avatar": {"large": "https://img/u.png"}}}}), None);
             return match v["name"].as_str() {
-                Some("ghost") => (404, json!({"data": {"User": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None),
-                Some("locked") => private(),
                 Some("hidden") => user(43, "hidden"),
+                Some("empty") => user(44, "empty"),
                 Some("tester") => user(1, "tester"),
                 _ => user(42, "Pal"),
             };
         }
-        if v["userId"] == 43 || private_lists.load(std::sync::atomic::Ordering::SeqCst) {
-            return private();
+        if !q.contains("anime:") {
+            return error(if private { "Private User" } else { "User not found" }, json!({"MediaListCollection": null}));
+        }
+        if private || v["userId"] == 43 {
+            // One error per aliased list.
+            let e = json!({"message": "Private User", "status": 404});
+            return (404, json!({"data": {"anime": null, "manga": null}, "errors": [e, e]}), None);
+        }
+        if v["userId"] == 44 {
+            return (200, json!({"data": {"anime": {"lists": []}, "manga": {"lists": []}}}), None);
         }
         let anime = json!({"lists": [
-            {"entries": [friend_node(1, "ANIME", "CURRENT", 8.5), friend_node(2, "ANIME", "REPEATING", 0.0), friend_node(3, "ANIME", "PLANNING", 0.0)]},
+            {"entries": [friend_node(1, "ANIME", "CURRENT", json!(8.5)), friend_node(2, "ANIME", "REPEATING", json!(0)), friend_node(3, "ANIME", "PLANNING", json!(0))]},
             // A custom list repeats an entry that's already in a status list.
-            {"entries": [friend_node(1, "ANIME", "CURRENT", 8.5)]},
+            {"entries": [friend_node(1, "ANIME", "CURRENT", json!(8.5))]},
         ]});
         let manga = json!({"lists": [
-            {"entries": [friend_node(10, "MANGA", "CURRENT", 0.4), friend_node(11, "MANGA", "REPEATING", 10.0)]},
+            {"entries": [friend_node(10, "MANGA", "CURRENT", json!(0.4)), friend_node(11, "MANGA", "REPEATING", json!(10))]},
         ]});
         (200, json!({"data": {"anime": anime, "manga": manga}}), None)
     })
@@ -1277,17 +1295,22 @@ async fn unknown_users_private_lists_and_your_own_account_are_refused_and_store_
     let fake = friend_anilist(Arc::default()).await;
     let st = state_with(&fake);
     login(&st);
+    // (username, status, detail, AniList requests)
     let cases = [
-        ("ghost", 404, "No AniList user named ghost"),
-        ("hidden", 403, "hidden's list is private on AniList"), // exists, lists private
-        ("locked", 403, "locked's list is private on AniList"), // private at the lookup
-        ("Tester", 400, "That's your own AniList account"),
-        ("", 422, "username is required"),
+        ("ghost", 404, "No AniList user named ghost", 2),
+        ("hidden", 403, "hidden's list is private on AniList", 2), // found, lists private
+        ("locked", 403, "locked's list is private on AniList", 2), // the lookup says Not Found.
+        ("Tester", 400, "That's your own AniList account", 0),
+        ("", 422, "username is required", 0),
     ];
-    for (username, status, detail) in cases {
+    let mut before = 1; // the first request is the fake's 429
+    for (username, status, detail, requests) in cases {
         let (s, b) = call(&st, "POST", "/friends", Some(json!({"username": username}))).await;
         assert_eq!((s, b["detail"].as_str()), (status, Some(detail)), "{username}");
+        assert_eq!(fake.calls().len() - before, requests, "{username}");
+        before = fake.calls().len();
     }
+    assert!(fake.auths().iter().all(Option::is_none), "{:?}", fake.auths());
     assert_eq!(call(&st, "GET", "/friends", None).await, (200, json!({"friends": []})));
     assert!(st.db.friend_entries(43, "anime").unwrap().is_empty());
 
@@ -1295,6 +1318,18 @@ async fn unknown_users_private_lists_and_your_own_account_are_refused_and_store_
     login(&offline);
     assert_eq!(call(&offline, "POST", "/friends", Some(json!({"username": "pal"}))).await.0, 502);
     assert_eq!(call(&offline, "GET", "/friends", None).await, (200, json!({"friends": []})));
+}
+
+#[tokio::test]
+async fn a_public_user_with_an_empty_list_is_a_friend_not_a_private_one() {
+    let fake = friend_anilist(Arc::default()).await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, b) = call(&st, "POST", "/friends", Some(json!({"username": "empty"}))).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!((&b["anilist_user_id"], &b["anime_count"], &b["manga_count"]), (&json!(44), &json!(0), &json!(0)));
+    let (s, c) = call(&st, "GET", "/friends/44/compare?media_type=anime", None).await;
+    assert_eq!((s, &c["overlap"], &c["taste_match"], &c["skew"]), (200, &json!(0), &Value::Null, &Value::Null));
 }
 
 #[tokio::test]
@@ -1306,8 +1341,12 @@ async fn a_refresh_that_finds_the_list_private_keeps_the_stored_copy() {
     let (_, added) = call(&st, "POST", "/friends", Some(json!({"username": "pal"}))).await;
     private_lists.store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let before = fake.calls().len();
     let (s, b) = call(&st, "POST", "/friends/42/refresh", None).await;
     assert_eq!((s, b["detail"].as_str()), (403, Some("Pal's list is private on AniList")));
+    // The lookup by id, then the list query that says why it found no one.
+    let calls = fake.calls();
+    assert_eq!((calls.len() - before, &calls[before].1, &calls[before + 1].1), (2, &json!({"id": 42}), &json!({"id": 42})));
     let (_, friends) = call(&st, "GET", "/friends", None).await;
     assert_eq!(friends["friends"][0], added); // same entries, same fetched_at
     assert_eq!(st.db.friend_entries(42, "anime").unwrap().len(), 3);
