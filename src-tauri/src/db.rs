@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS rating (
     audio REAL NOT NULL DEFAULT 0.0,
     enjoyment REAL NOT NULL,
     overall REAL NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','anilist'))
 );
 
 CREATE TABLE IF NOT EXISTS anilist_auth (
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS friend_entry (
     cover_url TEXT,
     genres TEXT,
     popularity INTEGER,
+    progress INTEGER,
     PRIMARY KEY (friend_id, anilist_id)
 );
 ";
@@ -176,6 +178,9 @@ pub struct Rating {
     pub enjoyment: f64,
     pub overall: f64,
     pub updated_at: String,
+    /// "app" (rated in the stepper) or "anilist" (seeded by Pull); FR-82.
+    #[serde(skip)]
+    pub source: String,
 }
 
 impl Rating {
@@ -232,6 +237,8 @@ pub struct FriendEntry {
     pub genres: Vec<String>,
     /// AniList popularity, FR-77's tie-break.
     pub popularity: Option<i64>,
+    /// Their episode/chapter progress, FR-82.
+    pub progress: Option<i64>,
 }
 
 /// A friend's anime and manga lists, as fetched from AniList.
@@ -416,6 +423,7 @@ fn row_to_rating(row: &Row) -> DbResult<Rating> {
         enjoyment: row.get("enjoyment")?,
         overall: row.get("overall")?,
         updated_at: row.get("updated_at")?,
+        source: row.get("source")?,
     })
 }
 
@@ -442,6 +450,7 @@ impl Db {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate_existing_media_columns(&conn)?;
+        migrate_rating_source(&conn)?;
         migrate_friend_table(&conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
@@ -550,11 +559,11 @@ impl Db {
         let audio = if media_type == "anime" { scores.audio } else { 0.0 };
         let now = now_iso();
         tx.execute(
-            "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at)
-             VALUES (:media_id, :story, :characters, :animation, :audio, :enjoyment, :overall, :updated_at)
+            "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at, source)
+             VALUES (:media_id, :story, :characters, :animation, :audio, :enjoyment, :overall, :updated_at, 'app')
              ON CONFLICT(media_id) DO UPDATE SET
                 story=:story, characters=:characters, animation=:animation,
-                audio=:audio, enjoyment=:enjoyment, overall=:overall, updated_at=:updated_at",
+                audio=:audio, enjoyment=:enjoyment, overall=:overall, updated_at=:updated_at, source='app'",
             named_params! {
                 ":media_id": media_id, ":story": scores.story, ":characters": scores.characters,
                 ":animation": scores.animation, ":audio": audio, ":enjoyment": scores.enjoyment,
@@ -843,9 +852,10 @@ impl Db {
                     tx.query_row("SELECT media_type FROM media WHERE id = ?", [media_id], |r| r.get(0))?;
                 let seed = snap_to_half_step(score);
                 let audio = if media_type == "anime" { seed } else { 0.0 };
+                // FR-82: no real criteria behind these, so marked as AniList's.
                 tx.execute(
-                    "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at, source)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'anilist')",
                     params![media_id, seed, seed, seed, audio, seed, score, ts],
                 )?;
             }
@@ -1122,7 +1132,7 @@ impl Db {
     pub fn friend_entries(&self, anilist_user_id: i64, media_type: &str) -> DbResult<Vec<FriendEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity
+            "SELECT anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity, progress
              FROM friend_entry WHERE friend_id = ? AND media_type = ? ORDER BY rowid",
         )?;
         let entries = stmt
@@ -1137,6 +1147,7 @@ impl Db {
                     cover_url: r.get(6)?,
                     genres: json_list(r.get(7)?),
                     popularity: r.get(8)?,
+                    progress: r.get(9)?,
                 })
             })?
             .collect::<DbResult<Vec<_>>>()?;
@@ -1247,10 +1258,34 @@ fn migrate_friend_table(conn: &Connection) -> DbResult<()> {
         log::info!("migrated: added friend.retry_at");
     }
     let entry_has = |col: &str| conn.query_row("SELECT COUNT(*) FROM pragma_table_info('friend_entry') WHERE name = ?", [col], |r| r.get::<_, bool>(0));
-    if !entry_has("popularity")? {
-        conn.execute_batch("ALTER TABLE friend_entry ADD COLUMN popularity INTEGER")?;
-        log::info!("migrated: added friend_entry.popularity");
+    for col in ["popularity", "progress"] {
+        if !entry_has(col)? {
+            conn.execute_batch(&format!("ALTER TABLE friend_entry ADD COLUMN {col} INTEGER"))?;
+            log::info!("migrated: added friend_entry.{col}");
+        }
     }
+    Ok(())
+}
+
+/// PRD §5: `rating.source` is added, and existing ratings are classified once
+/// by rule: all active criteria equal (how Pull seeds them) means 'anilist',
+/// anything else 'app'. A NULL animation never compares equal, so 'app'. Only
+/// the new column is written.
+fn migrate_rating_source(conn: &Connection) -> DbResult<()> {
+    let has: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('rating') WHERE name = 'source'", [], |r| r.get(0))?;
+    if has {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE rating ADD COLUMN source TEXT NOT NULL DEFAULT 'app' CHECK (source IN ('app','anilist'));
+         UPDATE rating SET source = 'anilist' WHERE media_id IN (
+             SELECT r.media_id FROM rating r JOIN media m ON m.id = r.media_id
+             WHERE r.story = r.characters AND r.characters = r.animation AND r.animation = r.enjoyment
+               AND (m.media_type = 'manga' OR r.audio = r.story));
+         COMMIT;",
+    )?;
+    log::info!("migrated: added rating.source (uniform criteria classified as 'anilist')");
     Ok(())
 }
 
@@ -1389,14 +1424,14 @@ fn row_to_friend(r: &Row) -> DbResult<Friend> {
 fn write_friend_entries(tx: &rusqlite::Transaction, list: &FriendList) -> DbResult<()> {
     tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [list.anilist_user_id])?;
     let mut stmt = tx.prepare(
-        "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity, progress)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for e in &list.entries {
         let genres = serde_json::to_string(&e.genres).unwrap_or_else(|_| "[]".into());
         stmt.execute(params![
             list.anilist_user_id, e.anilist_id, e.media_type, e.status, e.score,
-            e.title, e.title_english, e.cover_url, genres, e.popularity,
+            e.title, e.title_english, e.cover_url, genres, e.popularity, e.progress,
         ])?;
     }
     Ok(())
@@ -1442,6 +1477,22 @@ impl SharedTitle {
     }
 }
 
+/// FR-82: whether your rating has real category scores behind it.
+fn rated_in_app(m: &Media) -> bool {
+    m.rating.as_ref().is_some_and(|r| r.source == "app")
+}
+
+/// FR-82: your criteria under the rating table's names (manga's Art is
+/// `animation`, and manga has no audio); None for a rating seeded from AniList.
+fn your_criteria(m: &Media) -> Value {
+    let Some(r) = m.rating.as_ref().filter(|_| rated_in_app(m)) else { return Value::Null };
+    let mut c = json!({"story": r.story, "characters": r.characters, "animation": r.animation, "enjoyment": r.enjoyment});
+    if m.fields.media_type == "anime" {
+        c["audio"] = json!(r.audio);
+    }
+    c
+}
+
 /// FR-74 through FR-78, pure logic. `yours` and `theirs` are already one
 /// media type: titles match on anilist_id only, never across anime/manga.
 pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
@@ -1465,6 +1516,8 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
                     "title": m.fields.title, "title_english": m.fields.title_english,
                     "cover_url": m.fields.cover_url.as_ref().or(t.cover_url.as_ref()),
                     "your_score": mine, "their_score": other, "delta": round1(mine - other),
+                    "rated_in_app": rated_in_app(m), "your_criteria": your_criteria(m),
+                    "their_status": t.status, "their_progress": t.progress,
                 }),
             })
         })

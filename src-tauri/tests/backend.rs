@@ -1193,7 +1193,7 @@ fn friend_media(anilist_id: i64, al_type: &str) -> Value {
 /// `score` as AniList sends it: a whole converted score is a JSON integer
 /// (`9`, `0`), not `9.0`.
 fn friend_node(anilist_id: i64, al_type: &str, status: &str, score: Value) -> Value {
-    json!({"status": status, "score": score, "media": friend_media(anilist_id, al_type)})
+    json!({"status": status, "score": score, "progress": anilist_id + 2, "media": friend_media(anilist_id, al_type)})
 }
 
 /// AniList's `score(format:)` for an entry stored as POINT_100 `p`, as
@@ -1475,8 +1475,8 @@ async fn adding_a_friend_reads_their_public_lists_without_the_token_and_writes_n
     assert_eq!(manga, vec![(10, "manga".into(), "reading".into(), Some(1.0)), (11, "manga".into(), "rereading".into(), Some(10.0))]);
     let first = st.db.friend_entries(42, "anime").unwrap().remove(0);
     assert_eq!(
-        (first.title.as_deref(), first.title_english.as_deref(), first.cover_url.as_deref(), first.genres, first.popularity),
-        (Some("Title 1"), Some("English 1"), Some("https://img/1.jpg"), vec!["Action".to_string()], Some(100))
+        (first.title.as_deref(), first.title_english.as_deref(), first.cover_url.as_deref(), first.genres, first.popularity, first.progress),
+        (Some("Title 1"), Some("English 1"), Some("https://img/1.jpg"), vec!["Action".to_string()], Some(100), Some(3))
     );
     assert!(calls[2].0.contains("popularity")); // in the same request, not a new one
 
@@ -1566,6 +1566,7 @@ fn their(anilist_id: i64, media_type: &str, status: &str, score: Option<f64>, ge
         cover_url: Some(format!("https://img/{anilist_id}.jpg")),
         genres: genres.iter().map(|g| g.to_string()).collect(),
         popularity: None,
+        progress: None,
     }
 }
 
@@ -1674,6 +1675,105 @@ async fn comparison_matches_on_anilist_id_within_one_media_type() {
     assert_eq!(call(&st, "GET", "/friends/42/compare?media_type=novel", None).await.0, 400);
     assert_eq!(call(&st, "GET", "/friends/42/compare", None).await.0, 422);
     assert_eq!(call(&st, "GET", "/friends/7/compare?media_type=anime", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn compare_rows_carry_your_criteria_and_whether_you_rated_in_the_app() {
+    let st = offline_state().await;
+    login(&st);
+    // 1: rated here; 2: seeded by a Pull from AniList's 8.0; 3: a manga rated here.
+    let one = st.db.insert_or_update_media(&fields(1, "anime"), Some("completed")).unwrap();
+    st.db.upsert_rating(one, &Scores { story: 9.0, characters: 8.0, animation: 7.0, audio: 6.0, enjoyment: 10.0 }).unwrap();
+    st.db.import_remote_entry(&fields(2, "anime"), 1002, "completed", 12, 0, Some(8.0), "2026-01-01T00:00:00.000000+00:00").unwrap();
+    let three = st.db.insert_or_update_media(&fields(3, "manga"), Some("reading")).unwrap();
+    st.db.upsert_rating(three, &Scores { story: 6.0, characters: 7.0, animation: 9.0, audio: 0.0, enjoyment: 8.0 }).unwrap();
+    let mut entries = vec![their(1, "anime", "watching", Some(7.0), &["Action"]), their(2, "anime", "completed", Some(8.0), &["Action"]), their(3, "manga", "reading", Some(7.5), &["Action"])];
+    entries[0].progress = Some(5);
+    entries[2].progress = Some(120);
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    let row = |id: i64| b["shared"].as_array().unwrap().iter().find(|r| r["anilist_id"] == id).unwrap().clone();
+    // PRD §7 Shared, with FR-82's fields.
+    let keys: Vec<String> = row(1).as_object().unwrap().keys().cloned().collect();
+    for key in ["anilist_id", "media_id", "media_type", "title", "title_english", "cover_url", "your_score", "their_score", "delta",
+        "rated_in_app", "your_criteria", "their_status", "their_progress"] {
+        assert!(keys.contains(&key.to_string()), "shared row missing {key}: {keys:?}");
+    }
+    assert_eq!(
+        (&row(1)["rated_in_app"], &row(1)["your_criteria"], &row(1)["their_status"], &row(1)["their_progress"]),
+        (&json!(true), &json!({"story": 9.0, "characters": 8.0, "animation": 7.0, "audio": 6.0, "enjoyment": 10.0}), &json!("watching"), &json!(5))
+    );
+    // The Pull-seeded rating has no real criteria to show.
+    assert_eq!((&row(2)["rated_in_app"], &row(2)["your_criteria"], &row(2)["their_progress"]), (&json!(false), &Value::Null, &Value::Null));
+    // Disagreements and agreements carry the same fields.
+    assert!(b["disagreements"].as_array().unwrap().iter().chain(b["agreements"].as_array().unwrap()).all(|r| r.get("rated_in_app").is_some()));
+
+    // Manga: Art is the animation column, and there's no Audio.
+    let (_, m) = call(&st, "GET", "/friends/42/compare?media_type=manga", None).await;
+    assert_eq!(
+        (&m["shared"][0]["your_criteria"], &m["shared"][0]["their_progress"]),
+        (&json!({"story": 6.0, "characters": 7.0, "animation": 9.0, "enjoyment": 8.0}), &json!(120))
+    );
+
+    // A Pull that only updates the overall keeps a rating made here; rating
+    // the seeded title here makes it real.
+    st.db.apply_remote_entry(one, "completed", 12, 0, Some(6.0), "2026-02-01T00:00:00.000000+00:00").unwrap();
+    let two = st.db.get_media_by_anilist_id(2).unwrap().unwrap().id;
+    st.db.upsert_rating(two, &Scores { story: 5.0, characters: 6.0, animation: 7.0, audio: 8.0, enjoyment: 9.0 }).unwrap();
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    let flags: Vec<(i64, bool)> = b["shared"].as_array().unwrap().iter().map(|r| (r["anilist_id"].as_i64().unwrap(), r["rated_in_app"].as_bool().unwrap())).collect();
+    assert!(flags.contains(&(1, true)) && flags.contains(&(2, true)), "{flags:?}");
+}
+
+#[test]
+fn a_library_from_before_rating_source_keeps_every_row_and_ratings_are_classified_by_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    drop(Db::open(&path).unwrap());
+    // Back to the tables as the previous build left them: no media.popularity,
+    // rating.source, friend_entry.popularity or friend_entry.progress.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE media DROP COLUMN popularity;
+         ALTER TABLE friend_entry DROP COLUMN popularity;
+         ALTER TABLE friend_entry DROP COLUMN progress;
+         DROP TABLE rating;
+         CREATE TABLE rating (media_id INTEGER PRIMARY KEY REFERENCES media(id), story REAL NOT NULL, characters REAL NOT NULL,
+             animation REAL, audio REAL NOT NULL DEFAULT 0.0, enjoyment REAL NOT NULL, overall REAL NOT NULL, updated_at TEXT NOT NULL);
+         INSERT INTO media (id, anilist_id, media_type, title, status) VALUES
+             (1, 101, 'anime', 'Seeded anime', 'completed'), (2, 102, 'manga', 'Seeded manga', 'completed'),
+             (3, 103, 'anime', 'Mixed', 'completed'), (4, 104, 'anime', 'Audio differs', 'completed'),
+             (5, 105, 'anime', 'No animation', 'completed'), (6, 106, 'manga', 'Mixed manga', 'reading');
+         INSERT INTO rating VALUES
+             (1, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, '2026-01-01T00:00:00.000000+00:00'),
+             (2, 7.0, 7.0, 7.0, 0.0, 7.0, 7.25, '2026-01-01T00:00:00.000000+00:00'),
+             (3, 9.0, 8.0, 7.0, 6.0, 10.0, 8.0, '2026-01-01T00:00:00.000000+00:00'),
+             (4, 8.0, 8.0, 8.0, 5.0, 8.0, 7.4, '2026-01-01T00:00:00.000000+00:00'),
+             (5, 8.0, 8.0, NULL, 8.0, 8.0, 8.0, '2026-01-01T00:00:00.000000+00:00'),
+             (6, 6.0, 7.0, 8.0, 0.0, 9.0, 7.5, '2026-01-01T00:00:00.000000+00:00');
+         INSERT INTO friend (anilist_user_id, name, added_at, source, fetched_at) VALUES (42, 'Pal', '2026-01-01T00:00:00.000000+00:00', 'anilist', '2026-01-01T00:00:00.000000+00:00');
+         INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, genres) VALUES (42, 101, 'anime', 'completed', 9.0, 'Seeded anime', '[]');",
+    )
+    .unwrap();
+    let tables = ["media", "rating", "friend", "friend_entry"];
+    let before: Vec<Vec<String>> = tables.iter().map(|t| dump(&conn, t)).collect();
+    drop(conn);
+
+    for _ in 0..2 {
+        // Opening migrates once; opening again changes nothing.
+        drop(Db::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let after: Vec<Vec<String>> = tables.iter().map(|t| dump(&conn, t)).collect();
+        // Every old value where it was; only the new columns follow them.
+        let with = |rows: &Vec<String>, extra: &dyn Fn(usize) -> String| rows.iter().enumerate().map(|(i, r)| format!("{r}|{}", extra(i))).collect::<Vec<_>>();
+        assert_eq!(after[0], with(&before[0], &|_| "Null".into())); // media.popularity
+        assert_eq!(after[2], before[2]); // friend: untouched
+        assert_eq!(after[3], with(&before[3], &|_| "Null|Null".into())); // friend_entry.popularity, .progress
+        // rating.source, by rule: all active criteria equal means AniList.
+        let src = ["anilist", "anilist", "app", "app", "app", "app"];
+        assert_eq!(after[1], with(&before[1], &|i| format!("{:?}", rusqlite::types::ValueRef::Text(src[i].as_bytes()))));
+    }
 }
 
 #[tokio::test]
@@ -1913,8 +2013,8 @@ fn a_friend_table_from_before_friend_sync_is_migrated_without_changing_a_value()
     let tables = ["media", "rating", "anilist_auth", "friend_entry"];
     let mut before: Vec<_> = tables.iter().map(|t| dump(&conn, t)).collect();
     drop(conn);
-    // friend_entry gains popularity (FR-77): every old value stays, NULL after it.
-    before[3] = before[3].iter().map(|r| format!("{r}|Null")).collect();
+    // friend_entry gains popularity and progress (FR-77, FR-82): every old value stays, NULL after them.
+    before[3] = before[3].iter().map(|r| format!("{r}|Null|Null")).collect();
 
     type Row = (i64, String, Option<String>, String, String, Option<String>, Option<String>, i64, Option<String>);
     for _ in 0..2 {

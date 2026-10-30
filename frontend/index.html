@@ -472,6 +472,7 @@ const state = {
   // FR-77: which completed lists show everything, and where the page was
   // scrolled when a title was opened, so Back finds it as it was left.
   compareShowAll:{they:false,you:false}, compareScroll:0,
+  compareOpen:null,          // FR-82: the one expanded title, "dis:<id>" / "agr:<id>" / "all:<id>"
 };
 function persistExpanded(){localStorage.setItem('mar_expanded',JSON.stringify(state.expanded));}
 
@@ -849,6 +850,7 @@ H.cancelRating = ()=>{
   // The unrated queue (FR-68) always goes back to the Library, even when an
   // older state.current is still around from a detail page opened earlier.
   if(state.rating&&state.rating.queue){state.rating=null;go('library');return;}
+  if(state.rating&&state.rating.backTo==='compare'&&state.compare){state.rating=null;backToCompare();return;}
   const returnView=state.rating&&state.rating.returnView;
   state.rating=null;
   if(state.current){openDetail(state.current);state.detailReturn=returnView;}
@@ -933,6 +935,7 @@ H.backSeason = ()=>{
 // can be a marker the user chose to skip (no local item to open at all).
 function finishChain(){
   const r=state.rating;const returnView=r.returnView;const lastId=r.lastRealId;
+  if(r.backTo==='compare'&&state.compare){state.rating=null;backToCompare();return;}
   state.rating=null;
   openDetail({source:'lib',item:byId(lastId)});
   state.detailReturn=returnView;
@@ -1207,7 +1210,7 @@ function openCompare(friendId,mediaType){
   // target: otherwise Back would bounce between the two pages forever.
   if(!(state.view==='detail'&&state.detailReturn==='compare'))state.compareReturn=state.view;
   state.compare={friendId,mediaType:mediaType||state.mediaType};
-  state.compareSort={key:'your_score',dir:-1};state.compareShowAll={they:false,you:false};state.compareScroll=0;
+  state.compareSort={key:'your_score',dir:-1};state.compareShowAll={they:false,you:false};state.compareScroll=0;state.compareOpen=null;
   if(state.friendError&&state.friendError.id!==friendId)state.friendError=null;
   loadCompare();
   go('compare');
@@ -1223,7 +1226,16 @@ H.compareUser = async ()=>{
   if(known||f)openCompare(known?u.anilist_id:f.anilist_user_id);
 };
 H.backCompare = ()=>{const r=state.compareReturn||'profile';state.compare=null;_compare=undefined;go(r);if(r==='profile')loadFriends();};
-H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};state.compareShowAll={they:false,you:false};loadCompare();render();};
+H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};state.compareShowAll={they:false,you:false};state.compareOpen=null;loadCompare();render();};
+// FR-82: one expanded title across the whole page; the same one again closes it.
+H.toggleCompareRow = (el)=>{const k=el.dataset.arg;state.compareOpen=state.compareOpen===k?null:k;render();};
+// FR-82: rate an AniList-seeded title here, then come straight back to the
+// refreshed comparison (saving pushes through the usual sync).
+H.rateFromCompare = (el)=>{
+  const id=+el.dataset.arg;if(!byId(id))return;
+  const sc=document.getElementById('main-scroll');state.compareScroll=sc?sc.scrollTop:0;
+  openRating([id],{backTo:'compare'});
+};
 H.toggleCompareAll = (el)=>{const k=el.dataset.arg;state.compareShowAll={...state.compareShowAll,[k]:!state.compareShowAll[k]};render();};
 H.retryCompare = ()=>{loadCompare();render();};
 // FR-76: a new column sorts high to low; the same column again flips it.
@@ -2854,18 +2866,55 @@ function compareView(){
     ${stat('Average skew',skew==null?'—':even?'0.0':fmtDelta(skew),skew==null?'Nothing rated by both yet':even?`You and ${esc(name)} score about the same`:`You score ${Math.abs(skew).toFixed(1)} ${skew>0?'higher':'lower'} than ${esc(name)} on average`,null,skew==null||even?null:deltaColor(skew))}
   </div>`;
 
-  const pairRow=(s)=>`<div data-act="openRelation" data-arg="${s.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:10px;cursor:pointer;">
+  // FR-82: a title expanded in place: your criteria in the stepper's order
+  // with the highest and lowest marked (or, for a rating seeded from
+  // AniList, a way to rate it now), the friend's overall and status, and a
+  // link to the detail view. Reads the comparison only, no AniList call.
+  const expanded=(s)=>{
+    const cs=crits(mt),c=s.rated_in_app&&s.your_criteria;
+    let mine;
+    if(c){
+      const vals=cs.map(k=>c[k.key]).filter(v=>v!=null),hi=Math.max(...vals),lo=Math.min(...vals),mark=hi!==lo;
+      mine=cs.map(k=>{const v=c[k.key],top=mark&&v===hi,low=mark&&v===lo;return `<div style="display:grid;grid-template-columns:96px minmax(0,1fr) 38px;align-items:center;gap:10px;">
+        <span style="font-size:12px;color:${top?'var(--t1)':'var(--t3)'};font-weight:${top?700:500};white-space:nowrap;">${k.label}${top?`<span style="font-family:'Overpass Mono',monospace;font-size:9.5px;color:var(--t4);font-weight:500;"> · high</span>`:low?`<span style="font-family:'Overpass Mono',monospace;font-size:9.5px;color:var(--t4);"> · low</span>`:''}</span>
+        <div style="height:5px;border-radius:3px;background:var(--s3);overflow:hidden;"><div style="height:100%;width:${v==null?'0%':pct(v,10)};background:${low?'color-mix(in srgb,var(--accent) 40%,#000)':'linear-gradient(90deg,color-mix(in srgb,var(--accent) 45%,#000),var(--accent))'};border-radius:3px;"></div></div>
+        <span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:700;text-align:right;color:${top?'var(--accent)':low?'var(--t3)':'var(--t2)'};">${fmtScore(v)}</span></div>`;}).join('');
+    }else{
+      mine=`<div style="font-size:12.5px;color:var(--t3);line-height:1.5;">Rated on AniList only, no category scores.</div><div style="margin-top:4px;">${actBtn('Rate it now','rateFromCompare',s.media_id,true)}</div>`;
+    }
+    const unit=mt==='anime'?['episode','episodes']:['chapter','chapters'];
+    const prog=s.their_progress?` · ${s.their_progress} ${unit[s.their_progress===1?0:1]}`:'';
+    return `<div style="margin:2px 4px 8px;padding:14px;background:var(--bg1);border:1px solid var(--line2);border-radius:11px;cursor:default;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px 24px;">
+        <div><div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--t4);">You</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;font-weight:700;color:var(--accent);">${fmtScore(s.your_score)}</span></div>
+          <div style="display:flex;flex-direction:column;gap:7px;">${mine}</div></div>
+        <div><div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--t4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;font-weight:700;color:var(--t2);">${fmtScore(s.their_score)}</span></div>
+          <div style="font-size:12.5px;color:var(--t2);">${esc(STATUS_LABEL[s.their_status]||s.their_status||'')}${prog}</div>
+          <div style="font-size:11.5px;color:var(--t4);margin-top:8px;line-height:1.5;">AniList only shares ${esc(name)}'s overall score, not category scores.</div></div>
+      </div>
+      <div data-act="openRelation" data-arg="${s.anilist_id}" data-hover="color:var(--t1)" style="display:inline-flex;margin-top:12px;cursor:pointer;font-size:12px;font-weight:600;color:var(--accent);">Open details</div>
+    </div>`;
+  };
+  const isOpen=(list,s)=>state.compareOpen===`${list}:${s.anilist_id}`;
+  const pairRow=(s,list)=>{const open=isOpen(list,s);return `<div data-act="toggleCompareRow" data-arg="${list}:${s.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:10px;cursor:pointer;${open?'background:var(--s2);':''}">
     ${titleThumb(s,34,48)}
     <div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(s))}</div>
     <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">You <span style="color:var(--accent);">${fmtScore(s.your_score)}</span> · ${esc(name)} <span style="color:var(--t2);">${fmtScore(s.their_score)}</span></div></div>
-    <span style="font-family:'Overpass Mono',monospace;font-size:14px;font-weight:700;color:${deltaColor(s.delta)};flex:0 0 auto;">${fmtDelta(s.delta)}</span></div>`;
-  // FR-75: the 5 biggest gaps however small, and a note when every gap is half a point or less.
-  const rarely=C.rarely_disagree?`<div style="font-size:12px;color:var(--t3);line-height:1.5;padding:8px 10px 4px;">You two rarely disagree: every title you both rated is within half a point.</div>`:'';
-  const pairCard=(items,msg,top)=>`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:6px;">${top||''}${items.length?items.map(pairRow).join(''):empty(msg)}</div>`;
-  const pairs=`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;">
-    <div>${h2('Biggest disagreements')}${pairCard(C.disagreements,'Nothing rated by both yet.',rarely)}</div>
-    <div>${h2('Strongest agreements')}${pairCard(C.agreements,n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.')}</div>
-  </div>`;
+    <span style="font-family:'Overpass Mono',monospace;font-size:14px;font-weight:700;color:${deltaColor(s.delta)};flex:0 0 auto;">${fmtDelta(s.delta)}</span></div>${open?expanded(s):''}`;};
+  // FR-75/FR-82: the two cards are one grid, row i of each side in the same
+  // grid row, so a title expanding on one side keeps the other side aligned.
+  // Each side's cells together draw that side's card.
+  const L=C.disagreements,R=C.agreements,len=Math.max(L.length,R.length,1);
+  const cell=(items,i,list,msg)=>{
+    const count=Math.max(items.length,1);if(i>=count)return '<div></div>';
+    const first=i===0,last=i===count-1;
+    const edge=`background:var(--s1);border-left:1px solid var(--line);border-right:1px solid var(--line);padding:${first?6:0}px 6px ${last?6:0}px;${first?'border-top:1px solid var(--line);':''}${last?'border-bottom:1px solid var(--line);':''}border-radius:${first?'14px 14px':'0 0'} ${last?'14px 14px':'0 0'};`;
+    return `<div style="${edge}">${items.length?pairRow(items[i],list):empty(msg)}</div>`;
+  };
+  const rarely=C.rarely_disagree?'You two rarely disagree: every title you both rated is within half a point.':null;
+  let pairCells=`<div style="align-self:start;">${h2('Biggest disagreements',rarely)}</div><div style="align-self:start;">${h2('Strongest agreements')}</div>`;
+  for(let i=0;i<len;i++)pairCells+=cell(L,i,'dis','Nothing rated by both yet.')+cell(R,i,'agr',n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.');
+  const pairs=`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:18px;">${pairCells}</div>`;
 
   // FR-77: the top 10 in a wrapping grid, "Show all (N)" for the rest; each
   // card has cover, title, the 8.0+ score, and a note when the title is only
@@ -2903,7 +2952,7 @@ function compareView(){
   const num=(v,color)=>`<div style="flex:0 0 78px;text-align:right;font-family:'Overpass Mono',monospace;font-size:13px;font-weight:700;color:${color};">${v}</div>`;
   const table=`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:10px 10px 6px;">
     <div style="display:flex;align-items:center;gap:12px;padding:4px 8px 10px;border-bottom:1px solid var(--line2);margin-bottom:4px;"><div style="flex:1;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">Title</div>${col('your_score','You')}${col('their_score',name)}${col('delta','Delta')}</div>
-    ${rows.length?rows.map(r=>`<div data-act="openRelation" data-arg="${r.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:9px;cursor:pointer;">${titleThumb(r,28,40)}<div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(r))}</div>${num(fmtScore(r.your_score),'var(--accent)')}${num(fmtScore(r.their_score),'var(--t2)')}${num(fmtDelta(r.delta),deltaColor(r.delta))}</div>`).join(''):empty('Nothing rated by both yet.')}
+    ${rows.length?rows.map(r=>{const open=isOpen('all',r);return `<div data-act="toggleCompareRow" data-arg="all:${r.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:9px;cursor:pointer;${open?'background:var(--s2);':''}">${titleThumb(r,28,40)}<div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(r))}</div>${num(fmtScore(r.your_score),'var(--accent)')}${num(fmtScore(r.their_score),'var(--t2)')}${num(fmtDelta(r.delta),deltaColor(r.delta))}</div>${open?expanded(r):''}`;}).join(''):empty('Nothing rated by both yet.')}
   </div>`;
 
   return page(`${stats}
@@ -2914,7 +2963,7 @@ function compareView(){
     ${pickGrid('you',C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`)}
     ${h2('Genres')}
     ${genres}
-    ${h2('Every title you both rated',`${n} ${mt}. Click a column to sort.`)}
+    ${h2('Every title you both rated',`${n} ${mt}. Click a column to sort, or a title to see your category scores.`)}
     ${table}`);
 }
 
