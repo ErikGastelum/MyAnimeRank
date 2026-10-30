@@ -11,7 +11,7 @@ use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use myanimerank_lib::anilist::{self, AlError, AniList, EntryState};
 use myanimerank_lib::config::{self, Config};
-use myanimerank_lib::db::{self, Db, MediaFields, Scores, SyncOutcome};
+use myanimerank_lib::db::{self, Db, FriendEntry, FriendList, MediaFields, Scores, SyncOutcome};
 use myanimerank_lib::{api, oauth, sync, AppState, Shared};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -1162,6 +1162,217 @@ async fn profile_stats_carry_the_viewers_avatar_and_banner_or_null() {
         // Avatar and banner ride along on the stats query, not a request of their own.
         assert_eq!(fake.calls().len(), 1);
     }
+}
+
+// -------------------------------------------------------------------- friends ----
+
+fn friend_media(anilist_id: i64, al_type: &str) -> Value {
+    json!({
+        "id": anilist_id, "type": al_type,
+        "title": {"romaji": format!("Title {anilist_id}"), "english": format!("English {anilist_id}"), "native": null},
+        "coverImage": {"large": format!("https://img/{anilist_id}.jpg")}, "genres": ["Action"],
+    })
+}
+
+fn friend_node(anilist_id: i64, al_type: &str, status: &str, score: f64) -> Value {
+    json!({"status": status, "score": score, "media": friend_media(anilist_id, al_type)})
+}
+
+/// AniList as seen for friends: `User` by name or id, then both lists in one
+/// aliased query. "ghost" doesn't exist; "locked" is private at the user
+/// lookup; "hidden" (id 43) exists but its lists are private; "tester" is
+/// the logged-in account (id 1); anything else is Pal (id 42). The first
+/// request gets a 429, and `private_lists` makes Pal's lists private too.
+async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fake {
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    fake_anilist(move |q, v| {
+        if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return (429, json!({}), Some("0.01"));
+        }
+        let private = || (404, json!({"data": null, "errors": [{"message": "Private User", "status": 404}]}), None);
+        if q.contains("User(") {
+            let user = |id: i64, name: &str| (200, json!({"data": {"User": {"id": id, "name": name, "avatar": {"large": "https://img/u.png"}}}}), None);
+            return match v["name"].as_str() {
+                Some("ghost") => (404, json!({"data": {"User": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None),
+                Some("locked") => private(),
+                Some("hidden") => user(43, "hidden"),
+                Some("tester") => user(1, "tester"),
+                _ => user(42, "Pal"),
+            };
+        }
+        if v["userId"] == 43 || private_lists.load(std::sync::atomic::Ordering::SeqCst) {
+            return private();
+        }
+        let anime = json!({"lists": [
+            {"entries": [friend_node(1, "ANIME", "CURRENT", 8.5), friend_node(2, "ANIME", "REPEATING", 0.0), friend_node(3, "ANIME", "PLANNING", 0.0)]},
+            // A custom list repeats an entry that's already in a status list.
+            {"entries": [friend_node(1, "ANIME", "CURRENT", 8.5)]},
+        ]});
+        let manga = json!({"lists": [
+            {"entries": [friend_node(10, "MANGA", "CURRENT", 0.4), friend_node(11, "MANGA", "REPEATING", 10.0)]},
+        ]});
+        (200, json!({"data": {"anime": anime, "manga": manga}}), None)
+    })
+    .await
+}
+
+#[test]
+fn friend_scores_normalize_to_the_one_to_ten_scale_and_zero_means_unscored() {
+    // AniList already converted every format to POINT_10_DECIMAL (FR-72).
+    let cases = [(None, None), (Some(0.0), None), (Some(0.4), Some(1.0)), (Some(1.0), Some(1.0)), (Some(7.3), Some(7.3)), (Some(10.0), Some(10.0))];
+    for (raw, want) in cases {
+        assert_eq!(db::normalize_score(raw), want, "{raw:?}");
+    }
+}
+
+#[tokio::test]
+async fn adding_a_friend_reads_their_public_lists_without_the_token_and_writes_nothing() {
+    let fake = friend_anilist(Arc::default()).await;
+    let st = state_with(&fake);
+    login(&st);
+
+    let (s, b) = call(&st, "POST", "/friends", Some(json!({"username": "pal"}))).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(
+        (&b["anilist_user_id"], &b["name"], &b["avatar_url"], &b["anime_count"], &b["manga_count"]),
+        (&json!(42), &json!("Pal"), &json!("https://img/u.png"), &json!(3), &json!(2))
+    );
+    assert!(b["fetched_at"].as_str().is_some_and(|t| t.starts_with("20")), "{b}");
+
+    // One 429 (retried after Retry-After), the user lookup, then both lists in one query.
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1].1, json!({"name": "pal"}));
+    assert_eq!(calls[2].1, json!({"userId": 42}));
+    assert!(calls[2].0.contains("score(format: POINT_10_DECIMAL)"));
+    // Public data only: never the token, never a mutation.
+    assert!(fake.auths().iter().all(Option::is_none), "{:?}", fake.auths());
+    assert!(calls.iter().all(|(q, _)| !q.contains("mutation")));
+
+    // Statuses in this app's vocabulary per media type; 0 = unscored; the
+    // custom-list duplicate stored once.
+    let anime: Vec<_> = st.db.friend_entries(42, "anime").unwrap().into_iter().map(|e| (e.anilist_id, e.status, e.score)).collect();
+    assert_eq!(anime, vec![(1, "watching".into(), Some(8.5)), (2, "rewatching".into(), None), (3, "planning".into(), None)]);
+    let manga: Vec<_> = st.db.friend_entries(42, "manga").unwrap().into_iter().map(|e| (e.anilist_id, e.media_type, e.status, e.score)).collect();
+    assert_eq!(manga, vec![(10, "manga".into(), "reading".into(), Some(1.0)), (11, "manga".into(), "rereading".into(), Some(10.0))]);
+    let first = st.db.friend_entries(42, "anime").unwrap().remove(0);
+    assert_eq!(
+        (first.title.as_deref(), first.title_english.as_deref(), first.cover_url.as_deref(), first.genres),
+        (Some("Title 1"), Some("English 1"), Some("https://img/1.jpg"), vec!["Action".to_string()])
+    );
+
+    // A friend's list never becomes part of your library.
+    assert!(st.db.get_library(None, None, "overall").unwrap().is_empty());
+
+    // Refresh looks them up by id, since usernames can change.
+    let (s, _) = call(&st, "POST", "/friends/42/refresh", None).await;
+    assert_eq!(s, 200);
+    assert_eq!(fake.calls()[3].1, json!({"id": 42}));
+    assert_eq!(st.db.friend_entries(42, "anime").unwrap().len(), 3); // replaced, not appended
+    assert_eq!(call(&st, "POST", "/friends/7/refresh", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn unknown_users_private_lists_and_your_own_account_are_refused_and_store_nothing() {
+    let fake = friend_anilist(Arc::default()).await;
+    let st = state_with(&fake);
+    login(&st);
+    let cases = [
+        ("ghost", 404, "No AniList user named ghost"),
+        ("hidden", 403, "hidden's list is private on AniList"), // exists, lists private
+        ("locked", 403, "locked's list is private on AniList"), // private at the lookup
+        ("Tester", 400, "That's your own AniList account"),
+        ("", 422, "username is required"),
+    ];
+    for (username, status, detail) in cases {
+        let (s, b) = call(&st, "POST", "/friends", Some(json!({"username": username}))).await;
+        assert_eq!((s, b["detail"].as_str()), (status, Some(detail)), "{username}");
+    }
+    assert_eq!(call(&st, "GET", "/friends", None).await, (200, json!({"friends": []})));
+    assert!(st.db.friend_entries(43, "anime").unwrap().is_empty());
+
+    let offline = offline_state().await;
+    login(&offline);
+    assert_eq!(call(&offline, "POST", "/friends", Some(json!({"username": "pal"}))).await.0, 502);
+    assert_eq!(call(&offline, "GET", "/friends", None).await, (200, json!({"friends": []})));
+}
+
+#[tokio::test]
+async fn a_refresh_that_finds_the_list_private_keeps_the_stored_copy() {
+    let private_lists = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fake = friend_anilist(private_lists.clone()).await;
+    let st = state_with(&fake);
+    login(&st);
+    let (_, added) = call(&st, "POST", "/friends", Some(json!({"username": "pal"}))).await;
+    private_lists.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (s, b) = call(&st, "POST", "/friends/42/refresh", None).await;
+    assert_eq!((s, b["detail"].as_str()), (403, Some("Pal's list is private on AniList")));
+    let (_, friends) = call(&st, "GET", "/friends", None).await;
+    assert_eq!(friends["friends"][0], added); // same entries, same fetched_at
+    assert_eq!(st.db.friend_entries(42, "anime").unwrap().len(), 3);
+}
+
+fn their(anilist_id: i64, media_type: &str, status: &str, score: Option<f64>, genres: &[&str]) -> FriendEntry {
+    FriendEntry {
+        anilist_id,
+        media_type: media_type.into(),
+        status: status.into(),
+        score,
+        title: Some(format!("Title {anilist_id}")),
+        title_english: None,
+        cover_url: Some(format!("https://img/{anilist_id}.jpg")),
+        genres: genres.iter().map(|g| g.to_string()).collect(),
+    }
+}
+
+fn friend_list(anilist_user_id: i64, name: &str, entries: Vec<FriendEntry>) -> FriendList {
+    FriendList { anilist_user_id, name: name.into(), avatar_url: None, entries }
+}
+
+/// Every row of a table, as text, in rowid order.
+fn dump(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();
+    let n = stmt.column_count();
+    stmt.query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get_ref(i).unwrap())).collect::<Vec<_>>().join("|")))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn friend_tables_are_added_to_an_existing_library_db_without_touching_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    {
+        let db = Db::open(&path).unwrap();
+        let anime = db.insert_or_update_media(&fields(1, "anime"), Some("completed")).unwrap();
+        let manga = db.insert_or_update_media(&fields(2, "manga"), Some("reading")).unwrap();
+        db.upsert_rating(anime, &scores(8.5)).unwrap();
+        db.upsert_rating(manga, &scores(7.0)).unwrap();
+        db.save_auth("token", None, 1, "tester", Some("POINT_10_DECIMAL")).unwrap();
+    }
+    // A library.db from before this change: no friend tables.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE friend_entry; DROP TABLE friend;").unwrap();
+    let before: Vec<_> = ["media", "rating", "anilist_auth"].iter().map(|t| dump(&conn, t)).collect();
+    drop(conn);
+
+    let db = Db::open(&path).unwrap();
+    assert!(db.get_friends().unwrap().is_empty());
+    db.replace_friend_list(&friend_list(42, "Pal", vec![their(1, "anime", "completed", Some(9.0), &[])]), "2026-01-01T00:00:00+00:00").unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let after: Vec<_> = ["media", "rating", "anilist_auth"].iter().map(|t| dump(&conn, t)).collect();
+    assert_eq!(before, after);
+    assert_eq!(before[0].len(), 2);
+
+    // Opening again is a no-op, and removing a friend cascades to their entries.
+    drop(db);
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.get_friends().unwrap().len(), 1);
+    assert!(db.delete_friend(42).unwrap());
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM friend_entry", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
 }
 
 // ---------------------------------------------------------------------- login ----

@@ -16,14 +16,14 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::anilist::{self, AlError};
-use crate::db::{AnchorError, Auth, MediaFields, Scores};
+use crate::anilist::{self, AlError, FriendLookup};
+use crate::db::{now_iso, AnchorError, Auth, MediaFields, Scores};
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
 
@@ -216,6 +216,9 @@ pub fn router(st: Shared) -> Router {
         .route("/insights", get(get_insights))
         .route("/rankings", get(get_rankings))
         .route("/profile/stats", get(profile_stats))
+        .route("/friends", get(friends_list).post(friends_add))
+        .route("/friends/{id}", delete(friends_delete))
+        .route("/friends/{id}/refresh", post(friends_refresh))
         // FR-47: nothing below is usable without a stored token.
         .route_layer(middleware::from_fn_with_state(st.clone(), require_auth));
 
@@ -584,4 +587,58 @@ async fn get_rankings(State(st): State<Shared>, q: Params) -> ApiResult {
 /// FR-42: all six stats live from AniList's viewer statistics.
 async fn profile_stats(State(st): State<Shared>, Extension(auth): Extension<Auth>) -> ApiResult {
     ok(st.anilist.get_profile_stats(&auth.access_token, auth.anilist_user_id).await?)
+}
+
+// ------------------------------------------------------------------ friends ----
+// PRD 4.12. Only add and refresh call AniList; everything else reads the
+// stored lists.
+
+const OWN_ACCOUNT: &str = "That's your own AniList account";
+
+async fn friends_list(State(st): State<Shared>) -> ApiResult {
+    ok(json!({"friends": st.db.get_friends()?}))
+}
+
+#[derive(Deserialize)]
+struct FriendIn {
+    username: String,
+}
+
+/// FR-70: adding someone who's already a friend refreshes them.
+async fn friends_add(State(st): State<Shared>, Extension(auth): Extension<Auth>, Body(body): Body<FriendIn>) -> ApiResult {
+    let username = body.username.trim();
+    if username.is_empty() {
+        return Err(ApiError::new(422, "username is required"));
+    }
+    if auth.anilist_username.as_deref().is_some_and(|me| me.eq_ignore_ascii_case(username)) {
+        return Err(ApiError::new(400, OWN_ACCOUNT));
+    }
+    fetch_friend(&st, &auth, username, None).await
+}
+
+async fn friends_refresh(State(st): State<Shared>, Extension(auth): Extension<Auth>, Id(id): Id) -> ApiResult {
+    let friend = st.db.get_friend(id)?.ok_or_else(|| ApiError::new(404, "friend not found"))?;
+    fetch_friend(&st, &auth, &friend.name, Some(id)).await
+}
+
+/// FR-71/FR-73: the lists are stored only once the whole fetch succeeded, so
+/// a failed refresh keeps the previous copy and its fetched_at.
+async fn fetch_friend(st: &Shared, auth: &Auth, name: &str, id: Option<i64>) -> ApiResult {
+    let list = match st.anilist.get_friend_list(name, id).await? {
+        FriendLookup::Found(list) => list,
+        FriendLookup::NoSuchUser => return Err(ApiError::new(404, format!("No AniList user named {name}"))),
+        FriendLookup::Private(name) => return Err(ApiError::new(403, format!("{name}'s list is private on AniList"))),
+    };
+    if list.anilist_user_id == auth.anilist_user_id {
+        return Err(ApiError::new(400, OWN_ACCOUNT));
+    }
+    st.db.replace_friend_list(&list, &now_iso())?;
+    found(st.db.get_friend(list.anilist_user_id)?.map(|f| to_json(&f)), "friend")
+}
+
+async fn friends_delete(State(st): State<Shared>, Id(id): Id) -> ApiResult {
+    if !st.db.delete_friend(id)? {
+        return Err(ApiError::new(404, "friend not found"));
+    }
+    ok(json!({"deleted": true}))
 }

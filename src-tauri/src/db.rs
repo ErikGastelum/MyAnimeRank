@@ -4,9 +4,12 @@
 //! which is set once at import time and never inferred or defaulted. `rating`
 //! is a separate table so a media row can exist with no rating yet.
 //! `anilist_auth` is a single row (id=1) holding the OAuth session.
+//! `friend` / `friend_entry` hold friends' public lists (PRD 4.12), read by
+//! nothing but the comparison and the detail page's friend scores.
 //!
-//! The schema is byte-for-byte the one the Python app created, so an existing
-//! `library.db` opens here unchanged (no migration).
+//! media/rating/anilist_auth are byte-for-byte the tables the Python app
+//! created, so an existing `library.db` opens here unchanged; the friend
+//! tables are simply created on open if they're missing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -67,6 +70,26 @@ CREATE TABLE IF NOT EXISTS anilist_auth (
     anilist_user_id INTEGER,
     anilist_username TEXT,
     score_format TEXT
+);
+
+CREATE TABLE IF NOT EXISTS friend (
+    anilist_user_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    avatar_url TEXT,
+    fetched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS friend_entry (
+    friend_id INTEGER NOT NULL REFERENCES friend(anilist_user_id) ON DELETE CASCADE,
+    anilist_id INTEGER NOT NULL,
+    media_type TEXT NOT NULL CHECK (media_type IN ('anime','manga')),
+    status TEXT NOT NULL,
+    score REAL,
+    title TEXT,
+    title_english TEXT,
+    cover_url TEXT,
+    genres TEXT,
+    PRIMARY KEY (friend_id, anilist_id)
 );
 ";
 
@@ -178,6 +201,41 @@ pub struct Auth {
     pub score_format: Option<String>,
 }
 
+/// One title on a friend's public list (FR-71).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FriendEntry {
+    pub anilist_id: i64,
+    pub media_type: String,
+    /// In this app's FR-17 vocabulary.
+    pub status: String,
+    /// 1.0-10.0 after normalize_score; None when they haven't scored it.
+    pub score: Option<f64>,
+    pub title: Option<String>,
+    pub title_english: Option<String>,
+    pub cover_url: Option<String>,
+    pub genres: Vec<String>,
+}
+
+/// A friend's anime and manga lists, as fetched from AniList.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FriendList {
+    pub anilist_user_id: i64,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub entries: Vec<FriendEntry>,
+}
+
+/// A friends-list row (Friend in the PRD §7 contract).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Friend {
+    pub anilist_user_id: i64,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub fetched_at: String,
+    pub anime_count: i64,
+    pub manga_count: i64,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Scores {
     pub story: f64,
@@ -225,6 +283,13 @@ pub fn compute_overall(media_type: &str, scores: &Scores) -> f64 {
 /// (7.25 -> 7.5). AniList's POINT_10_DECIMAL allows e.g. 7.3, criteria don't.
 pub fn snap_to_half_step(score: f64) -> f64 {
     ((score * 2.0 + 0.5).floor() / 2.0).clamp(1.0, 10.0)
+}
+
+/// FR-72: a friend's score as AniList sends it, already converted to
+/// POINT_10_DECIMAL whatever format they use. 0 means "not scored"; anything
+/// else is clamped onto this app's 1.0-10.0 scale (POINT_100's 4 arrives as 0.4).
+pub fn normalize_score(score: Option<f64>) -> Option<f64> {
+    score.filter(|s| *s > 0.0).map(|s| s.clamp(1.0, 10.0))
 }
 
 fn ts_after(a: &str, b: &str) -> bool {
@@ -820,6 +885,79 @@ impl Db {
         Ok(n > 0)
     }
 
+    // ----------------------------------------------------------- friends ----
+
+    /// FR-71: the friend row and their whole list, replaced in one
+    /// transaction, so a list is never half old and half new.
+    pub fn replace_friend_list(&self, list: &FriendList, fetched_at: &str) -> DbResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO friend (anilist_user_id, name, avatar_url, fetched_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT(anilist_user_id) DO UPDATE SET
+                name = excluded.name, avatar_url = excluded.avatar_url, fetched_at = excluded.fetched_at",
+            params![list.anilist_user_id, list.name, list.avatar_url, fetched_at],
+        )?;
+        tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [list.anilist_user_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+            for e in &list.entries {
+                let genres = serde_json::to_string(&e.genres).unwrap_or_else(|_| "[]".into());
+                stmt.execute(params![
+                    list.anilist_user_id, e.anilist_id, e.media_type, e.status, e.score,
+                    e.title, e.title_english, e.cover_url, genres,
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    pub fn get_friends(&self) -> DbResult<Vec<Friend>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("{FRIEND_SELECT} ORDER BY f.name COLLATE NOCASE"))?;
+        let friends = stmt.query_map([], row_to_friend)?.collect::<DbResult<Vec<_>>>()?;
+        Ok(friends)
+    }
+
+    pub fn get_friend(&self, anilist_user_id: i64) -> DbResult<Option<Friend>> {
+        self.conn()
+            .query_row(&format!("{FRIEND_SELECT} WHERE f.anilist_user_id = ?"), [anilist_user_id], row_to_friend)
+            .optional()
+    }
+
+    /// Local only: nothing changes on AniList. ON DELETE CASCADE removes the
+    /// stored entries with the friend.
+    pub fn delete_friend(&self, anilist_user_id: i64) -> DbResult<bool> {
+        Ok(self.conn().execute("DELETE FROM friend WHERE anilist_user_id = ?", [anilist_user_id])? > 0)
+    }
+
+    /// One media type of a friend's stored list, in AniList's order.
+    pub fn friend_entries(&self, anilist_user_id: i64, media_type: &str) -> DbResult<Vec<FriendEntry>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT anilist_id, media_type, status, score, title, title_english, cover_url, genres
+             FROM friend_entry WHERE friend_id = ? AND media_type = ? ORDER BY rowid",
+        )?;
+        let entries = stmt
+            .query_map(params![anilist_user_id, media_type], |r| {
+                Ok(FriendEntry {
+                    anilist_id: r.get(0)?,
+                    media_type: r.get(1)?,
+                    status: r.get(2)?,
+                    score: r.get(3)?,
+                    title: r.get(4)?,
+                    title_english: r.get(5)?,
+                    cover_url: r.get(6)?,
+                    genres: json_list(r.get(7)?),
+                })
+            })?
+            .collect::<DbResult<Vec<_>>>()?;
+        Ok(entries)
+    }
+
     // ---------------------------------------------------------- insights ----
 
     /// FR-60 through FR-63, computed from local rated titles only.
@@ -965,6 +1103,22 @@ fn insights_divergence(rated: &[Media]) -> Value {
     below.sort_by(|a, b| a.0.total_cmp(&b.0));
     let top5 = |v: Vec<(f64, Value)>| v.into_iter().take(5).map(|e| e.1).collect::<Vec<_>>();
     json!({"avg_divergence": avg_divergence, "most_above": top5(above), "most_below": top5(below)})
+}
+
+const FRIEND_SELECT: &str = "SELECT f.anilist_user_id, f.name, f.avatar_url, f.fetched_at,
+    (SELECT COUNT(*) FROM friend_entry e WHERE e.friend_id = f.anilist_user_id AND e.media_type = 'anime'),
+    (SELECT COUNT(*) FROM friend_entry e WHERE e.friend_id = f.anilist_user_id AND e.media_type = 'manga')
+    FROM friend f";
+
+fn row_to_friend(r: &Row) -> DbResult<Friend> {
+    Ok(Friend {
+        anilist_user_id: r.get(0)?,
+        name: r.get(1)?,
+        avatar_url: r.get(2)?,
+        fetched_at: r.get(3)?,
+        anime_count: r.get(4)?,
+        manga_count: r.get(5)?,
+    })
 }
 
 fn insights_distribution(rated: &[Media], media_type: &str) -> Vec<Value> {
