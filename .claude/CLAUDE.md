@@ -121,7 +121,8 @@ v2 fixes this at the architecture level, and the Rust port keeps every rule:
 In scope per the PRD (don't remove these as "unspecified"): AniList OAuth
 login with a mandatory login gate (FR-47), Pull + automatic push sync with
 conflict resolution (4.6), Discover, Feed, Characters/Staff/Favorites,
-Profile, Insights, and M9 Studios & Users search/profiles (4.11).
+Profile, Insights, M9 Studios & Users search/profiles (4.11), and M10
+Friend Comparison (4.12).
 
 Non-goals (do not implement without an explicit go-ahead):
 
@@ -130,8 +131,10 @@ Non-goals (do not implement without an explicit go-ahead):
   local user, one AniList account connected at a time.
 - No weighted criteria: overall is always a simple, unweighted average of
   the active criteria for that media type.
-- No social write features: no follow/unfollow, messaging, list comparison,
-  or friend features. User profiles are read-only browsing (FR-67).
+- No social write features: no follow/unfollow or messaging, and nothing
+  ever writes to another user's AniList data. User profiles are read-only
+  browsing (FR-67). The only other-user data stored locally is a friend's
+  public list for Friend Comparison (4.12), fetched without the token.
 - No offline/mock mode: the app is unusable without a login.
 - No custom themes, no airing notifications (PRD §10).
 
