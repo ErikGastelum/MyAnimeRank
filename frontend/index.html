@@ -2881,7 +2881,7 @@ function compareView(){
         <div style="height:5px;border-radius:3px;background:var(--s3);overflow:hidden;"><div style="height:100%;width:${v==null?'0%':pct(v,10)};background:${low?'color-mix(in srgb,var(--accent) 40%,#000)':'linear-gradient(90deg,color-mix(in srgb,var(--accent) 45%,#000),var(--accent))'};border-radius:3px;"></div></div>
         <span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:700;text-align:right;color:${top?'var(--accent)':low?'var(--t3)':'var(--t2)'};">${fmtScore(v)}</span></div>`;}).join('');
     }else{
-      mine=`<div style="font-size:12.5px;color:var(--t3);line-height:1.5;">Rated on AniList only, no category scores.</div><div style="margin-top:4px;">${actBtn('Rate it now','rateFromCompare',s.media_id,true)}</div>`;
+      mine=`<div style="font-size:12.5px;color:var(--t3);line-height:1.5;">Rated on AniList only, no category scores.</div><div style="margin-top:4px;display:flex;">${actBtn('Rate it now','rateFromCompare',s.media_id,true)}</div>`;
     }
     const unit=mt==='anime'?['episode','episodes']:['chapter','chapters'];
     const prog=s.their_progress?` · ${s.their_progress} ${unit[s.their_progress===1?0:1]}`:'';
@@ -2907,14 +2907,17 @@ function compareView(){
   // Each side's cells together draw that side's card.
   const L=C.disagreements,R=C.agreements,len=Math.max(L.length,R.length,1);
   const cell=(items,i,list,msg)=>{
-    const count=Math.max(items.length,1);if(i>=count)return '<div></div>';
-    const first=i===0,last=i===count-1;
-    const edge=`background:var(--s1);border-left:1px solid var(--line);border-right:1px solid var(--line);padding:${first?6:0}px 6px ${last?6:0}px;${first?'border-top:1px solid var(--line);':''}${last?'border-bottom:1px solid var(--line);':''}border-radius:${first?'14px 14px':'0 0'} ${last?'14px 14px':'0 0'};`;
-    return `<div style="${edge}">${items.length?pairRow(items[i],list):empty(msg)}</div>`;
+    const count=Math.max(items.length,1),side='background:var(--s1);border:1px solid var(--line);';
+    // The card's bottom edge sits in the row after its last title, so the
+    // side that ends first doesn't make the other side's row taller.
+    if(i===count)return `<div style="align-self:start;height:7px;${side}border-top:0;border-radius:0 0 14px 14px;"></div>`;
+    if(i>count)return '<div></div>';
+    const first=i===0;
+    return `<div style="${side}border-bottom:0;${first?'':'border-top:0;'}padding:${first?6:0}px 6px 0;border-radius:${first?'14px 14px 0 0':'0'};">${items.length?pairRow(items[i],list):empty(msg)}</div>`;
   };
   const rarely=C.rarely_disagree?'You two rarely disagree: every title you both rated is within half a point.':null;
   let pairCells=`<div style="align-self:start;">${h2('Biggest disagreements',rarely)}</div><div style="align-self:start;">${h2('Strongest agreements')}</div>`;
-  for(let i=0;i<len;i++)pairCells+=cell(L,i,'dis','Nothing rated by both yet.')+cell(R,i,'agr',n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.');
+  for(let i=0;i<=len;i++)pairCells+=cell(L,i,'dis','Nothing rated by both yet.')+cell(R,i,'agr',n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.');
   const pairs=`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:18px;">${pairCells}</div>`;
 
   // FR-77: the top 10 in a wrapping grid, "Show all (N)" for the rest; each
