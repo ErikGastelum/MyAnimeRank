@@ -7,8 +7,8 @@ of picking an isolated 1–10.
 
 It's also an AniList client. You log in with your AniList account, your lists
 sync both ways (status, progress, overall score), and you can browse Discover,
-your Feed, characters, staff, studios and user profiles. All metadata comes
-from AniList's GraphQL API.
+your Feed, characters, staff, studios and user profiles, or have it pick an
+anime to watch next. All metadata comes from AniList's GraphQL API.
 
 The product spec is [`docs/PRD.md`](docs/PRD.md).
 

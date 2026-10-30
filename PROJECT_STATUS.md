@@ -4,7 +4,8 @@
 its independent audit are on `feature/friend-compare`. The port to Tauri 2 +
 Rust replaced the Python app earlier (branch `remove-python`, merged); the
 2026-10-25 Python status (cleanup and hardening, phases 1–7) is in git
-history (`bea0e17`).*
+history (`bea0e17`). 2026-10-30: Pick an anime (FR-70, branch
+`feature/pick-an-anime`).*
 
 ---
 
@@ -15,8 +16,9 @@ relative scoring**: you score each title on several criteria by comparing it
 against titles you've already scored in the same genre and media type. It's
 also an AniList client: login is required (FR-47), status, progress and
 overall score sync both ways, and Discover, Feed, Characters/Staff/Studios/
-Users, Favorites, Profile and Insights are backed by AniList's GraphQL API.
-The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
+Users, Favorites, Profile, Insights and Pick an anime are backed by AniList's
+GraphQL API. The spec is `docs/PRD.md` (v2, through M10: Friend Comparison,
+and Pick an anime).
 
 | Layer | Tech |
 |---|---|
@@ -27,7 +29,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (85), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (100), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -87,7 +89,10 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 51 Rust tests (50 in `tests/backend.rs`, 1 in `config.rs`).
+- **Tests:** 100 Rust tests (99 in `tests/backend.rs`, 1 in `config.rs`).
+  Pick an anime's 15 run against a fake AniList that pages like the real
+  one (5000-entry limit included); its queries were also run against the
+  live API, logged out (`docs/anilist-api-notes.md` #17-#25).
   Before the Python app was deleted, its 174 pytest cases were read through
   and everything not yet covered was ported: the full conflict-detection
   table, Pull imports of both media types (seeded ratings, values copied
@@ -235,3 +240,9 @@ Roughly by priority:
     app before the column existed, with every criterion equal (all 8s), is
     classed as from AniList, so the comparison offers "Rate it now" for it
     instead of showing its criteria until it's rated again (PRD §5).
+15. **Pick an anime limits:** AniList pages through 5,000 results at most, so
+    with more matches than that, picks come from the 5,000 oldest or newest
+    entries (the picker says so). The first pick on a new set of filters
+    that matches more than 50 titles costs two to three requests, and up to
+    ~5 s with tag filters (probes past the end of the matches are full scans
+    on AniList's side); rerolls after that are one request.

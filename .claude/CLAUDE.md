@@ -121,8 +121,8 @@ v2 fixes this at the architecture level, and the Rust port keeps every rule:
 In scope per the PRD (don't remove these as "unspecified"): AniList OAuth
 login with a mandatory login gate (FR-47), Pull + automatic push sync with
 conflict resolution (4.6), Discover, Feed, Characters/Staff/Favorites,
-Profile, Insights, M9 Studios & Users search/profiles (4.11), and M10
-Friend Comparison (4.12).
+Profile, Insights, M9 Studios & Users search/profiles (4.11), M10 Friend
+Comparison (4.12), and M10 Pick an anime (4.12, FR-70).
 
 Non-goals (do not implement without an explicit go-ahead):
 
