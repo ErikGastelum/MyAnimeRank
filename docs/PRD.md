@@ -38,6 +38,7 @@ The app runs entirely on your machine: a Rust backend running in-process inside 
 - Log in via AniList OAuth and keep status/progress/score in sync with your real AniList.co account (see 4.6).
 - Browse Discover shelves, a Feed of your own/following/global activity, and Character/Staff pages with live favoriting (see 4.7–4.9).
 - Look up studios and other AniList users' public profiles from catalog Search (see 4.11).
+- Compare your list against a friend's public AniList list: taste match, score skew, disagreements, and what each of you has completed that the other hasn't (see 4.12).
 
 ## Non-Goals (v2 rebuild)
 
@@ -195,11 +196,27 @@ Same live pass-through model as 4.9: nothing here is stored in the local databas
 | FR-64 | Catalog Search (FR-1) has a category picker: Anime, Manga, Characters, Staff, Studios, Users. Only Anime and Manga results feed the import flow (FR-2); the other categories are live lookups that open the matching detail view. |
 | FR-65 | Studio search returns AniList studios by name. Studio detail shows name, animation studio vs. production company, member-favorites count, a favorite heart (FR-39), and the studio's works. Each work opens that title's detail view (FR-52's in-library or not-yet-imported state). Favorite Studio cards on any Profile shelf open this view (extends FR-54). |
 | FR-66 | User search returns AniList users by name. A user's public profile shows avatar, banner, about text, join year, anime/manga counts, mean scores, episodes watched, chapters read, and their favorite shelves (same shelf rules and click-through as FR-40/FR-54). |
-| FR-67 | User profiles are read-only browsing of public AniList data. No follow/unfollow, messaging, list comparison, or friend features, and no other user's data is stored locally. |
+| FR-67 | User profiles are read-only browsing of public AniList data. No follow/unfollow, messaging, or other social write features: nothing in this app ever writes to another user's AniList data. The only other-user data stored locally is a friend's public list for Friend Comparison (4.12), fetched only when the user adds that friend or presses Refresh. |
+
+## 4.12 Friend Comparison
+
+Compare your list against a friend's. A "friend" is a local bookmark of an AniList username, not an AniList follow: adding or removing one changes nothing on AniList. Unlike 4.8–4.11, a friend's list IS stored locally (`friend`, `friend_entry`), because a comparison needs the whole list and refetching it on every view would burn AniList's rate limit; it is refreshed only on demand. Friend data is read-only and isolated: it never feeds rankings, anchors, Insights, or sync, and is never pushed anywhere.
+
+| **ID** | **Requirement** |
+| --- | --- |
+| FR-70 | Profile (4.10) has a Friends section: add a friend by AniList username, and a list of friends, each with avatar, name, when their list was last fetched ("Fetched 3 days ago"), a Refresh action, a Remove action, and a Compare action. A user's public profile (FR-66) has a "Compare lists" button that adds that user as a friend if they aren't one yet and opens the comparison. Your own account can't be added. |
+| FR-71 | Adding a friend or pressing Refresh fetches their anime and manga lists from AniList without the access token (public data only, so the app can never act as or for them) and replaces that friend's stored entries in one transaction. Viewing a comparison or a detail page never calls AniList; it reads the stored copy. Each fetch is two AniList requests (user lookup, then both lists in one query), within the shared ~90 req/min limit; a 429 waits for Retry-After and retries, the same as every other AniList call. |
+| FR-72 | Scores are normalized before comparing. AniList converts each entry's score to POINT_10_DECIMAL server-side, whatever format the friend uses (POINT_100, POINT_10_DECIMAL, POINT_10, POINT_5, POINT_3), the same way Pull reads your own list. A score of 0 means "unscored" and is stored as NULL. Both sides are clamped to this app's 1.0–10.0 scale. Your side is always your local overall (FR-9), which already includes scores Pull brought in from AniList. |
+| FR-73 | If AniList has no user by that name, the add fails with "No AniList user named X". If the friend's list is private, it fails with a clear "X's list is private on AniList" message and nothing is stored. A Refresh that fails this way keeps the previously stored list and its last-fetched time. |
+| FR-74 | A comparison covers one media type at a time (the Anime/Manga toggle) and never mixes the two. Titles match on anilist_id. "Rated" means a non-null score on that side. The comparison shows: overlap (titles both of you rated); taste match = 100 × (1 − mean \|yours − theirs\| / 9), rounded to a whole percent, where 9 is the largest possible gap on a 1–10 scale, hidden when overlap is under 5, with a tooltip explaining the formula; and skew = mean(yours − theirs) over the overlap, positive when you score higher. |
+| FR-75 | Biggest disagreements: the 5 shared titles with the largest \|yours − theirs\|, among those with a gap of at least 1.0 (a half-point gap isn't a disagreement). Strongest agreements: the 5 remaining shared titles with the smallest gap, ties going to the higher average of the two scores. A title never appears in both lists. Each shows cover, title, both scores, and the delta. |
+| FR-76 | A full table of shared rated titles (cover, title, your score, their score, delta), sortable by your score, their score, or delta, in either direction. |
+| FR-77 | "They've completed, you haven't": titles the friend has Completed or Rewatching/Rereading with a score of 8.0 or higher that aren't in your library or are only on your Planning list, highest score first. "You've completed, they haven't": the reverse, from your Completed/Rewatching/Rereading titles with an overall of 8.0 or higher that aren't on their list or are only on their Planning list. Every title in these lists and in FR-75/FR-76 opens its detail view (FR-52's in-library or not-yet-imported state). |
+| FR-78 | Genre comparison: per genre, your average overall and theirs, each over that side's own rated titles of this media type, with counts, side by side; a genre one side has no rated titles in shows "—" for that side. A title's detail view (FR-15) shows each friend who has scored that title, with their score and status, read from the stored lists only. |
 
 # 5. Data Model
 
-SQLite, three tables. One row per title regardless of media type — this is the structural fix. Sync adds one small auth table; it does not touch the media/rating split.
+SQLite, five tables. One row per title regardless of media type — this is the structural fix. Sync adds one small auth table; it does not touch the media/rating split. Friend Comparison (4.12) adds two tables of its own (`friend`, `friend_entry`) that nothing else reads; they were added with CREATE TABLE IF NOT EXISTS, so an existing library.db gains them on open with no change to its other tables.
 
 ## media
 
@@ -252,6 +269,31 @@ Single row (id=1). Holds the local OAuth session — never synced anywhere, neve
 | anilist_user_id | INTEGER | The connected account's AniList id |
 | anilist_username | TEXT | Displayed in the app so it's clear which account is connected |
 | score_format | TEXT | Set to POINT_10_DECIMAL on the AniList account itself (FR-25/FR-28), so push needs no conversion; re-verified on every sync. |
+
+## friend
+
+One row per friend (FR-70). A local bookmark only; nothing here is an AniList follow.
+
+| **Field** | **Type** | **Notes** |
+| --- | --- | --- |
+| anilist_user_id | INTEGER PK | AniList's user id. Usernames can change; ids don't. |
+| name | TEXT | AniList username, NOT NULL, refreshed on every fetch |
+| avatar_url | TEXT | |
+| fetched_at | TEXT | ISO timestamp of the last successful fetch of their lists (FR-71), NOT NULL |
+
+## friend_entry
+
+A friend's public list as of `friend.fetched_at` (FR-71). Replaced wholesale on each fetch; deleted with the friend (`ON DELETE CASCADE`).
+
+| **Field** | **Type** | **Notes** |
+| --- | --- | --- |
+| friend_id | INTEGER | References friend.anilist_user_id, ON DELETE CASCADE, NOT NULL |
+| anilist_id | INTEGER | The title's AniList id, the match key against media.anilist_id (FR-74). PK is (friend_id, anilist_id). |
+| media_type | TEXT | 'anime' \| 'manga', from AniList's own MediaType, NOT NULL, same CHECK as media |
+| status | TEXT | Their status in this app's FR-17 vocabulary (mapped like Pull), NOT NULL |
+| score | REAL | 1.0–10.0 after FR-72 normalization; NULL when they haven't scored it |
+| title / title_english / cover_url | TEXT | For display in the comparison, since most of their titles aren't in your library |
+| genres | TEXT (JSON) | List of genre strings, for FR-78 |
 
 # 6. Technical Architecture
 
@@ -518,6 +560,60 @@ Response: { anilist_id, name, avatar_url, banner_url, about, site_url, created_a
 // Public profile data only, read-only, never persisted (FR-66/FR-67). favorites uses the same shape as GET /favorites.
 ```
 
+## GET /friends
+
+```
+Response: { "friends": [ Friend ] }
+Friend = { anilist_user_id, name, avatar_url, fetched_at, anime_count, manga_count }
+// FR-70. Local only, no AniList call. Counts are entries on their stored list, any status.
+```
+
+## POST /friends
+
+```
+Body: { "username": string }
+Response: Friend
+// FR-70/FR-71: looks the user up on AniList, fetches both lists without the token, stores them. Adding someone who's already a friend refreshes them.
+// 400 if it's your own account; 404 "No AniList user named X"; 403 "X's list is private on AniList" (FR-73); 502 if AniList can't be reached. Nothing is stored on any failure.
+```
+
+## POST /friends/{anilist_user_id}/refresh
+
+```
+Response: Friend
+// FR-71: refetches both lists and replaces the stored ones. 404 if not a friend; on 403/502 the previously stored list is kept (FR-73).
+```
+
+## DELETE /friends/{anilist_user_id}
+
+```
+Response: { "deleted": true }   // 404 if not a friend
+// Local only: removes the friend and (ON DELETE CASCADE) their stored entries. Nothing changes on AniList.
+```
+
+## GET /friends/{anilist_user_id}/compare?media_type=anime|manga
+
+```
+Response: {
+  friend: Friend, media_type,
+  overlap: number, taste_match: number | null, skew: number | null,
+  disagreements: [ Shared ], agreements: [ Shared ], shared: [ Shared ],
+  they_completed: [ { anilist_id, media_type, title, title_english, cover_url, their_score, your_status: string | null } ],
+  you_completed: [ { anilist_id, media_id, media_type, title, title_english, cover_url, your_score, their_status: string | null } ],
+  genres: [ { genre, your_avg: number | null, your_count, their_avg: number | null, their_count } ]
+}
+Shared = { anilist_id, media_id, media_type, title, title_english, cover_url, your_score, their_score, delta }   // delta = your_score − their_score
+// FR-72–FR-78, computed from the stored lists only, no AniList call. taste_match is null when overlap < 5; skew is null when overlap is 0.
+// shared is ordered by your_score descending; the frontend re-sorts it (FR-76). genres is ordered by your_count + their_count descending.
+```
+
+## GET /media/by-anilist/{anilist_id}/friend-scores
+
+```
+Response: { "scores": [ { anilist_user_id, name, avatar_url, status, score } ] }
+// FR-78: friends who have scored this title, highest score first, from the stored lists only. Works for titles not in the library too.
+```
+
 # 8. Frontend Design Brief (handoff for Claude Design)
 
 The existing app has an established dark visual identity — keep it, don't redesign from scratch. Carry these tokens forward:
@@ -541,7 +637,9 @@ The existing app has an established dark visual identity — keep it, don't rede
 - **Character / Staff detail** — cover, favorite heart, member-favorites count, bio, voice-actors-by-language (characters) or filmography (staff), appearances (FR-38).
 - **Catalog Search categories (FR-64)** — a category picker on the Search screen: Anime, Manga, Characters, Staff, Studios, Users.
 - **Studio detail (FR-65)** — name, studio type, member-favorites count, favorite heart, list of works.
-- **User profile (FR-66)** — avatar, banner, about, stats block, favorite shelves. Read-only (FR-67).
+- **User profile (FR-66)** — avatar, banner, about, stats block, favorite shelves. Read-only (FR-67), plus a "Compare lists" button (FR-70).
+- **Friends (FR-70)** — a section on the Profile tab: add-by-username field, and one row per friend with avatar, name, last-fetched time, Refresh, Remove, Compare. Not a sixth bottom-nav tab.
+- **Friend comparison (FR-74–FR-78)** — Anime/Manga toggle; overlap, taste match (with a tooltip explaining it) and skew; biggest disagreements and strongest agreements; a sortable shared-titles table; "They've completed, you haven't" and "You've completed, they haven't" shelves; side-by-side genre averages. The detail view shows friends' scores for that title.
 - **Insights (optional)** — genre breakdown, score distribution, community-score divergence.
 
 *Design deliverable: a single-file HTML/React mockup (or component set) using the API contract in Section 7 as the data shape, so wiring it to the real backend afterward is a drop-in, not a rewrite.*
@@ -559,6 +657,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 | M7 | Accordion polish, format sub-splits, search/sort within tabs, detail view, delete, persistence polish. |
 | M8 (optional) | Insights dashboard. |
 | M9 | Studios & Users (4.11): /studios/search, /studios/{id}, /users/search, /users/{id}, and the Studios/Users categories in catalog Search — live pass-throughs to AniList, no schema changes. |
+| M10 | Friend Comparison (4.12): `friend` / `friend_entry` tables (additive, CREATE TABLE IF NOT EXISTS), /friends endpoints, the comparison view, and friends' scores on the detail view. |
 
 # 10. Appendix: Reference App Feature Set (MyAniList)
 
@@ -569,7 +668,7 @@ You asked for MyAniList (a third-party AniList client) to be used as a reference
 | Track anime/manga lists | In scope — v2 | This is Library (4.5): status + progress tracking, now kept in sync with your real AniList.co list via 4.6. |
 | Log into AniList.co and sync your real lists | In scope — v2 | This is now Section 4.6 (AniList Account Sync) — OAuth login, Pull on demand, automatic push of status/progress/overall. |
 | Discover/search series, characters, voice actors | In scope — v2 | Series browsing is Discover (4.7); catalog search stays the import Search flow. Character/staff search and detail is now 4.9. |
-| Follow friends, see their lists/favorites | In scope — v2 | This is now Feed (4.8) — live pass-through to AniList's Activity API, scoped to the connected account's own follow graph. |
+| Follow friends, see their lists/favorites | In scope — v2 | Activity is Feed (4.8) — live pass-through to AniList's Activity API, scoped to the connected account's own follow graph. Comparing your list against a friend's public list is 4.12. Following/unfollowing stays out of scope (FR-67). |
 | Mark series/characters/VAs as favorites | In scope — v2 | Section 4.9 — favoriting is a live toggle on the real AniList account, not local state. |
 | Custom app theme / list style / icon | Non-goal — v2 | The app has one established dark theme (Section 8) that's intentionally being carried forward, not made user-configurable, for this rebuild. |
 | Live broadcast/episode-airing notifications | Non-goal — v2 | Needs background polling of AniList's airing schedule plus OS-level notifications — separate subsystem, not part of the Rust/SQLite/Tauri core being rebuilt here. |
