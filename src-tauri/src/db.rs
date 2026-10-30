@@ -958,6 +958,39 @@ impl Db {
         Ok(entries)
     }
 
+    /// FR-78: friends who have scored this title, highest score first.
+    pub fn friend_scores(&self, anilist_id: i64) -> DbResult<Vec<Value>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT f.anilist_user_id, f.name, f.avatar_url, e.status, e.score
+             FROM friend_entry e JOIN friend f ON f.anilist_user_id = e.friend_id
+             WHERE e.anilist_id = ? AND e.score IS NOT NULL
+             ORDER BY e.score DESC, f.name COLLATE NOCASE",
+        )?;
+        let scores = stmt
+            .query_map([anilist_id], |r| {
+                Ok(json!({
+                    "anilist_user_id": r.get::<_, i64>(0)?, "name": r.get::<_, String>(1)?,
+                    "avatar_url": r.get::<_, Option<String>>(2)?, "status": r.get::<_, String>(3)?,
+                    "score": r.get::<_, f64>(4)?,
+                }))
+            })?
+            .collect::<DbResult<Vec<_>>>()?;
+        Ok(scores)
+    }
+
+    /// FR-74 through FR-78 for one media type, from stored data only.
+    /// None when there's no such friend.
+    pub fn compare_with_friend(&self, anilist_user_id: i64, media_type: &str) -> DbResult<Option<Value>> {
+        let Some(friend) = self.get_friend(anilist_user_id)? else { return Ok(None) };
+        let yours = self.get_library(Some(media_type), None, "overall")?;
+        let theirs = self.friend_entries(anilist_user_id, media_type)?;
+        let mut out = compare_lists(&yours, &theirs);
+        out["friend"] = json!(friend);
+        out["media_type"] = json!(media_type);
+        Ok(Some(out))
+    }
+
     // ---------------------------------------------------------- insights ----
 
     /// FR-60 through FR-63, computed from local rated titles only.
@@ -1119,6 +1152,153 @@ fn row_to_friend(r: &Row) -> DbResult<Friend> {
         anime_count: r.get(4)?,
         manga_count: r.get(5)?,
     })
+}
+
+/// FR-77: statuses that mean you've finished a title at least once.
+const FINISHED: [&str; 3] = ["completed", "rewatching", "rereading"];
+/// FR-77: "rated highly".
+const HIGHLY_RATED: f64 = 8.0;
+/// FR-75: a smaller gap isn't a disagreement.
+const DISAGREEMENT_GAP: f64 = 1.0;
+/// FR-74: under this many shared titles a taste match is noise, so it's hidden.
+const MIN_OVERLAP_FOR_MATCH: usize = 5;
+
+/// A title both of you rated.
+struct SharedTitle {
+    anilist_id: i64,
+    yours: f64,
+    theirs: f64,
+    row: Value,
+}
+
+impl SharedTitle {
+    fn gap(&self) -> f64 {
+        round1(self.yours - self.theirs).abs()
+    }
+
+    fn mean(&self) -> f64 {
+        (self.yours + self.theirs) / 2.0
+    }
+}
+
+/// FR-74 through FR-78, pure logic. `yours` and `theirs` are already one
+/// media type: titles match on anilist_id only, never across anime/manga.
+pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
+    // FR-72: your side is your local overall, on the same 1.0-10.0 scale.
+    let your_score = |m: &Media| m.rating.as_ref().map(|r| r.overall.clamp(1.0, 10.0));
+    let your_by_id: HashMap<i64, &Media> = yours.iter().map(|m| (m.fields.anilist_id, m)).collect();
+    let their_by_id: HashMap<i64, &FriendEntry> = theirs.iter().map(|e| (e.anilist_id, e)).collect();
+
+    let mut shared: Vec<SharedTitle> = yours
+        .iter()
+        .filter_map(|m| {
+            let mine = your_score(m)?;
+            let t = their_by_id.get(&m.fields.anilist_id)?;
+            let other = t.score?;
+            Some(SharedTitle {
+                anilist_id: m.fields.anilist_id,
+                yours: mine,
+                theirs: other,
+                row: json!({
+                    "anilist_id": m.fields.anilist_id, "media_id": m.id, "media_type": m.fields.media_type,
+                    "title": m.fields.title, "title_english": m.fields.title_english,
+                    "cover_url": m.fields.cover_url.as_ref().or(t.cover_url.as_ref()),
+                    "your_score": mine, "their_score": other, "delta": round1(mine - other),
+                }),
+            })
+        })
+        .collect();
+    shared.sort_by(|a, b| b.yours.total_cmp(&a.yours).then(a.anilist_id.cmp(&b.anilist_id)));
+
+    let n = shared.len();
+    let taste_match = (n >= MIN_OVERLAP_FOR_MATCH).then(|| {
+        let mean_gap = shared.iter().map(SharedTitle::gap).sum::<f64>() / n as f64;
+        (100.0 * (1.0 - mean_gap / 9.0)).round() as i64
+    });
+    let skew = (n > 0).then(|| shared.iter().map(|s| s.yours - s.theirs).sum::<f64>() / n as f64);
+
+    // Biggest gaps first; ties go to the title you both liked more.
+    let mut order: Vec<&SharedTitle> = shared.iter().collect();
+    order.sort_by(|a, b| b.gap().total_cmp(&a.gap()).then(b.mean().total_cmp(&a.mean())).then(a.anilist_id.cmp(&b.anilist_id)));
+    let disagreements: Vec<&SharedTitle> = order.iter().copied().filter(|s| s.gap() >= DISAGREEMENT_GAP).take(5).collect();
+    let mut rest: Vec<&SharedTitle> = order.into_iter().filter(|s| !disagreements.iter().any(|d| d.anilist_id == s.anilist_id)).collect();
+    rest.sort_by(|a, b| a.gap().total_cmp(&b.gap()).then(b.mean().total_cmp(&a.mean())).then(a.anilist_id.cmp(&b.anilist_id)));
+    let rows = |v: Vec<&SharedTitle>| v.into_iter().map(|s| s.row.clone()).collect::<Vec<_>>();
+
+    let mut they_completed: Vec<(f64, i64, Value)> = theirs
+        .iter()
+        .filter_map(|e| {
+            let score = e.score.filter(|s| *s >= HIGHLY_RATED)?;
+            let your_status = your_by_id.get(&e.anilist_id).map(|m| m.status.as_str());
+            if !FINISHED.contains(&e.status.as_str()) || your_status.is_some_and(|s| s != "planning") {
+                return None;
+            }
+            Some((score, e.anilist_id, json!({
+                "anilist_id": e.anilist_id, "media_type": e.media_type, "title": e.title,
+                "title_english": e.title_english, "cover_url": e.cover_url,
+                "their_score": score, "your_status": your_status,
+            })))
+        })
+        .collect();
+    let mut you_completed: Vec<(f64, i64, Value)> = yours
+        .iter()
+        .filter_map(|m| {
+            let score = your_score(m).filter(|s| *s >= HIGHLY_RATED)?;
+            let their_status = their_by_id.get(&m.fields.anilist_id).map(|e| e.status.as_str());
+            if !FINISHED.contains(&m.status.as_str()) || their_status.is_some_and(|s| s != "planning") {
+                return None;
+            }
+            Some((score, m.fields.anilist_id, json!({
+                "anilist_id": m.fields.anilist_id, "media_id": m.id, "media_type": m.fields.media_type,
+                "title": m.fields.title, "title_english": m.fields.title_english, "cover_url": m.fields.cover_url,
+                "your_score": score, "their_status": their_status,
+            })))
+        })
+        .collect();
+    let best_first = |v: &mut Vec<(f64, i64, Value)>| {
+        v.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        v.drain(..).map(|x| x.2).collect::<Vec<_>>()
+    };
+
+    json!({
+        "overlap": n,
+        "taste_match": taste_match,
+        "skew": skew,
+        "disagreements": rows(disagreements),
+        "agreements": rows(rest.into_iter().take(5).collect()),
+        "shared": shared.iter().map(|s| s.row.clone()).collect::<Vec<_>>(),
+        "they_completed": best_first(&mut they_completed),
+        "you_completed": best_first(&mut you_completed),
+        "genres": compare_genres(
+            yours.iter().filter_map(|m| Some((&m.fields.genres, your_score(m)?))),
+            theirs.iter().filter_map(|e| Some((&e.genres, e.score?))),
+        ),
+    })
+}
+
+/// FR-78: each side's average over its own rated titles, per genre, busiest
+/// genres first.
+fn compare_genres<'a>(
+    yours: impl Iterator<Item = (&'a Vec<String>, f64)>,
+    theirs: impl Iterator<Item = (&'a Vec<String>, f64)>,
+) -> Vec<Value> {
+    // genre -> [(sum, count) for you, (sum, count) for them]
+    let mut totals: HashMap<&str, [(f64, i64); 2]> = HashMap::new();
+    for (side, titles) in [(0, yours.collect::<Vec<_>>()), (1, theirs.collect())] {
+        for (genres, score) in titles {
+            for g in genres {
+                let t = &mut totals.entry(g.as_str()).or_default()[side];
+                t.0 += score;
+                t.1 += 1;
+            }
+        }
+    }
+    let mut rows: Vec<(&str, [(f64, i64); 2])> = totals.into_iter().collect();
+    rows.sort_by(|a, b| (b.1[0].1 + b.1[1].1).cmp(&(a.1[0].1 + a.1[1].1)).then(a.0.cmp(b.0)));
+    let avg = |(sum, count): (f64, i64)| (count > 0).then(|| sum / count as f64);
+    rows.into_iter()
+        .map(|(genre, [y, t])| json!({"genre": genre, "your_avg": avg(y), "your_count": y.1, "their_avg": avg(t), "their_count": t.1}))
+        .collect()
 }
 
 fn insights_distribution(rated: &[Media], media_type: &str) -> Vec<Value> {
