@@ -158,6 +158,9 @@ toward it.
   old Python app did (manga 7.25 → 7.2).
 - Duplicate import (same `anilist_id`) updates the existing row; it does
   not create a second entry and never changes `media_type`.
+- `rating.source` is `app` for a rating saved from the stepper and `anilist`
+  for one Pull seeded from an AniList score (every criterion that one value).
+  Only `app` criteria mean anything; the comparison shows them (FR-82).
 - Timestamps are written in Python's `isoformat()` shape
   (`2026-01-01T00:00:00.123456+00:00`) and compared as parsed datetimes, so
   rows the old Python app wrote still compare correctly.
