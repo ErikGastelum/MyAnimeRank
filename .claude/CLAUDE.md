@@ -40,7 +40,7 @@ src-tauri/
   src/api.rs              every API route (same paths/JSON as PRD §7), auth gate
   src/db.rs               schema, queries, rating math, sync helpers
   src/anilist.rs          ALL GraphQL operations, via one graphql() helper
-  src/sync.rs             Pull, push, conflict handling, retry queue
+  src/sync.rs             Pull, push, conflict handling, retry queue, friend sync + list queue
   src/oauth.rs            one-shot OAuth callback listener on fixed port 8931
   src/cache.rs            TTL cache for Discover/Feed only
   src/config.rs           AniList client ID (built in; optional overrides)
@@ -133,8 +133,9 @@ Non-goals (do not implement without an explicit go-ahead):
   the active criteria for that media type.
 - No social write features: no follow/unfollow or messaging, and nothing
   ever writes to another user's AniList data. User profiles are read-only
-  browsing (FR-67). The only other-user data stored locally is a friend's
-  public list for Friend Comparison (4.12), fetched without the token.
+  browsing (FR-67). The only other-user data stored locally is Friend
+  Comparison's (4.12): names and avatars of the people you follow, and
+  friends' public lists, all read without the token.
 - No offline/mock mode: the app is unusable without a login.
 - No custom themes, no airing notifications (PRD §10).
 

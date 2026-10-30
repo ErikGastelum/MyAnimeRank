@@ -1,16 +1,25 @@
-//! FR-23 (Pull + per-entry conflict resolution) and FR-24/FR-26 (Push + retry
-//! queue). Port of sync.py: db.rs stays pure data access, anilist.rs stays a
-//! pure external-API client, and this module is where the two meet.
+//! FR-23 (Pull + per-entry conflict resolution), FR-24/FR-26 (Push + retry
+//! queue) and FR-79/FR-80 (friend sync + friend-list queue). Port of sync.py:
+//! db.rs stays pure data access, anilist.rs stays a pure external-API client,
+//! and this module is where the two meet.
 
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::anilist::{AlError, ListEntry};
+use crate::anilist::{AlError, FriendLookup, ListEntry};
 use crate::db::{detect_conflict, now_iso, Media, SyncOutcome};
 use crate::Shared;
 
 const PUSH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// FR-80: one queue turn (one friend, two requests) at most this often:
+/// 10 requests a minute, a third of AniList's 30.
+pub const FRIEND_QUEUE_SPACING: Duration = Duration::from_secs(12);
+/// FR-80: a friend whose fetch failed other than by not reaching AniList
+/// (say, the account is gone) is skipped this long, so it can't hold up
+/// everyone behind it.
+const FRIEND_FAILED_RETRY: Duration = Duration::from_secs(3600);
 
 #[derive(Debug)]
 pub enum SyncError {
@@ -320,4 +329,101 @@ pub async fn get_pending_conflicts(st: &Shared) -> SyncResult<Vec<Value>> {
         ));
     }
     Ok(conflicts)
+}
+
+// ---------------------------------------------------------------- friends ----
+
+/// FR-79: imports who you follow (everyone, or mutual follows only, per the
+/// setting). Uses only your user id, never the token, and fetches no lists.
+pub async fn sync_friends(st: &Shared) -> SyncResult<()> {
+    let auth = auth(st)?;
+    let (mutual_only, _) = st.db.friend_sync_state()?;
+    let followed = st.anilist.get_following(auth.anilist_user_id, mutual_only).await?;
+    st.db.sync_followed(&followed, &now_iso())?;
+    Ok(())
+}
+
+/// FR-79 after login or a Pull: in the background, and a failure is only logged.
+pub fn sync_friends_later(st: &Shared) {
+    let st = st.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sync_friends(&st).await {
+            log::warn!("friend sync failed: {e}");
+        }
+    });
+}
+
+/// FR-71/FR-73: fetches one friend's lists without the token and stores
+/// them. `id` is set for someone who's already a friend (Refresh, the queue,
+/// a comparison): they show as "fetching" meanwhile, keep their source, and
+/// are marked private if AniList says so. Without it, it's an add by
+/// username: stored as a manual friend. Your own account is never stored.
+pub async fn fetch_friend(st: &Shared, name: &str, id: Option<i64>) -> SyncResult<FriendLookup> {
+    let auth = auth(st)?;
+    let _fetching = id.map(|id| Fetching::new(st, id));
+    let lookup = st.anilist.get_friend_list(name, id).await?;
+    match (&lookup, id) {
+        (FriendLookup::Found(list), _) if list.anilist_user_id == auth.anilist_user_id => {}
+        (FriendLookup::Found(list), None) => st.db.replace_friend_list(list, &now_iso())?,
+        (FriendLookup::Found(list), Some(_)) => {
+            st.db.store_friend_list(list, &now_iso())?;
+        }
+        (FriendLookup::Private(_), Some(id)) => st.db.mark_friend_private(id, &now_iso())?,
+        _ => {}
+    }
+    Ok(lookup)
+}
+
+/// A friend shows as "fetching" (GET /friends) until this is dropped.
+struct Fetching<'a>(&'a Shared, i64);
+
+impl<'a> Fetching<'a> {
+    fn new(st: &'a Shared, id: i64) -> Self {
+        st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+        Fetching(st, id)
+    }
+}
+
+impl Drop for Fetching<'_> {
+    fn drop(&mut self) {
+        self.0.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+    }
+}
+
+/// FR-80: the background friend-list queue, one turn per `spacing`.
+pub async fn friend_queue_loop(st: Shared, spacing: Duration) {
+    loop {
+        tokio::time::sleep(spacing).await;
+        if let Err(e) = friend_queue_step(&st).await {
+            log::warn!("friend list queue: {e}");
+        }
+    }
+}
+
+/// One queue turn: fetches at most one friend's lists (two requests), and
+/// only while logged in, with no other AniList call running and no 429 in
+/// the last minute. Returns whose fetch it tried.
+pub async fn friend_queue_step(st: &Shared) -> SyncResult<Option<i64>> {
+    if !st.db.is_connected() || !st.anilist.is_quiet() {
+        return Ok(None);
+    }
+    let skip: HashSet<i64> = {
+        let mut retry_at = st.friend_retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        retry_at.retain(|_, at| *at > Instant::now());
+        retry_at.keys().copied().collect()
+    };
+    let Some((id, name)) = st.db.next_friend_to_fetch(&skip)? else { return Ok(None) };
+    let failed = match fetch_friend(st, &name, Some(id)).await {
+        Ok(FriendLookup::NoSuchUser) => true,
+        Ok(_) => false,
+        // Not reaching AniList is the queue's problem, not this friend's:
+        // the next turn tries again (after a 429, a minute later).
+        Err(SyncError::AniList(e)) if e.is_network() => return Err(SyncError::AniList(e)),
+        Err(SyncError::AniList(_)) => true,
+        Err(e) => return Err(e),
+    };
+    if failed {
+        st.friend_retry_at.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Instant::now() + FRIEND_FAILED_RETRY);
+    }
+    Ok(Some(id))
 }

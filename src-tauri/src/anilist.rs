@@ -4,12 +4,15 @@
 //! No MAL/Jikan calls anywhere: this is the ONLY module that talks to an
 //! external metadata API.
 
-use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 
-use crate::db::{normalize_score, round1, FriendEntry, FriendList, MediaFields};
+use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields};
 
 pub const ANILIST_URL: &str = "https://graphql.anilist.co";
 pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
@@ -20,6 +23,11 @@ pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
 const MAX_429_RETRIES: usize = 2;
 const MAX_RETRY_WAIT_SECONDS: f64 = 30.0;
 const DEFAULT_RETRY_AFTER_SECONDS: f64 = 2.0;
+/// FR-80: the friend-list queue stays off this long after any 429, or for
+/// Retry-After if that's longer (up to an hour).
+const QUEUE_PAUSE_AFTER_429: Duration = Duration::from_secs(60);
+/// FR-79: 50 follows a page; more pages than this is a runaway answer.
+const MAX_FOLLOW_PAGES: i64 = 200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AlError {
@@ -62,6 +70,26 @@ pub type AlResult<T> = Result<T, AlError>;
 pub struct AniList {
     http: reqwest::Client,
     graphql_url: String,
+    /// FR-80: requests running right now, and until when a 429 keeps the
+    /// friend-list queue off. Shared by every clone.
+    in_flight: Arc<AtomicUsize>,
+    queue_paused_until: Arc<Mutex<Option<Instant>>>,
+}
+
+/// Counts a request as running until dropped, however `graphql()` returns.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl<'a> InFlight<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        InFlight(count)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// One AniList MediaList entry joined with its media (Pull / conflict data).
@@ -114,10 +142,18 @@ impl AniList {
             .timeout(Duration::from_secs(20))
             .build()
             .expect("HTTP client builds with static settings");
-        AniList { http, graphql_url: graphql_url.into() }
+        AniList { http, graphql_url: graphql_url.into(), in_flight: Default::default(), queue_paused_until: Default::default() }
+    }
+
+    /// FR-80: the friend-list queue may take a turn: no other AniList call is
+    /// running and no 429 came in the last minute.
+    pub fn is_quiet(&self) -> bool {
+        let paused_until = *self.queue_paused_until.lock().unwrap_or_else(|e| e.into_inner());
+        self.in_flight.load(Ordering::SeqCst) == 0 && paused_until.is_none_or(|t| Instant::now() >= t)
     }
 
     async fn graphql(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64) -> AlResult<Value> {
+        let _running = InFlight::new(&self.in_flight);
         let mut payload = json!({ "query": query });
         if let Some(v) = variables {
             payload["variables"] = v;
@@ -133,11 +169,13 @@ impl AniList {
                 req = req.bearer_auth(t);
             }
             let response = req.send().await?;
-            if response.status().as_u16() != 429 || attempt == MAX_429_RETRIES {
+            if response.status().as_u16() != 429 {
                 break response;
             }
             let wait = retry_after_seconds(&response);
-            if wait > MAX_RETRY_WAIT_SECONDS {
+            let pause = Duration::try_from_secs_f64(wait.min(3600.0)).map_or(QUEUE_PAUSE_AFTER_429, |w| w.max(QUEUE_PAUSE_AFTER_429));
+            *self.queue_paused_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + pause);
+            if attempt == MAX_429_RETRIES || wait > MAX_RETRY_WAIT_SECONDS {
                 break response; // a shorter wait would only earn another 429
             }
             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
@@ -609,6 +647,37 @@ impl AniList {
             avatar_url: str_of(&user["avatar"]["large"]),
             entries,
         }))
+    }
+
+    /// FR-79: everyone `user_id` follows, or only those who follow them back,
+    /// read without the token, every page. Fails as a whole if any page does,
+    /// so a sync never acts on part of the list.
+    pub async fn get_following(&self, user_id: i64, mutual_only: bool) -> AlResult<Vec<FollowedUser>> {
+        let following = self.follow_pages("following", user_id).await?;
+        if !mutual_only {
+            return Ok(following);
+        }
+        let followers: HashSet<i64> = self.follow_pages("followers", user_id).await?.into_iter().map(|u| u.anilist_user_id).collect();
+        Ok(following.into_iter().filter(|u| followers.contains(&u.anilist_user_id)).collect())
+    }
+
+    /// `field` is "following" or "followers".
+    async fn follow_pages(&self, field: &str, user_id: i64) -> AlResult<Vec<FollowedUser>> {
+        let q = format!(
+            "query ($userId: Int!, $page: Int) {{ Page(page: $page, perPage: 50) {{ pageInfo {{ hasNextPage }}
+               {field}(userId: $userId, sort: [ID]) {{ id name avatar {{ large }} }} }} }}"
+        );
+        let mut users = Vec::new();
+        for page in 1..=MAX_FOLLOW_PAGES {
+            let data = self.graphql(&q, Some(json!({"userId": user_id, "page": page})), None, 15).await?;
+            users.extend(arr(&data["Page"][field]).iter().filter_map(|u| {
+                Some(FollowedUser { anilist_user_id: u["id"].as_i64()?, name: str_of(&u["name"])?, avatar_url: str_of(&u["avatar"]["large"]) })
+            }));
+            if data["Page"]["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                return Ok(users);
+            }
+        }
+        Err(unexpected("more than 10,000 follows"))
     }
 
     // ------------------------------------------------------------ community ----

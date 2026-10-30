@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{named_params, params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -76,7 +76,17 @@ CREATE TABLE IF NOT EXISTS friend (
     anilist_user_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     avatar_url TEXT,
-    fetched_at TEXT NOT NULL
+    added_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('anilist','manual')),
+    fetched_at TEXT,
+    private_at TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS friend_sync (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    mutual_only INTEGER NOT NULL DEFAULT 0,
+    synced_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS friend_entry (
@@ -231,9 +241,21 @@ pub struct Friend {
     pub anilist_user_id: i64,
     pub name: String,
     pub avatar_url: Option<String>,
-    pub fetched_at: String,
+    /// "anilist" (friend sync, FR-79) or "manual".
+    pub source: String,
+    /// "pending", "fetched" or "private" here; the API adds "fetching".
+    pub list_status: String,
+    pub fetched_at: Option<String>,
     pub anime_count: i64,
     pub manga_count: i64,
+}
+
+/// Someone on your AniList following list (FR-79).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowedUser {
+    pub anilist_user_id: i64,
+    pub name: String,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -410,6 +432,7 @@ impl Db {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate_existing_media_columns(&conn)?;
+        migrate_friend_table(&conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
@@ -900,34 +923,50 @@ impl Db {
 
     // ----------------------------------------------------------- friends ----
 
-    /// FR-71: the friend row and their whole list, replaced in one
-    /// transaction, so a list is never half old and half new.
+    /// FR-70/FR-71: a friend added by username, and their whole list, in one
+    /// transaction, so a list is never half old and half new. Whatever they
+    /// were before (from AniList, hidden), they're now a visible manual friend.
     pub fn replace_friend_list(&self, list: &FriendList, fetched_at: &str) -> DbResult<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO friend (anilist_user_id, name, avatar_url, fetched_at) VALUES (?, ?, ?, ?)
+            "INSERT INTO friend (anilist_user_id, name, avatar_url, added_at, source, fetched_at) VALUES (?1, ?2, ?3, ?4, 'manual', ?4)
              ON CONFLICT(anilist_user_id) DO UPDATE SET
-                name = excluded.name, avatar_url = excluded.avatar_url, fetched_at = excluded.fetched_at",
+                name = excluded.name, avatar_url = excluded.avatar_url, fetched_at = excluded.fetched_at,
+                source = 'manual', private_at = NULL, hidden = 0",
             params![list.anilist_user_id, list.name, list.avatar_url, fetched_at],
         )?;
-        tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [list.anilist_user_id])?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )?;
-            for e in &list.entries {
-                let genres = serde_json::to_string(&e.genres).unwrap_or_else(|_| "[]".into());
-                stmt.execute(params![
-                    list.anilist_user_id, e.anilist_id, e.media_type, e.status, e.score,
-                    e.title, e.title_english, e.cover_url, genres,
-                ])?;
-            }
-        }
+        write_friend_entries(&tx, list)?;
         tx.commit()
     }
 
+    /// FR-71: a freshly fetched list for someone who's already a friend
+    /// (Refresh, the queue, a comparison), keeping where they came from.
+    /// False, and nothing stored, if they stopped being a friend meanwhile:
+    /// a sync removed them, or they were hidden.
+    pub fn store_friend_list(&self, list: &FriendList, fetched_at: &str) -> DbResult<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE friend SET name = ?, avatar_url = ?, fetched_at = ?, private_at = NULL WHERE anilist_user_id = ? AND hidden = 0",
+            params![list.name, list.avatar_url, fetched_at, list.anilist_user_id],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        write_friend_entries(&tx, list)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// FR-73: AniList says this friend's list is private. Their stored list
+    /// (if any) and its fetch time stay.
+    pub fn mark_friend_private(&self, anilist_user_id: i64, at: &str) -> DbResult<()> {
+        self.conn().execute("UPDATE friend SET private_at = ? WHERE anilist_user_id = ?", params![at, anilist_user_id])?;
+        Ok(())
+    }
+
+    /// Hidden friends aren't listed (FR-70).
     pub fn get_friends(&self) -> DbResult<Vec<Friend>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!("{FRIEND_SELECT} ORDER BY f.name COLLATE NOCASE"))?;
@@ -935,16 +974,104 @@ impl Db {
         Ok(friends)
     }
 
+    /// None for a hidden friend too: everything but a sync treats them as gone.
     pub fn get_friend(&self, anilist_user_id: i64) -> DbResult<Option<Friend>> {
         self.conn()
-            .query_row(&format!("{FRIEND_SELECT} WHERE f.anilist_user_id = ?"), [anilist_user_id], row_to_friend)
+            .query_row(&format!("{FRIEND_SELECT} AND f.anilist_user_id = ?"), [anilist_user_id], row_to_friend)
             .optional()
     }
 
-    /// Local only: nothing changes on AniList. ON DELETE CASCADE removes the
-    /// stored entries with the friend.
-    pub fn delete_friend(&self, anilist_user_id: i64) -> DbResult<bool> {
-        Ok(self.conn().execute("DELETE FROM friend WHERE anilist_user_id = ?", [anilist_user_id])? > 0)
+    /// FR-70, local only: nothing changes on AniList. A manual friend is
+    /// deleted (ON DELETE CASCADE takes their entries); one from AniList is
+    /// hidden instead, so a sync doesn't bring them back, and their entries
+    /// are deleted. None if they aren't a (visible) friend, else Some(hidden).
+    pub fn delete_friend(&self, anilist_user_id: i64) -> DbResult<Option<bool>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let source: Option<String> = tx
+            .query_row("SELECT source FROM friend WHERE anilist_user_id = ? AND hidden = 0", [anilist_user_id], |r| r.get(0))
+            .optional()?;
+        let Some(source) = source else { return Ok(None) };
+        let hide = source == "anilist";
+        if hide {
+            tx.execute("UPDATE friend SET hidden = 1, fetched_at = NULL, private_at = NULL WHERE anilist_user_id = ?", [anilist_user_id])?;
+            tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [anilist_user_id])?;
+        } else {
+            tx.execute("DELETE FROM friend WHERE anilist_user_id = ?", [anilist_user_id])?;
+        }
+        tx.commit()?;
+        Ok(Some(hide))
+    }
+
+    /// FR-79: (mutual_only, synced_at).
+    pub fn friend_sync_state(&self) -> DbResult<(bool, Option<String>)> {
+        let state = self
+            .conn()
+            .query_row("SELECT mutual_only, synced_at FROM friend_sync WHERE id = 1", [], |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?)))
+            .optional()?;
+        Ok(state.unwrap_or((false, None)))
+    }
+
+    pub fn set_mutual_only(&self, mutual_only: bool) -> DbResult<()> {
+        self.conn().execute(
+            "INSERT INTO friend_sync (id, mutual_only) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET mutual_only = excluded.mutual_only",
+            [mutual_only as i64],
+        )?;
+        Ok(())
+    }
+
+    /// FR-79: one complete following list (already filtered to mutuals when
+    /// that's the setting), in one transaction. New follows become `anilist`
+    /// friends; everyone on it gets their current name and avatar; `anilist`
+    /// friends missing from it are removed with their lists. Manual friends
+    /// stay whatever the list says, and hidden ones stay hidden.
+    pub fn sync_followed(&self, followed: &[FollowedUser], now: &str) -> DbResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut upsert = tx.prepare(
+                "INSERT INTO friend (anilist_user_id, name, avatar_url, added_at, source) VALUES (?, ?, ?, ?, 'anilist')
+                 ON CONFLICT(anilist_user_id) DO UPDATE SET name = excluded.name, avatar_url = excluded.avatar_url",
+            )?;
+            for u in followed {
+                upsert.execute(params![u.anilist_user_id, u.name, u.avatar_url, now])?;
+            }
+        }
+        let still: HashSet<i64> = followed.iter().map(|u| u.anilist_user_id).collect();
+        let from_anilist: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT anilist_user_id FROM friend WHERE source = 'anilist'")?;
+            let ids = stmt.query_map([], |r| r.get(0))?.collect::<DbResult<_>>()?;
+            ids
+        };
+        for id in from_anilist.into_iter().filter(|id| !still.contains(id)) {
+            tx.execute("DELETE FROM friend WHERE anilist_user_id = ?", [id])?;
+        }
+        tx.execute(
+            "INSERT INTO friend_sync (id, synced_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET synced_at = excluded.synced_at",
+            [now],
+        )?;
+        tx.commit()
+    }
+
+    /// FR-80: whose list the background queue fetches next: never fetched
+    /// first, then the oldest fetch, among lists older than 24 hours; a
+    /// private friend only 7 days after AniList last said so; never a hidden
+    /// one, nor anyone in `skip`. None when every list is fresh.
+    pub fn next_friend_to_fetch(&self, skip: &HashSet<i64>) -> DbResult<Option<(i64, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT anilist_user_id, name, fetched_at, private_at FROM friend WHERE hidden = 0")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)))?
+            .collect::<DbResult<Vec<_>>>()?;
+        let parse = |t: &Option<String>| t.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok());
+        let private_retry = Utc::now() - Duration::days(PRIVATE_RETRY_DAYS);
+        let next = rows
+            .iter()
+            .filter(|(id, ..)| !skip.contains(id))
+            .filter(|(_, _, fetched, _)| friend_list_is_stale(fetched.as_deref()))
+            .filter(|(_, _, _, private)| parse(private).is_none_or(|at| at < private_retry))
+            .min_by_key(|(id, _, fetched, _)| (parse(fetched), *id));
+        Ok(next.map(|(id, name, ..)| (*id, name.clone())))
     }
 
     /// One media type of a friend's stored list, in AniList's order.
@@ -977,7 +1104,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT f.anilist_user_id, f.name, f.avatar_url, e.status, e.score
              FROM friend_entry e JOIN friend f ON f.anilist_user_id = e.friend_id
-             WHERE e.anilist_id = ? AND e.score IS NOT NULL
+             WHERE e.anilist_id = ? AND e.score IS NOT NULL AND f.hidden = 0
              ORDER BY e.score DESC, f.name COLLATE NOCASE",
         )?;
         let scores = stmt
@@ -1053,6 +1180,28 @@ fn migrate_existing_media_columns(conn: &Connection) -> DbResult<()> {
         conn.execute_batch("ALTER TABLE media ADD COLUMN pending_conflict INTEGER NOT NULL DEFAULT 0")?;
         log::info!("migrated: added media.pending_conflict");
     }
+    Ok(())
+}
+
+/// PRD §5: a `friend` table from before FR-79 (no `source`) gains the new
+/// columns without any existing value changing. The rename is schema-only,
+/// and the UPDATE only fills the new `fetched_at`.
+fn migrate_friend_table(conn: &Connection) -> DbResult<()> {
+    let has_source: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('friend') WHERE name = 'source'", [], |r| r.get(0))?;
+    if has_source {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE friend RENAME COLUMN fetched_at TO added_at;
+         ALTER TABLE friend ADD COLUMN source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('anilist','manual'));
+         ALTER TABLE friend ADD COLUMN fetched_at TEXT;
+         ALTER TABLE friend ADD COLUMN private_at TEXT;
+         ALTER TABLE friend ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+         UPDATE friend SET fetched_at = added_at;
+         COMMIT;",
+    )?;
+    log::info!("migrated: friend gained added_at/source/fetched_at/private_at/hidden");
     Ok(())
 }
 
@@ -1151,20 +1300,53 @@ fn insights_divergence(rated: &[Media]) -> Value {
     json!({"avg_divergence": avg_divergence, "most_above": top5(above), "most_below": top5(below)})
 }
 
-const FRIEND_SELECT: &str = "SELECT f.anilist_user_id, f.name, f.avatar_url, f.fetched_at,
+/// Visible friends only; callers add `AND ...` / `ORDER BY`.
+const FRIEND_SELECT: &str = "SELECT f.anilist_user_id, f.name, f.avatar_url, f.source,
+    CASE WHEN f.private_at IS NOT NULL THEN 'private' WHEN f.fetched_at IS NOT NULL THEN 'fetched' ELSE 'pending' END,
+    f.fetched_at,
     (SELECT COUNT(*) FROM friend_entry e WHERE e.friend_id = f.anilist_user_id AND e.media_type = 'anime'),
     (SELECT COUNT(*) FROM friend_entry e WHERE e.friend_id = f.anilist_user_id AND e.media_type = 'manga')
-    FROM friend f";
+    FROM friend f WHERE f.hidden = 0";
 
 fn row_to_friend(r: &Row) -> DbResult<Friend> {
     Ok(Friend {
         anilist_user_id: r.get(0)?,
         name: r.get(1)?,
         avatar_url: r.get(2)?,
-        fetched_at: r.get(3)?,
-        anime_count: r.get(4)?,
-        manga_count: r.get(5)?,
+        source: r.get(3)?,
+        list_status: r.get(4)?,
+        fetched_at: r.get(5)?,
+        anime_count: r.get(6)?,
+        manga_count: r.get(7)?,
     })
+}
+
+/// Replaces a friend's stored entries, inside the caller's transaction.
+fn write_friend_entries(tx: &rusqlite::Transaction, list: &FriendList) -> DbResult<()> {
+    tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [list.anilist_user_id])?;
+    let mut stmt = tx.prepare(
+        "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )?;
+    for e in &list.entries {
+        let genres = serde_json::to_string(&e.genres).unwrap_or_else(|_| "[]".into());
+        stmt.execute(params![
+            list.anilist_user_id, e.anilist_id, e.media_type, e.status, e.score,
+            e.title, e.title_english, e.cover_url, genres,
+        ])?;
+    }
+    Ok(())
+}
+
+/// FR-80/FR-81: a stored friend list older than this is fetched again.
+const FRIEND_LIST_MAX_AGE_HOURS: i64 = 24;
+/// FR-73/FR-80: how long a private friend's list is left alone.
+const PRIVATE_RETRY_DAYS: i64 = 7;
+
+/// FR-80/FR-81: never fetched, or fetched more than 24 hours ago.
+pub fn friend_list_is_stale(fetched_at: Option<&str>) -> bool {
+    let cutoff = Utc::now() - Duration::hours(FRIEND_LIST_MAX_AGE_HOURS);
+    fetched_at.and_then(|t| DateTime::parse_from_rfc3339(t).ok()).is_none_or(|t| t < cutoff)
 }
 
 /// FR-77: statuses that mean you've finished a title at least once.

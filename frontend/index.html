@@ -175,6 +175,8 @@ const api={
   getCommunityByAnilist:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/community`),
   getInsights:()=>apiFetch('/insights'),
   getFriends:()=>apiFetch('/friends'),
+  syncFriends:()=>apiFetch('/friends/sync',{method:'POST'}),
+  setFriendSettings:(mutualOnly)=>apiFetch('/friends/settings',{method:'PUT',body:JSON.stringify({mutual_only:mutualOnly})}),
   addFriend:(username)=>apiFetch('/friends',{method:'POST',body:JSON.stringify({username})}),
   refreshFriend:(id)=>apiFetch(`/friends/${id}/refresh`,{method:'POST'}),
   deleteFriend:(id)=>apiFetch(`/friends/${id}`,{method:'DELETE'}),
@@ -229,14 +231,25 @@ async function loadProfileData(){
   }catch(e){ console.error('profile load failed:',e); }
   render();
 }
-// Friends (PRD 4.12). Only adding and Refresh reach AniList; the list, the
-// comparison and the detail page's friend scores all read the stored copies.
+// Friends (PRD 4.12). The people you follow on AniList come in by sync
+// (FR-79) and their lists by a slow background queue (FR-80); adding,
+// Refresh and a stale comparison fetch one right away. The detail page's
+// friend scores read the stored copies only.
 // _friends: null = not loaded yet, false = last fetch failed, array = loaded.
-let _friends=null;
+// _friendSync: {synced_at, mutual_only} from the same response.
+let _friends=null,_friendSync=null,_friendsPoll=null;
+function setFriends(r){_friends=r.friends;_friendSync={synced_at:r.synced_at,mutual_only:r.mutual_only};}
 async function loadFriends(){
-  try{ _friends=(await api.getFriends()).friends; }
+  try{ setFriends(await api.getFriends()); }
   catch(e){ console.error('friends fetch failed:',e); _friends=false; }
-  render();
+  render();pollFriends();
+}
+// While the queue still has lists to fetch, look again every 10 s (a local
+// read: the queue itself paces AniList) so each row's status stays current.
+function pollFriends(){
+  clearTimeout(_friendsPoll);_friendsPoll=null;
+  const waiting=Array.isArray(_friends)&&_friends.some(f=>f.list_status==='pending'||f.list_status==='fetching');
+  if(state.view==='profile'&&waiting)_friendsPoll=setTimeout(()=>{_friendsPoll=null;if(state.view==='profile')loadFriends();},10000);
 }
 // _friendScores[anilist_id]: undefined = not asked yet, null = in flight or
 // failed (shown as nothing), array = friends who scored that title.
@@ -253,7 +266,7 @@ let _compare;
 async function loadCompare(){
   const c=state.compare;_compare=undefined;
   try{ const r=await api.compareFriend(c.friendId,c.mediaType); if(state.compare===c)_compare=r; }
-  catch(e){ console.error('compare fetch failed:',e); if(state.compare===c)_compare=false; }
+  catch(e){ if(state.compare===c){_compare=false;friendFailed(c.friendId,e);} }
   render();
 }
 const DISCOVER_SECTIONS=[
@@ -527,7 +540,7 @@ H.nav = (el)=>{
   else go(t);
   if(t==='discover')loadDiscoverType(state.discoverType);
   if(t==='profile'&&!_profileStats)loadProfileData();
-  if(t==='profile'&&!Array.isArray(_friends))loadFriends();
+  if(t==='profile')loadFriends();
   if(t==='feed'&&!_feedCache[state.feedType])loadFeed(state.feedType);
   render();
 };
@@ -617,7 +630,7 @@ H.disconnect = async ()=>{
   try{await api.authLogout();}catch(e){}
   state.connected=false;state.profileSettingsOpen=false;
   _profileStats=null;_profileFavorites=null;_personCache={};_studioCache={};_userCache={};
-  _friends=null;_friendScores={};_compare=undefined;
+  _friends=null;_friendSync=null;_friendScores={};_compare=undefined;clearTimeout(_friendsPoll);
   state.compare=null;state.friendError=null;state.friendInput='';
   render();
 };
@@ -1136,7 +1149,24 @@ H.refreshFriend = async (el)=>{
   const f=await fetchFriend(id,()=>api.refreshFriend(id));
   if(f&&state.view==='compare'&&state.compare&&state.compare.friendId===id)loadCompare();
 };
-// Local only: nothing changes on AniList.
+// FR-79: who you follow on AniList, now. Reads no lists.
+H.syncFriends = async ()=>{
+  if(state.friendBusy)return;
+  state.friendBusy='sync';state.friendError=null;render();
+  try{ setFriends(await api.syncFriends()); _friendScores={}; }
+  catch(e){ friendFailed('sync',e); }
+  state.friendBusy=null;render();pollFriends();
+};
+// FR-79: the setting is local; the sync after it applies it.
+H.setMutualOnly = async (el)=>{
+  const on=el.dataset.arg==='1';
+  if(state.friendBusy||!_friendSync||_friendSync.mutual_only===on)return;
+  try{ await api.setFriendSettings(on); _friendSync.mutual_only=on; }
+  catch(e){ console.error('friend setting failed:',e); state.friendError={id:'sync',message:"Couldn't save that setting."}; render(); return; }
+  H.syncFriends();
+};
+// Local only: nothing changes on AniList. A friend from AniList is hidden
+// rather than deleted (FR-70), so either way they leave this list.
 H.removeFriend = async (el)=>{
   const id=+el.dataset.arg;
   try{ await api.deleteFriend(id); }
@@ -1164,7 +1194,7 @@ H.compareUser = async ()=>{
   const f=known?null:await fetchFriend('user',()=>api.addFriend(u.name));
   if(known||f)openCompare(known?u.anilist_id:f.anilist_user_id);
 };
-H.backCompare = ()=>{const r=state.compareReturn;state.compare=null;_compare=undefined;go(r||'profile');};
+H.backCompare = ()=>{const r=state.compareReturn||'profile';state.compare=null;_compare=undefined;go(r);if(r==='profile')loadFriends();};
 H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};loadCompare();render();};
 H.retryCompare = ()=>{loadCompare();render();};
 // FR-76: a new column sorts high to low; the same column again flips it.
@@ -2660,10 +2690,10 @@ function avatarBox(url,name,size,radius){
   return `<div style="flex:0 0 ${size}px;width:${size}px;height:${size}px;border-radius:${radius||Math.round(size/4)+'px'};position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${Math.round(size*.36)}px;color:rgba(255,255,255,.85);">${esc(initials(name))}</span>${povr(url,name)}</div>`;
 }
 // The app's two button looks: primary (accent fill) and quiet (surface + line).
-// A busy button is inert: data-act="" matches no handler.
-function actBtn(label,act,arg,primary,busy){
+// A busy button is inert: data-act="" matches no handler. `tip` is a tooltip.
+function actBtn(label,act,arg,primary,busy,tip){
   const look=primary?'background:var(--accent);color:#04121d;font-weight:700;':'background:var(--s2);border:1px solid var(--line);color:var(--t2);font-weight:600;';
-  return `<div data-act="${busy?'':act}" data-arg="${arg}" ${busy?'':`data-hover="${primary?'filter:brightness(1.1)':'border-color:var(--accent);color:var(--t1)'}"`} style="flex:0 0 auto;padding:9px 14px;border-radius:9px;font-size:12.5px;white-space:nowrap;cursor:${busy?'default':'pointer'};${look}${busy?'opacity:.6;':''}">${esc(label)}</div>`;
+  return `<div data-act="${busy?'':act}" data-arg="${arg}" ${tip?`title="${esc(tip)}" `:''}${busy?'':`data-hover="${primary?'filter:brightness(1.1)':'border-color:var(--accent);color:var(--t1)'}"`} style="flex:0 0 auto;padding:9px 14px;border-radius:9px;font-size:12.5px;white-space:nowrap;cursor:${busy?'default':'pointer'};${look}${busy?'opacity:.6;':''}">${esc(label)}</div>`;
 }
 function friendErrorNote(id){
   const e=state.friendError;if(!e||e.id!==id)return '';
@@ -2675,26 +2705,50 @@ function titleThumb(it,w,h){
 function fmtDelta(d){return d==null?'—':(d>0?'+':'')+Number(d).toFixed(1);}
 function deltaColor(d){return d>0?'#6bd08a':d<0?'#e57373':'var(--t3)';}
 
-// FR-70: the Friends section on Profile.
+const FRIENDS_SETTING_HELP="Who counts as a friend. Everyone I follow: every AniList user you follow. Only mutual follows: only the people you follow who also follow you back. Either way, friends you add by username stay, and nothing changes on AniList.";
+const HIDE_HELP="You follow them on AniList, so they're hidden here instead of removed. Add them by username to bring them back, or unfollow them on AniList.";
+// FR-70: a friend's list status, in words.
+function friendStatus(f){
+  const counts=`${f.anime_count} anime · ${f.manga_count} manga`;
+  if(f.list_status==='fetching')return 'Fetching their list…';
+  if(f.list_status==='private')return f.fetched_at?`Private list now · ${counts} · fetched ${timeAgo(f.fetched_at)}`:"Private list, can't compare";
+  if(f.list_status==='pending')return 'Not fetched yet';
+  return `${counts} · fetched ${timeAgo(f.fetched_at)}`;
+}
+// FR-70/FR-79: the Friends section on Profile.
 function friendsSection(){
-  const fr=_friends,adding=state.friendBusy==='add';
+  const fr=_friends,sy=_friendSync,adding=state.friendBusy==='add',syncing=state.friendBusy==='sync';
   const note=(msg)=>`<div style="font-size:12.5px;color:var(--t4);line-height:1.6;">${msg}</div>`;
   const rows=fr===null?note('Loading friends…')
     :fr===false?note("Couldn't load your friends -- open Profile again to retry.")
-    :!fr.length?note("No friends yet. Add someone by their AniList username, or use Compare lists on anyone's profile. Their list has to be public.")
-    :fr.map(f=>{const busy=state.friendBusy===f.anilist_user_id;return `<div>
+    :!fr.length?note("No friends yet. Sync from AniList to add the people you follow, add someone by their AniList username, or use Compare lists on anyone's profile. Their list has to be public.")
+    :fr.map(f=>{const busy=state.friendBusy===f.anilist_user_id,fromAl=f.source==='anilist',noList=f.list_status==='private'&&!f.fetched_at;return `<div>
       <div style="display:flex;align-items:center;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:10px 12px;">
         <div data-act="openUser" data-arg="${f.anilist_user_id}" title="View profile" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer;">
           ${avatarBox(f.avatar_url,f.name,38)}
-          <div style="min-width:0;"><div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(f.name)}</div>
-          <div style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:var(--t4);margin-top:3px;">${f.anime_count} anime · ${f.manga_count} manga · fetched ${esc(timeAgo(f.fetched_at))}</div></div>
+          <div style="min-width:0;"><div style="display:flex;align-items:baseline;gap:8px;min-width:0;"><span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(f.name)}</span><span style="flex:0 0 auto;font-size:11px;color:var(--t4);">${fromAl?'From AniList':'Added by you'}</span></div>
+          <div style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:${noList?'#e5a973':'var(--t4)'};margin-top:3px;">${esc(friendStatus(f))}</div></div>
         </div>
         ${actBtn(busy?'Refreshing…':'Refresh','refreshFriend',f.anilist_user_id,false,busy)}
-        ${actBtn('Remove','removeFriend',f.anilist_user_id,false,busy)}
-        ${actBtn('Compare','openCompare',f.anilist_user_id,true)}
+        ${actBtn(fromAl?'Hide':'Remove','removeFriend',f.anilist_user_id,false,busy,fromAl?HIDE_HELP:'')}
+        ${actBtn('Compare','openCompare',f.anilist_user_id,true,noList,noList?"Their list is private on AniList, so there's nothing to compare.":'')}
       </div>${friendErrorNote(f.anilist_user_id)}</div>`;}).join('');
+  const info=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01" stroke-linecap="round"/></svg>`;
+  const mutual=!!(sy&&sy.mutual_only);
+  const seg=(on,lbl)=>{const sel=mutual===on;return `<div data-act="${syncing?'':'setMutualOnly'}" data-arg="${on?1:0}" style="padding:6px 12px;border-radius:7px;cursor:${syncing?'default':'pointer'};font-weight:600;font-size:12px;background:${sel?'var(--accent)':'transparent'};color:${sel?'#04121d':'var(--t3)'};">${lbl}</div>`;};
   return `<div style="margin-bottom:30px;">
-    <h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">Friends</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+      <h2 style="font-size:16px;font-weight:700;">Friends</h2>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:var(--t4);">${syncing?'Syncing…':sy&&sy.synced_at?`Synced ${esc(timeAgo(sy.synced_at))}`:'Not synced yet'}</span>
+        ${actBtn(syncing?'Syncing…':'Sync from AniList','syncFriends','',false,syncing)}
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <div style="display:flex;background:var(--s1);border:1px solid var(--line);border-radius:9px;padding:3px;gap:3px;">${seg(false,'Everyone I follow')}${seg(true,'Only mutual follows')}</div>
+      <span title="${esc(FRIENDS_SETTING_HELP)}" style="display:inline-flex;color:var(--t4);cursor:help;">${info}</span>
+    </div>
+    ${friendErrorNote('sync')}
     <div style="display:flex;gap:10px;">
       <input id="in-friend" data-input="friendInput" data-enter="addFriend" value="${esc(state.friendInput)}" placeholder="Add a friend by AniList username" style="flex:1;min-width:0;height:40px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:0 14px;font-size:13px;color:var(--t1);outline:none;" />
       ${actBtn(adding?'Adding…':'Add','addFriend','',true,adding)}

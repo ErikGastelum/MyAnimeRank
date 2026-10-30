@@ -63,6 +63,7 @@ async fn finish_login(st: &Shared, access_token: &str, expires_in: Option<i64>) 
     st.db
         .save_auth(access_token, expires_at.as_deref(), viewer.id, &viewer.name, viewer.score_format.as_deref())
         .map_err(|e| e.to_string())?;
+    crate::sync::sync_friends_later(st); // FR-79
     Ok(viewer.name)
 }
 
