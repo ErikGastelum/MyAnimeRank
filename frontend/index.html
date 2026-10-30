@@ -451,7 +451,7 @@ const PICK_SEASONS=['WINTER','SPRING','SUMMER','FALL'];
 const PICK_ADULT_GENRES=['Hentai'];
 function pickDefaults(){
   return {source:'not_planning',genres:{},tags:{},pop:null,popMin:null,popMax:null,scoreMin:null,formats:[],
-    yearMin:null,yearMax:null,season:null,eps:null,epsMin:null,epsMax:null,statuses:[],adult:false,spoilers:false};
+    yearMin:null,yearMax:null,season:null,eps:null,epsMin:null,epsMax:null,statuses:[],adult:false,spoilers:false,sequels:false};
 }
 // Last-used source and filters survive restarts; anything unreadable falls
 // back to the defaults, key by key.
@@ -684,6 +684,7 @@ function pickFilters(p){
   for(const k in nums)if(nums[k]!=null)f[k]=nums[k];
   if(p.season)f.season=p.season;
   if(p.adult)f.include_adult=true;
+  if(p.sequels)f.include_unwatched_sequels=true;
   return f;
 }
 function pickErrorText(e,fallback){
@@ -712,15 +713,18 @@ async function runPick(){
   try{
     let resp=await ask(), note=null;
     if(!resp.result&&resp.exhausted){
-      note=`You’ve seen all ${seen.ids.length} ${seen.ids.length===1?'match':'matches'} for these filters, so it’s starting over.`;
+      // Start over; only if that finds something were the shown ones really all of it.
+      const count=seen.ids.length;
       seen.ids=[];seen.size=null;
       resp=await ask();
+      if(resp.result)note=`You’ve seen all ${count} ${count===1?'match':'matches'} for these filters, so it’s starting over.`;
     }
     seen.size=resp.size;
     if(resp.result)seen.ids.push(resp.result.anilist_id);
     // Everything that matched: what's left (pool, this pick included) plus what was shown before.
     const total=resp.result?resp.pool+seen.ids.length-1:0;
-    state.pickResult={item:resp.result,total,exact:resp.pool_exact,capped:!resp.pool_exact&&resp.pool>=5000,source:p.source,note,fresh:true};
+    state.pickResult={item:resp.result,total,exact:resp.pool_exact,capped:!resp.pool_exact&&resp.pool>=5000,source:p.source,note,fresh:true,
+      nextUpFor:resp.next_up_for,blocked:resp.blocked};
   }catch(e){
     console.error('pick failed:',e);
     state.pickError=pickErrorText(e,'Something went wrong picking a title. Try again.');
@@ -751,6 +755,8 @@ H.setPickSeason = (el)=>setPick(p=>{p.season=el.dataset.arg||null;});
 H.togglePickFormat = (el)=>setPick(p=>{const f=el.dataset.arg;p.formats=p.formats.includes(f)?p.formats.filter(x=>x!==f):[...p.formats,f];});
 H.togglePickAiring = (el)=>setPick(p=>{const s=el.dataset.arg;p.statuses=p.statuses.includes(s)?p.statuses.filter(x=>x!==s):[...p.statuses,s];});
 H.togglePickSpoilers = ()=>setPick(p=>{p.spoilers=!p.spoilers;});
+H.togglePickSequels = ()=>setPick(p=>{p.sequels=!p.sequels;});
+H.includeSequelsAndPick = ()=>{state.pick.sequels=true;savePickPrefs();runPick();};
 // Turning adult titles off also drops any adult genre or tag already chosen.
 H.togglePickAdult = ()=>setPick(p=>{
   p.adult=!p.adult;
@@ -2166,7 +2172,10 @@ function pickModal(){
       ${label('Airing status')}
       ${row(Object.entries(PICK_AIRING).map(([k,v])=>chip(p.statuses.includes(k),'togglePickAiring',k,v)).join(''))}
       <div style="margin-top:20px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        ${toggle(p.adult,'togglePickAdult','Include adult titles')}
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          ${toggle(p.sequels,'togglePickSequels','Include sequels I\'m not caught up on')}
+          ${toggle(p.adult,'togglePickAdult','Include adult titles')}
+        </div>
         <div data-act="resetPickFilters" data-hover="border-color:var(--accent);color:var(--t1)" style="padding:8px 14px;border-radius:9px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:12.5px;cursor:pointer;">Reset filters</div>
       </div>`;
 
@@ -2179,6 +2188,12 @@ function pickModal(){
   let result;
   if(!res&&busy)result=msg('<span style="font-family:\'Overpass Mono\',monospace;font-size:12px;color:var(--t4);">Picking…</span>');
   else if(!res)result=msg('Set any filters you like, then pick.');
+  else if(!r&&res.blocked)result=msg(`<div style="font-weight:700;color:var(--t1);margin-bottom:6px;">Nothing you can start right now</div>
+      The matches it tried are all sequels you're not caught up on. Turn on “Include sequels I'm not caught up on”, or loosen a filter.
+      <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:16px;">
+        <div data-act="includeSequelsAndPick" data-hover="border-color:var(--accent);color:var(--t1)" style="padding:9px 16px;border-radius:9px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:13px;cursor:pointer;">Include those sequels</div>
+        <div data-act="resetPickFilters" data-hover="border-color:var(--accent);color:var(--t1)" style="padding:9px 16px;border-radius:9px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:13px;cursor:pointer;">Reset filters</div>
+      </div>`);
   else if(!r)result=msg(`<div style="font-weight:700;color:var(--t1);margin-bottom:6px;">${res.source==='planning'&&!planningCount?'Your Planning list has no anime':'Nothing matches these filters'}</div>
       ${res.source==='planning'&&!planningCount?'Add some from Search or Discover, or pick from anime not on your list.':'Try loosening a filter: fewer tags or genres, a wider year or popularity range, or another format.'}
       ${res.source==='planning'&&!planningCount?'':`<div style="display:flex;justify-content:center;margin-top:16px;"><div data-act="resetPickFilters" data-hover="border-color:var(--accent);color:var(--t1)" style="padding:9px 16px;border-radius:9px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:13px;cursor:pointer;">Reset filters</div></div>`}`);
@@ -2186,7 +2201,12 @@ function pickModal(){
     const tags=(r.tags_ranked||[]).filter(t=>(p.spoilers||!t.is_spoiler)&&(p.adult||!t.is_adult)).slice(0,5);
     const meta=joinMeta([r.year??r.start_year,enumLabel(r.format),r.episodes!=null?r.episodes+(r.episodes===1?' ep':' eps'):null,r.popularity!=null?fmtCount(r.popularity)+' members':null,PICK_AIRING[r.airing_status]||enumLabel(r.airing_status)]);
     const count=res.capped?'One of over 5,000 matches':`One of ${fmtCount(res.total)}${res.exact?'':'+'} ${res.total===1&&res.exact?'match':'matches'}${res.source==='planning'?' on your Planning list':''}`;
+    // FR-71: the pick landed on a sequel you're not caught up on; this is where to start.
+    const via=res.nextUpFor;
     result=`${res.note?`<div style="margin-bottom:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);color:var(--t2);font-size:12.5px;">${esc(res.note)}</div>`:''}
+    ${via?`<div style="margin-bottom:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);font-size:12.5px;line-height:1.5;">
+      <div style="color:var(--t1);font-weight:600;">You haven't seen the prequel. Next up: ${esc(displayTitle(r))}</div>
+      <div style="color:var(--t3);margin-top:2px;">Picked: ${esc(displayTitle(via))}</div></div>`:''}
     <div style="background:var(--s2);border:1px solid var(--line2);border-radius:14px;overflow:hidden;${res.fresh?'animation:rk-pop .2s ease;':''}">
       <div style="display:flex;gap:16px;padding:16px;">
         <div style="flex:0 0 112px;height:160px;border-radius:10px;position:relative;overflow:hidden;background:${cover(r.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(r)))}</span>${povr(r.cover_url,displayTitle(r))}</div>
@@ -2203,12 +2223,12 @@ function pickModal(){
         </div>
       </div>
       ${r.synopsis?`<div id="pick-synopsis" data-keep-scroll style="max-height:150px;overflow-y:auto;margin:0 16px 14px;font-size:13px;line-height:1.6;color:var(--t2);">${fmtSynopsis(r.synopsis)}</div>`:''}
-      <div style="padding:0 16px 14px;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">${count}</div>
-      ${res.capped?`<div style="margin:0 16px 14px;font-size:12px;color:var(--t3);line-height:1.5;">AniList only pages through 5,000 results, so these picks come from its 5,000 oldest or 5,000 newest entries. Add a filter, such as a year range, to pick from all of them.</div>`:''}
+      ${via?'':`<div style="padding:0 16px 14px;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">${count}</div>`}
+      ${res.capped&&!via?`<div style="margin:0 16px 14px;font-size:12px;color:var(--t3);line-height:1.5;">AniList only pages through 5,000 results, so these picks come from its 5,000 oldest or 5,000 newest entries. Add a filter, such as a year range, to pick from all of them.</div>`:''}
     </div>`;
   }
   const actions=`<div style="display:flex;margin-top:12px;">${rerollBtn}</div>${r?`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-        ${res.source==='not_planning'?quietBtn('pickAdd',onPlanning?'On your Planning list':inLib?'In your library':'Add to Planning',!!inLib):''}
+        ${res.source==='not_planning'||res.nextUpFor?quietBtn('pickAdd',onPlanning?'On your Planning list':inLib?'In your library':'Add to Planning',!!inLib):''}
         ${quietBtn('pickWatch',watching?'Watching':'Start watching',watching)}
         ${quietBtn('pickDetails','Open details',false)}</div>`:''}`;
   const error=state.pickError?`<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--s2);border:1px solid color-mix(in srgb,#e0a24a 40%,var(--line2));color:#e0a24a;font-size:12.5px;line-height:1.5;">${esc(state.pickError)}</div>`:'';
