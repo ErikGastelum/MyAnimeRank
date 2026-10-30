@@ -542,9 +542,18 @@ impl AniList {
             Some(id) => json!({"id": id}),
             None => json!({"name": name}),
         };
-        let user = match self.graphql(q, Some(vars), None, 15).await {
-            Err(e) if is_private(&e) => return Ok(FriendLookup::Private(name.to_string())),
-            Err(AlError::NotFound(_)) => return Ok(FriendLookup::NoSuchUser),
+        let user = match self.graphql(q, Some(vars.clone()), None, 15).await {
+            // The lookup says "Not Found." for a private user exactly as for a
+            // missing one; only the list query tells them apart ("Private
+            // User" vs "User not found"), still two requests in all.
+            Err(AlError::NotFound(_)) => {
+                let q = "query ($id: Int, $name: String) { MediaListCollection(userId: $id, userName: $name, type: ANIME) { hasNextChunk } }";
+                return match self.graphql(q, Some(vars), None, 15).await {
+                    Err(e) if is_private(&e) => Ok(FriendLookup::Private(name.to_string())),
+                    Err(AlError::NotFound(_)) | Ok(_) => Ok(FriendLookup::NoSuchUser),
+                    Err(e) => Err(e),
+                };
+            }
             Err(e) => return Err(e),
             Ok(data) if data["User"].is_null() => return Ok(FriendLookup::NoSuchUser),
             Ok(data) => data["User"].clone(),

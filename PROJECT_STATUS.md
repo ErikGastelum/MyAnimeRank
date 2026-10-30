@@ -25,7 +25,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (60), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (61), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -101,13 +101,16 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
-- **Friend Comparison (M10):** 8 more tests (59 in `tests/backend.rs`): the
+- **Friend Comparison (M10):** 9 more tests (60 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, cascade on removal, no token and no mutation on friend
-  fetches, score normalization, private/unknown/own-account refusals, the
-  comparison math and every PRD §7 shape. The UI was driven in headless
-  Chromium against the real router and a fake AniList. Not yet checked
-  against the real AniList API: see `docs/anilist-api-notes.md` #17.
+  fetches, score normalization, private/unknown/own-account refusals, an
+  empty public list, the comparison math and every PRD §7 shape. The UI was
+  driven in headless Chromium against the real router and a fake AniList.
+  Checked against the live AniList API (logged out) on a temp DB: public,
+  private, unknown and empty-list users, every score format, lists of 11,905
+  and 19,944 entries, add/compare/refresh/remove, two requests per fetch.
+  Findings in `docs/anilist-api-notes.md` #17.
 
 ---
 
@@ -175,6 +178,7 @@ Roughly by priority:
 10. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
 11. **Request volume:** debounce rapid +1 progress clicks; use the single-entry
     lookup in `resolve(remote)` and pending conflicts instead of the whole list.
-12. **Friend Comparison against live AniList:** add a real public friend and
-    a private one, and confirm the points in `docs/anilist-api-notes.md` #17
-    (private-user error shape, other users' score conversion, large lists).
+12. **Friend Comparison, still unverified:** the desktop window by hand
+    (Friends section, Compare page, taste-match tooltip, friend chips on a
+    detail page); adding a private user *by name* (only by id was possible);
+    a real 429's `Retry-After` (AniList now reports 30 req/min, not ~90).
