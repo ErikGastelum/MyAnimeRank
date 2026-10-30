@@ -699,6 +699,7 @@ Body: {
   source: "planning" | "not_planning",
   roll: number,                    // the client's Math.random(), 0 <= roll < 1
   exclude: [anilist_id],           // titles already shown for this source + filters (FR-70)
+  size: { lo, hi, shown },         // optional: the previous response's size for this source + filters
   filters: {                       // every field optional
     genres_in, genres_not_in, tags_in, tags_not_in: [string],
     popularity_min, popularity_max: number,      // AniList members, inclusive
@@ -711,13 +712,16 @@ Body: {
   }
 }
 Response: {
-  "result": { ...search result fields, popularity, airing_status,
+  "result": { ...search result fields, popularity, airing_status, start_year,
               tags_ranked: [ { name, rank, is_spoiler, is_adult } ] } | null,
   "pool": number,          // matches left, at most 5000; a lower bound unless pool_exact
   "pool_exact": boolean,
-  "exhausted": boolean     // result is null only because of `exclude`: clear it and start over
+  "exhausted": boolean,    // result is null only because of `exclude`: clear it and start over
+  "size": { lo, hi, shown } | null   // more than 50 matches: the pool holds lo to hi titles
 }
 // FR-70. Anime only. 422 on invalid input. An On Planning pick with no Planning titles left makes no AniList call.
+// AniList's pageInfo.total isn't a count, so a pool bigger than one page is measured with probe requests;
+// sending `size` back on the next reroll (same source and filters) skips that, making a reroll one AniList request.
 ```
 
 # 8. Frontend Design Brief (handoff for Claude Design)
