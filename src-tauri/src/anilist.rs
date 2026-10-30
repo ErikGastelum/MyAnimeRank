@@ -983,14 +983,19 @@ impl AniList {
     }
 
     /// FR-71: the earliest entry you haven't completed in `node`'s PREQUEL
-    /// chain, from its blocking `prequel` back, one request per entry for as
-    /// long as the pick has requests left. None when the requests run out
-    /// first, the chain loops or can't be read, or it ends on an entry the
-    /// filters rule out or already shown: the next-up is only ever a bonus,
-    /// so a failed lookup never fails the pick.
+    /// chain, from its blocking `prequel` back, for as long as the pick has
+    /// requests left. Each lookup brings the entry's related entries in full,
+    /// with their own relations (notes #27), so one request settles two
+    /// entries: the one looked up and the prequel it's waiting on. None when
+    /// the requests run out first, the chain loops or can't be read, or it
+    /// ends on an entry the filters rule out or already shown: the next-up is
+    /// only ever a bonus, so a failed lookup never fails the pick.
     async fn next_up(&self, run: &mut PickRun<'_>, node: &Value, prequel: i64) -> Option<Value> {
         let (filters, check) = (run.filters, run.check?);
-        let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }}");
+        let q = format!(
+            "query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {PICK_FIELDS}
+               relations {{ edges {{ node {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }} }} }} }}"
+        );
         let mut visited: HashSet<i64> = node["id"].as_i64().into_iter().collect();
         let mut id = prequel;
         loop {
@@ -1008,9 +1013,22 @@ impl AniList {
             if entry.is_null() {
                 return None;
             }
-            match blocking_prequel(&entry, &check.watched) {
-                Some(earlier) => id = earlier,
-                None => return next_up_allowed(&entry, filters, &check.shown).then_some(entry),
+            let Some(earlier) = blocking_prequel(&entry, &check.watched) else {
+                return next_up_allowed(&entry, filters, &check.shown).then_some(entry);
+            };
+            // The prequel came along in full. Only trust it with its own
+            // relations in hand; otherwise it takes a lookup of its own.
+            let related = arr(&entry["relations"]["edges"]).into_iter().map(|e| e["node"].clone()).find(|n| n["id"] == earlier);
+            let Some(prequel) = related.filter(|n| n["relations"]["edges"].is_array()) else {
+                id = earlier;
+                continue;
+            };
+            if !visited.insert(earlier) {
+                return None;
+            }
+            match blocking_prequel(&prequel, &check.watched) {
+                Some(further) => id = further,
+                None => return next_up_allowed(&prequel, filters, &check.shown).then_some(prequel),
             }
         }
     }
