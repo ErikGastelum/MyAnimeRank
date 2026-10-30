@@ -180,6 +180,7 @@ const api={
   addFriend:(username)=>apiFetch('/friends',{method:'POST',body:JSON.stringify({username})}),
   refreshFriend:(id)=>apiFetch(`/friends/${id}/refresh`,{method:'POST'}),
   deleteFriend:(id)=>apiFetch(`/friends/${id}`,{method:'DELETE'}),
+  unhideFriend:(id)=>apiFetch(`/friends/${id}/unhide`,{method:'POST'}),
   compareFriend:(id,mediaType)=>apiFetch(`/friends/${id}/compare?media_type=${mediaType}`),
   getFriendScores:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/friend-scores`),
 };
@@ -236,9 +237,10 @@ async function loadProfileData(){
 // Refresh and a stale comparison fetch one right away. The detail page's
 // friend scores read the stored copies only.
 // _friends: null = not loaded yet, false = last fetch failed, array = loaded.
-// _friendSync: {synced_at, mutual_only} from the same response.
-let _friends=null,_friendSync=null,_friendsPoll=null;
-function setFriends(r){_friends=r.friends;_friendSync={synced_at:r.synced_at,mutual_only:r.mutual_only};}
+// _friendSync: {synced_at, mutual_only}, _friendsHidden: the Hidden list
+// (FR-70), both from the same response.
+let _friends=null,_friendSync=null,_friendsHidden=[],_friendsPoll=null;
+function setFriends(r){_friends=r.friends;_friendsHidden=r.hidden||[];_friendSync={synced_at:r.synced_at,mutual_only:r.mutual_only};}
 async function loadFriends(){
   try{ setFriends(await api.getFriends()); }
   catch(e){ console.error('friends fetch failed:',e); _friends=false; }
@@ -462,6 +464,7 @@ const state = {
   // friends: friendBusy is what's fetching from AniList ('add', 'user' or a
   // friend's id), friendError {id, message} is shown next to whatever failed.
   friendInput:'', friendBusy:null, friendError:null,
+  hiddenOpen:false, hiddenNote:null,  // the collapsed Hidden list, and what the last Unhide did
   compare:null,              // {friendId, mediaType}
   compareSort:{key:'your_score',dir:-1}, compareReturn:null,
 };
@@ -630,7 +633,7 @@ H.disconnect = async ()=>{
   try{await api.authLogout();}catch(e){}
   state.connected=false;state.profileSettingsOpen=false;
   _profileStats=null;_profileFavorites=null;_personCache={};_studioCache={};_userCache={};
-  _friends=null;_friendSync=null;_friendScores={};_compare=undefined;clearTimeout(_friendsPoll);
+  _friends=null;_friendSync=null;_friendsHidden=[];_friendScores={};_compare=undefined;clearTimeout(_friendsPoll);
   state.compare=null;state.friendError=null;state.friendInput='';
   render();
 };
@@ -1165,14 +1168,29 @@ H.setMutualOnly = async (el)=>{
   catch(e){ console.error('friend setting failed:',e); state.friendError={id:'sync',message:"Couldn't save that setting."}; render(); return; }
   H.syncFriends();
 };
+H.toggleHidden = ()=>{state.hiddenOpen=!state.hiddenOpen;state.hiddenNote=null;render();};
+// FR-70: the server checks your following list right away. Still followed,
+// they're back; not, the hidden record is simply gone.
+H.unhideFriend = async (el)=>{
+  const id=+el.dataset.arg;if(state.friendBusy)return;
+  const name=(_friendsHidden.find(h=>h.anilist_user_id===id)||{}).name||'They';
+  state.friendBusy=`unhide-${id}`;state.friendError=null;state.hiddenNote=null;render();
+  try{
+    const r=await api.unhideFriend(id);setFriends(r);_friendScores={};
+    state.hiddenNote=r.unhidden?`${name} is back in your friends.`:`You no longer follow ${name} on AniList, so they were removed.`;
+  }catch(e){ friendFailed('hidden',e); }
+  state.friendBusy=null;render();pollFriends();
+};
 // Local only: nothing changes on AniList. A friend from AniList is hidden
 // rather than deleted (FR-70), so either way they leave this list.
 H.removeFriend = async (el)=>{
   const id=+el.dataset.arg;
-  try{ await api.deleteFriend(id); }
+  let r;
+  try{ r=await api.deleteFriend(id); }
   catch(e){ console.error('remove friend failed:',e); state.friendError={id,message:"Couldn't remove this friend."}; render(); return; }
   if(Array.isArray(_friends))_friends=_friends.filter(f=>f.anilist_user_id!==id);
   _friendScores={};render();
+  if(r&&r.hidden)loadFriends(); // the Hidden list just grew
 };
 function openCompare(friendId,mediaType){
   // From a title opened out of the comparison, keep the comparison's own Back
@@ -2734,6 +2752,15 @@ function friendsSection(){
         ${actBtn('Compare','openCompare',f.anilist_user_id,true,noList,noList?"Their list is private on AniList, so there's nothing to compare.":'')}
       </div>${friendErrorNote(f.anilist_user_id)}</div>`;}).join('');
   const info=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01" stroke-linecap="round"/></svg>`;
+  const hid=_friendsHidden,chev=`<svg width="12" height="12" viewBox="0 0 24 24" style="transform:rotate(${state.hiddenOpen?90:0}deg);transition:transform .14s;"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const hiddenSection=!hid.length&&!state.hiddenNote&&!(state.friendError&&state.friendError.id==='hidden')?'':`<div style="margin-top:12px;">
+      ${hid.length?`<div data-act="toggleHidden" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--t3);">${chev}Hidden (${hid.length})</div>`:''}
+      ${state.hiddenOpen&&hid.length?`<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">${hid.map(h=>{const busy=state.friendBusy===`unhide-${h.anilist_user_id}`;return `<div style="display:flex;align-items:center;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:8px 12px;">
+        ${avatarBox(h.avatar_url,h.name,28)}<span style="flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(h.name)}</span>
+        ${actBtn(busy?'Unhiding…':'Unhide','unhideFriend',h.anilist_user_id,false,busy,"Shows them in your friends again if you still follow them on AniList; otherwise just forgets them.")}</div>`;}).join('')}</div>`:''}
+      ${state.hiddenNote?`<div style="font-size:12.5px;color:var(--t3);margin-top:8px;">${esc(state.hiddenNote)}</div>`:''}
+      ${friendErrorNote('hidden')}
+    </div>`;
   const mutual=!!(sy&&sy.mutual_only);
   const seg=(on,lbl)=>{const sel=mutual===on;return `<div data-act="${syncing?'':'setMutualOnly'}" data-arg="${on?1:0}" style="padding:6px 12px;border-radius:7px;cursor:${syncing?'default':'pointer'};font-weight:600;font-size:12px;background:${sel?'var(--accent)':'transparent'};color:${sel?'#04121d':'var(--t3)'};">${lbl}</div>`;};
   return `<div style="margin-bottom:30px;">
@@ -2755,6 +2782,7 @@ function friendsSection(){
     </div>
     ${friendErrorNote('add')}
     <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px;">${rows}</div>
+    ${hiddenSection}
   </div>`;
 }
 

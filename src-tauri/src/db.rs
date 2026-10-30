@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS friend (
     source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('anilist','manual')),
     fetched_at TEXT,
     private_at TEXT,
-    hidden INTEGER NOT NULL DEFAULT 0
+    hidden INTEGER NOT NULL DEFAULT 0,
+    retry_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS friend_sync (
@@ -250,8 +251,9 @@ pub struct Friend {
     pub manga_count: i64,
 }
 
-/// Someone on your AniList following list (FR-79).
-#[derive(Debug, Clone, PartialEq)]
+/// Someone on your AniList following list (FR-79); also a hidden friend in
+/// GET /friends.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FollowedUser {
     pub anilist_user_id: i64,
     pub name: String,
@@ -933,7 +935,7 @@ impl Db {
             "INSERT INTO friend (anilist_user_id, name, avatar_url, added_at, source, fetched_at) VALUES (?1, ?2, ?3, ?4, 'manual', ?4)
              ON CONFLICT(anilist_user_id) DO UPDATE SET
                 name = excluded.name, avatar_url = excluded.avatar_url, fetched_at = excluded.fetched_at,
-                source = 'manual', private_at = NULL, hidden = 0",
+                source = 'manual', private_at = NULL, hidden = 0, retry_at = NULL",
             params![list.anilist_user_id, list.name, list.avatar_url, fetched_at],
         )?;
         write_friend_entries(&tx, list)?;
@@ -948,7 +950,8 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let updated = tx.execute(
-            "UPDATE friend SET name = ?, avatar_url = ?, fetched_at = ?, private_at = NULL WHERE anilist_user_id = ? AND hidden = 0",
+            "UPDATE friend SET name = ?, avatar_url = ?, fetched_at = ?, private_at = NULL, retry_at = NULL
+             WHERE anilist_user_id = ? AND hidden = 0",
             params![list.name, list.avatar_url, fetched_at, list.anilist_user_id],
         )?;
         if updated == 0 {
@@ -964,6 +967,31 @@ impl Db {
     pub fn mark_friend_private(&self, anilist_user_id: i64, at: &str) -> DbResult<()> {
         self.conn().execute("UPDATE friend SET private_at = ? WHERE anilist_user_id = ?", params![at, anilist_user_id])?;
         Ok(())
+    }
+
+    /// FR-80: the queue leaves this friend alone for an hour after a fetch
+    /// failed for a reason other than reaching AniList. Stored, so a restart
+    /// doesn't retry them at once.
+    pub fn skip_friend(&self, anilist_user_id: i64) -> DbResult<()> {
+        let until = (Utc::now() + Duration::hours(FAILED_FETCH_SKIP_HOURS)).to_rfc3339_opts(SecondsFormat::Micros, false);
+        self.conn().execute("UPDATE friend SET retry_at = ? WHERE anilist_user_id = ?", params![until, anilist_user_id])?;
+        Ok(())
+    }
+
+    /// FR-70: the Hidden list, by name.
+    pub fn get_hidden_friends(&self) -> DbResult<Vec<FollowedUser>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT anilist_user_id, name, avatar_url FROM friend WHERE hidden = 1 ORDER BY name COLLATE NOCASE")?;
+        let hidden = stmt
+            .query_map([], |r| Ok(FollowedUser { anilist_user_id: r.get(0)?, name: r.get(1)?, avatar_url: r.get(2)? }))?
+            .collect::<DbResult<Vec<_>>>()?;
+        Ok(hidden)
+    }
+
+    /// FR-70: back in the list, their list to be fetched; a sync right after
+    /// decides whether you still follow them. False if they weren't hidden.
+    pub fn unhide_friend(&self, anilist_user_id: i64) -> DbResult<bool> {
+        Ok(self.conn().execute("UPDATE friend SET hidden = 0 WHERE anilist_user_id = ? AND hidden = 1", [anilist_user_id])? > 0)
     }
 
     /// Hidden friends aren't listed (FR-70).
@@ -994,7 +1022,7 @@ impl Db {
         let Some(source) = source else { return Ok(None) };
         let hide = source == "anilist";
         if hide {
-            tx.execute("UPDATE friend SET hidden = 1, fetched_at = NULL, private_at = NULL WHERE anilist_user_id = ?", [anilist_user_id])?;
+            tx.execute("UPDATE friend SET hidden = 1, fetched_at = NULL, private_at = NULL, retry_at = NULL WHERE anilist_user_id = ?", [anilist_user_id])?;
             tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [anilist_user_id])?;
         } else {
             tx.execute("DELETE FROM friend WHERE anilist_user_id = ?", [anilist_user_id])?;
@@ -1056,21 +1084,23 @@ impl Db {
     /// FR-80: whose list the background queue fetches next: never fetched
     /// first, then the oldest fetch, among lists older than 24 hours; a
     /// private friend only 7 days after AniList last said so; never a hidden
-    /// one, nor anyone in `skip`. None when every list is fresh.
-    pub fn next_friend_to_fetch(&self, skip: &HashSet<i64>) -> DbResult<Option<(i64, String)>> {
+    /// one, nor one set aside after a failed fetch. None when every list is fresh.
+    pub fn next_friend_to_fetch(&self) -> DbResult<Option<(i64, String)>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT anilist_user_id, name, fetched_at, private_at FROM friend WHERE hidden = 0")?;
+        let mut stmt = conn.prepare("SELECT anilist_user_id, name, fetched_at, private_at, retry_at FROM friend WHERE hidden = 0")?;
+        type Candidate = (i64, String, Option<String>, Option<String>, Option<String>);
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)))?
-            .collect::<DbResult<Vec<_>>>()?;
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<DbResult<Vec<Candidate>>>()?;
         let parse = |t: &Option<String>| t.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok());
-        let private_retry = Utc::now() - Duration::days(PRIVATE_RETRY_DAYS);
+        let now = Utc::now();
+        let private_retry = now - Duration::days(PRIVATE_RETRY_DAYS);
         let next = rows
             .iter()
-            .filter(|(id, ..)| !skip.contains(id))
-            .filter(|(_, _, fetched, _)| friend_list_is_stale(fetched.as_deref()))
-            .filter(|(_, _, _, private)| parse(private).is_none_or(|at| at < private_retry))
-            .min_by_key(|(id, _, fetched, _)| (parse(fetched), *id));
+            .filter(|(.., retry_at)| parse(retry_at).is_none_or(|at| at <= now))
+            .filter(|(_, _, fetched, ..)| friend_list_is_stale(fetched.as_deref()))
+            .filter(|(_, _, _, private, _)| parse(private).is_none_or(|at| at < private_retry))
+            .min_by_key(|(id, _, fetched, ..)| (parse(fetched), *id));
         Ok(next.map(|(id, name, ..)| (*id, name.clone())))
     }
 
@@ -1185,12 +1215,21 @@ fn migrate_existing_media_columns(conn: &Connection) -> DbResult<()> {
 
 /// PRD §5: a `friend` table from before FR-79 (no `source`) gains the new
 /// columns without any existing value changing. The rename is schema-only,
-/// and the UPDATE only fills the new `fetched_at`.
+/// and the UPDATE only fills the new `fetched_at`. One from before the queue
+/// remembered its skips (no `retry_at`) just gains that column.
 fn migrate_friend_table(conn: &Connection) -> DbResult<()> {
-    let has_source: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('friend') WHERE name = 'source'", [], |r| r.get(0))?;
-    if has_source {
-        return Ok(());
+    let has = |col: &str| conn.query_row("SELECT COUNT(*) FROM pragma_table_info('friend') WHERE name = ?", [col], |r| r.get::<_, bool>(0));
+    if !has("source")? {
+        migrate_friend_table_v1(conn)?;
     }
+    if !has("retry_at")? {
+        conn.execute_batch("ALTER TABLE friend ADD COLUMN retry_at TEXT")?;
+        log::info!("migrated: added friend.retry_at");
+    }
+    Ok(())
+}
+
+fn migrate_friend_table_v1(conn: &Connection) -> DbResult<()> {
     conn.execute_batch(
         "BEGIN;
          ALTER TABLE friend RENAME COLUMN fetched_at TO added_at;
@@ -1342,6 +1381,8 @@ fn write_friend_entries(tx: &rusqlite::Transaction, list: &FriendList) -> DbResu
 const FRIEND_LIST_MAX_AGE_HOURS: i64 = 24;
 /// FR-73/FR-80: how long a private friend's list is left alone.
 const PRIVATE_RETRY_DAYS: i64 = 7;
+/// FR-80: how long a friend whose fetch failed is left alone.
+const FAILED_FETCH_SKIP_HOURS: i64 = 1;
 
 /// FR-80/FR-81: never fetched, or fetched more than 24 hours ago.
 pub fn friend_list_is_stale(fetched_at: Option<&str>) -> bool {

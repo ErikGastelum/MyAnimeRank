@@ -650,28 +650,56 @@ impl AniList {
     }
 
     /// FR-79: everyone `user_id` follows, or only those who follow them back,
-    /// read without the token, every page. Fails as a whole if any page does,
-    /// so a sync never acts on part of the list.
-    pub async fn get_following(&self, user_id: i64, mutual_only: bool) -> AlResult<Vec<FollowedUser>> {
-        let following = self.follow_pages("following", user_id).await?;
+    /// every page; fails as a whole if any page does, so a sync never acts on
+    /// part of the list. Logged out, except one read: for mutual only, your own
+    /// following list is read with your `token`, so AniList fills `isFollower`
+    /// (whether each of them follows you) and no followers pages are needed.
+    /// That answer only counts when AniList confirms the viewer is you; logged
+    /// out, `isFollower` is false for everyone. Otherwise (the token refused,
+    /// or not vouched for) your followers list decides, read logged out.
+    pub async fn get_following(&self, user_id: i64, mutual_only: bool, token: Option<&str>) -> AlResult<Vec<FollowedUser>> {
+        let users = |pages: Vec<(FollowedUser, Option<bool>)>| pages.into_iter().map(|(u, _)| u).collect::<Vec<_>>();
         if !mutual_only {
-            return Ok(following);
+            return Ok(users(self.follow_pages("following", user_id, None).await?));
         }
-        let followers: HashSet<i64> = self.follow_pages("followers", user_id).await?.into_iter().map(|u| u.anilist_user_id).collect();
+        let following = match token {
+            Some(token) => match self.follow_pages("following", user_id, Some(token)).await {
+                Ok(pages) if pages.iter().all(|(_, follows_you)| follows_you.is_some()) => {
+                    return Ok(pages.into_iter().filter(|(_, f)| *f == Some(true)).map(|(u, _)| u).collect());
+                }
+                Ok(pages) => Some(users(pages)),
+                Err(e) if e.is_network() => return Err(e),
+                Err(e) => {
+                    log::warn!("reading your following list with your token failed ({e}); using your followers list");
+                    None
+                }
+            },
+            None => None,
+        };
+        let following = match following {
+            Some(f) => f,
+            None => users(self.follow_pages("following", user_id, None).await?),
+        };
+        let followers: HashSet<i64> = self.follow_pages("followers", user_id, None).await?.into_iter().map(|(u, _)| u.anilist_user_id).collect();
         Ok(following.into_iter().filter(|u| followers.contains(&u.anilist_user_id)).collect())
     }
 
-    /// `field` is "following" or "followers".
-    async fn follow_pages(&self, field: &str, user_id: i64) -> AlResult<Vec<FollowedUser>> {
+    /// `field` is "following" or "followers". With a token, each user comes
+    /// with whether they follow the viewer, but only when every page's Viewer
+    /// is `user_id`; otherwise None.
+    async fn follow_pages(&self, field: &str, user_id: i64, token: Option<&str>) -> AlResult<Vec<(FollowedUser, Option<bool>)>> {
+        let (viewer, is_follower) = if token.is_some() { ("viewer: Viewer { id }", " isFollower") } else { ("", "") };
         let q = format!(
-            "query ($userId: Int!, $page: Int) {{ Page(page: $page, perPage: 50) {{ pageInfo {{ hasNextPage }}
-               {field}(userId: $userId, sort: [ID]) {{ id name avatar {{ large }} }} }} }}"
+            "query ($userId: Int!, $page: Int) {{ {viewer} Page(page: $page, perPage: 50) {{ pageInfo {{ hasNextPage }}
+               {field}(userId: $userId, sort: [ID]) {{ id name avatar {{ large }}{is_follower} }} }} }}"
         );
         let mut users = Vec::new();
         for page in 1..=MAX_FOLLOW_PAGES {
-            let data = self.graphql(&q, Some(json!({"userId": user_id, "page": page})), None, 15).await?;
+            let data = self.graphql(&q, Some(json!({"userId": user_id, "page": page})), token, 15).await?;
+            let vouched = token.is_some() && data["viewer"]["id"].as_i64() == Some(user_id);
             users.extend(arr(&data["Page"][field]).iter().filter_map(|u| {
-                Some(FollowedUser { anilist_user_id: u["id"].as_i64()?, name: str_of(&u["name"])?, avatar_url: str_of(&u["avatar"]["large"]) })
+                let user = FollowedUser { anilist_user_id: u["id"].as_i64()?, name: str_of(&u["name"])?, avatar_url: str_of(&u["avatar"]["large"]) };
+                Some((user, u["isFollower"].as_bool().filter(|_| vouched)))
             }));
             if data["Page"]["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
                 return Ok(users);

@@ -135,7 +135,9 @@ Non-goals (do not implement without an explicit go-ahead):
   ever writes to another user's AniList data. User profiles are read-only
   browsing (FR-67). The only other-user data stored locally is Friend
   Comparison's (4.12): names and avatars of the people you follow, and
-  friends' public lists, all read without the token.
+  friends' public lists, all read without the token. One exception: the
+  mutual-only friend sync reads your own following list with your token
+  (for `isFollower`, FR-79), a read query only.
 - No offline/mock mode: the app is unusable without a login.
 - No custom themes, no airing notifications (PRD §10).
 

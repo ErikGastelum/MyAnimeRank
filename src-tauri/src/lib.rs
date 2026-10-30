@@ -13,10 +13,9 @@ pub mod db;
 pub mod oauth;
 pub mod sync;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request};
@@ -35,9 +34,6 @@ pub struct AppState {
     pub oauth_active: Mutex<bool>,
     /// FR-70: friends whose lists are being fetched right now ("fetching").
     pub friend_fetching: Mutex<HashSet<i64>>,
-    /// FR-80: friends the list queue skips until then, after a fetch failed
-    /// for a reason other than reaching AniList.
-    pub friend_retry_at: Mutex<HashMap<i64, Instant>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -53,7 +49,6 @@ impl AppState {
             oauth_port: oauth::OAUTH_PORT,
             oauth_active: Mutex::new(false),
             friend_fetching: Mutex::new(HashSet::new()),
-            friend_retry_at: Mutex::new(HashMap::new()),
         })
     }
 }
