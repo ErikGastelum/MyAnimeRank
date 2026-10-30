@@ -38,7 +38,7 @@ The app runs entirely on your machine: a Rust backend running in-process inside 
 - Log in via AniList OAuth and keep status/progress/score in sync with your real AniList.co account (see 4.6).
 - Browse Discover shelves, a Feed of your own/following/global activity, and Character/Staff pages with live favoriting (see 4.7–4.9).
 - Look up studios and other AniList users' public profiles from catalog Search (see 4.11).
-- Compare your list against a friend's public AniList list: taste match, score skew, disagreements, and what each of you has completed that the other hasn't (see 4.12).
+- Compare your list against the public AniList lists of the people you follow (or anyone you add by username): taste match, score skew, disagreements, and what each of you has completed that the other hasn't (see 4.12).
 
 ## Non-Goals (v2 rebuild)
 
@@ -196,27 +196,32 @@ Same live pass-through model as 4.9: nothing here is stored in the local databas
 | FR-64 | Catalog Search (FR-1) has a category picker: Anime, Manga, Characters, Staff, Studios, Users. Only Anime and Manga results feed the import flow (FR-2); the other categories are live lookups that open the matching detail view. |
 | FR-65 | Studio search returns AniList studios by name. Studio detail shows name, animation studio vs. production company, member-favorites count, a favorite heart (FR-39), and the studio's works. Each work opens that title's detail view (FR-52's in-library or not-yet-imported state). Favorite Studio cards on any Profile shelf open this view (extends FR-54). |
 | FR-66 | User search returns AniList users by name. A user's public profile shows avatar, banner, about text, join year, anime/manga counts, mean scores, episodes watched, chapters read, and their favorite shelves (same shelf rules and click-through as FR-40/FR-54). |
-| FR-67 | User profiles are read-only browsing of public AniList data. No follow/unfollow, messaging, or other social write features: nothing in this app ever writes to another user's AniList data. The only other-user data stored locally is a friend's public list for Friend Comparison (4.12), fetched only when the user adds that friend or presses Refresh. |
+| FR-67 | User profiles are read-only browsing of public AniList data. No follow/unfollow, messaging, or other social write features: nothing in this app ever writes to another user's AniList data. The only other-user data stored locally is Friend Comparison's (4.12): the names and avatars of the people you follow, and friends' public lists, all read without the token (FR-71, FR-79–FR-81). |
 
 ## 4.12 Friend Comparison
 
-Compare your list against a friend's. A "friend" is a local bookmark of an AniList username, not an AniList follow: adding or removing one changes nothing on AniList. Unlike 4.8–4.11, a friend's list IS stored locally (`friend`, `friend_entry`), because a comparison needs the whole list and refetching it on every view would burn AniList's rate limit; it is refreshed only on demand. Friend data is read-only and isolated: it never feeds rankings, anchors, Insights, or sync, and is never pushed anywhere.
+Compare your list against a friend's. Your friends are the AniList users you follow, read from your public following list without the token (FR-79), plus anyone you add by username. A friend is a local record, not an AniList follow: adding, hiding or removing one changes nothing on AniList, and nothing here follows or unfollows anyone. Unlike 4.8–4.11, a friend's list IS stored locally (`friend`, `friend_entry`), because a comparison needs the whole list and refetching it on every view would burn AniList's rate limit; lists are fetched by a slow background queue (FR-80), when a comparison needs one (FR-81), or on Refresh. Friend data is read-only and isolated: it never feeds rankings, anchors, Insights, or sync, and is never pushed anywhere.
 
 | **ID** | **Requirement** |
 | --- | --- |
-| FR-70 | Profile (4.10) has a Friends section: add a friend by AniList username, and a list of friends, each with avatar, name, when their list was last fetched ("Fetched 3 days ago"), a Refresh action, a Remove action, and a Compare action. A user's public profile (FR-66) has a "Compare lists" button that adds that user as a friend if they aren't one yet and opens the comparison. Your own account can't be added. |
-| FR-71 | Adding a friend or pressing Refresh fetches their anime and manga lists from AniList without the access token (public data only, so the app can never act as or for them) and replaces that friend's stored entries in one transaction. Viewing a comparison or a detail page never calls AniList; it reads the stored copy. Each fetch is two AniList requests (the user lookup, which also gives their score format, then both lists in one query; for a user the lookup can't find, the second request asks whether they're private or missing), within AniList's shared 30 req/min limit. A 429 is handled as for every other AniList call: it waits for Retry-After (at most 30 seconds, at most twice) and retries; a longer wait fails the fetch with a "try again shortly" message. |
+| FR-70 | Profile (4.10) has a Friends section: a "Sync from AniList" button with when the friends list last synced, the friends setting (FR-79), an add-by-username field, and a list of friends. Each row shows avatar, name, where the friend came from ("From AniList" or "Added by you"), their list's status ("Not fetched yet", "Fetching…", "Fetched 3 days ago", or "Private list, can't compare"), and Refresh, Remove and Compare actions. Remove deletes a friend you added by username; for a friend from AniList it hides them, so a sync doesn't bring them back while you still follow them. Adding someone by username always makes them a manual friend, visible and kept even if you unfollow them (this also un-hides a hidden one). A user's public profile (FR-66) has a "Compare lists" button that adds that user by username if they aren't a friend yet and opens the comparison. Your own account can't be added. |
+| FR-71 | Fetching a friend's list reads their anime and manga lists from AniList without the access token (public data only, so the app can never act as or for them) and replaces that friend's stored entries in one transaction. It happens from the background queue (FR-80), when a comparison needs it (FR-81), when you add a friend by username, and on Refresh; a detail page never calls AniList and reads the stored copy. Each fetch is two AniList requests (the user lookup, which also gives their score format, then both lists in one query; for a user the lookup can't find, the second request asks whether they're private or missing), within AniList's shared 30 req/min limit. A 429 is handled as for every other AniList call: it waits for Retry-After (at most 30 seconds, at most twice) and retries; a longer wait fails the fetch with a "try again shortly" message. |
 | FR-72 | Scores are normalized before comparing. For a friend on POINT_100, POINT_10_DECIMAL or POINT_10, AniList converts each entry's score to POINT_10_DECIMAL server-side, the same way Pull reads your own list. POINT_5 and POINT_3 are instead read in the friend's own format and converted by the app, because AniList's conversion tops them out below 10 (5 stars is 9.0, :) is 8.5): POINT_5 is stars × 2 (1 → 2 … 5 → 10); POINT_3 is 1 → 4, 2 → 7, 3 → 10. The friend's format comes with the user lookup (FR-71), so this costs no extra request. A score of 0 means "unscored" and is stored as NULL. Both sides are clamped to this app's 1.0–10.0 scale. Your side is always your local overall (FR-9), which already includes scores Pull brought in from AniList. |
-| FR-73 | If AniList has no user by that name, the add fails with "No AniList user named X". If the friend's list is private, it fails with a clear "X's list is private on AniList" message and nothing is stored. A Refresh that fails this way keeps the previously stored list and its last-fetched time. |
+| FR-73 | If AniList has no user by that name, an add by username fails with "No AniList user named X". If their list is private, the add fails with a clear "X's list is private on AniList" message and nothing is stored. A friend already in the list (from AniList, or added earlier) whose list turns out private stays, marked "Private list, can't compare"; the background queue doesn't ask again for 7 days, and Refresh always asks. A fetch that fails this way keeps the previously stored list and its last-fetched time. |
 | FR-74 | A comparison covers one media type at a time (the Anime/Manga toggle) and never mixes the two. Titles match on anilist_id. "Rated" means a non-null score on that side. The comparison shows: overlap (titles both of you rated); taste match = 100 × (1 − mean \|yours − theirs\| / 9), rounded to a whole percent, where 9 is the largest possible gap on a 1–10 scale, hidden when overlap is under 5, with a tooltip explaining the formula; and skew = mean(yours − theirs) over the overlap, positive when you score higher. |
 | FR-75 | Biggest disagreements: the 5 shared titles with the largest \|yours − theirs\|, among those with a gap of at least 1.0 (a half-point gap isn't a disagreement). Strongest agreements: the 5 remaining shared titles with the smallest gap, ties going to the higher average of the two scores. A title never appears in both lists. Each shows cover, title, both scores, and the delta. |
 | FR-76 | A full table of shared rated titles (cover, title, your score, their score, delta), sortable by your score, their score, or delta, in either direction. |
 | FR-77 | "They've completed, you haven't": titles the friend has Completed or Rewatching/Rereading with a score of 8.0 or higher that aren't in your library or are only on your Planning list, highest score first. "You've completed, they haven't": the reverse, from your Completed/Rewatching/Rereading titles with an overall of 8.0 or higher that aren't on their list or are only on their Planning list. Every title in these lists and in FR-75/FR-76 opens its detail view (FR-52's in-library or not-yet-imported state). |
-| FR-78 | Genre comparison: per genre, your average overall and theirs, each over that side's own rated titles of this media type, with counts, side by side; a genre one side has no rated titles in shows "—" for that side. A title's detail view (FR-15) shows each friend who has scored that title, with their score and status, read from the stored lists only. |
+| FR-78 | Genre comparison: per genre, your average overall and theirs, each over that side's own rated titles of this media type, with counts, side by side; a genre one side has no rated titles in shows "—" for that side. A title's detail view (FR-15) shows each friend who has scored that title, with their score and status, read from the stored lists only: friends whose lists haven't been fetched yet don't appear, and hidden friends never do. |
+| FR-79 | Friend sync reads the AniList users you follow (`Page.following` for your own user id, 50 per page, every page) without the access token and stores only their id, name and avatar; it fetches no lists (FR-80 does that). It runs after login, after every Pull (FR-23), and from the "Sync from AniList" button, and records when it last succeeded. A setting chooses who counts: "Everyone I follow" (the default) or "Only mutual follows" (people you follow who follow you back, which also reads your followers, `Page.followers`), with a tooltip saying so. Each friend records its source: `anilist` (from sync) or `manual` (added by username). A sync adds new follows, updates names and avatars, and removes `anilist` friends you no longer follow (or who are no longer mutual), with their stored lists. It never removes a `manual` friend, a `manual` friend who is also followed stays `manual`, and hidden friends (FR-70) stay hidden. A sync that fails part-way changes nothing. It costs one request per 50 follows, plus one per 50 followers when mutual only. A sync failing after login or Pull is logged and never fails them. |
+| FR-80 | Friends' lists are fetched in the background, one friend (two requests, FR-71) at a time, at most one every 12 seconds: 5 friends or 10 requests a minute, a third of AniList's limit, so the rest of the app keeps the budget. Next in line: friends whose list has never been fetched first, then the oldest fetch, among lists older than 24 hours; a private friend waits 7 days after AniList last said so (FR-73); a hidden friend never. The queue pauses while any other AniList call is in flight, and for 60 seconds after any 429 (longer if Retry-After says so). It runs only while logged in and is idle when every list is fresh. |
+| FR-81 | Opening a comparison first fetches the friend's list, ahead of the queue, if it has never been fetched or is older than 24 hours, unless they're marked private (FR-73). If that fetch fails, the comparison uses the stored copy, or fails with the fetch's error when there isn't one. A private friend with no stored list can't be compared. |
 
 # 5. Data Model
 
-SQLite, five tables. One row per title regardless of media type — this is the structural fix. Sync adds one small auth table; it does not touch the media/rating split. Friend Comparison (4.12) adds two tables of its own (`friend`, `friend_entry`) that nothing else reads; they were added with CREATE TABLE IF NOT EXISTS, so an existing library.db gains them on open with no change to its other tables.
+SQLite, six tables. One row per title regardless of media type — this is the structural fix. Sync adds one small auth table; it does not touch the media/rating split. Friend Comparison (4.12) adds three tables of its own (`friend`, `friend_entry`, `friend_sync`) that nothing else reads; they are added with CREATE TABLE IF NOT EXISTS, so an existing library.db gains them on open with no change to its other tables.
+
+A `friend` table from before FR-79 (one without `source`) is migrated on open, in one transaction, without changing any existing value: `fetched_at` is renamed to `added_at` (a schema-only change, no row is rewritten); `source` (default 'manual'), a new nullable `fetched_at`, `private_at` and `hidden` (default 0) are added; and the new `fetched_at` is filled from `added_at`. So every existing friend stays a manual friend with its stored list and its fetch time. `friend_entry`, `media`, `rating` and `anilist_auth` are not touched.
 
 ## media
 
@@ -272,14 +277,28 @@ Single row (id=1). Holds the local OAuth session — never synced anywhere, neve
 
 ## friend
 
-One row per friend (FR-70). A local bookmark only; nothing here is an AniList follow.
+One row per friend (FR-70, FR-79). A local record only; nothing here changes an AniList follow.
 
 | **Field** | **Type** | **Notes** |
 | --- | --- | --- |
 | anilist_user_id | INTEGER PK | AniList's user id. Usernames can change; ids don't. |
-| name | TEXT | AniList username, NOT NULL, refreshed on every fetch |
+| name | TEXT | AniList username, NOT NULL, refreshed on every fetch and sync |
 | avatar_url | TEXT | |
-| fetched_at | TEXT | ISO timestamp of the last successful fetch of their lists (FR-71), NOT NULL |
+| added_at | TEXT | ISO timestamp the friend was added, NOT NULL. For friends from before FR-79, their last fetch time at the migration. |
+| source | TEXT | 'anilist' (friend sync, FR-79) or 'manual' (added by username), NOT NULL, default 'manual', CHECK |
+| fetched_at | TEXT | ISO timestamp of the last successful fetch of their lists (FR-71); NULL = not fetched yet |
+| private_at | TEXT | When AniList last said their list is private (FR-73); NULL = not known to be private. Cleared by a successful fetch. |
+| hidden | INTEGER | 1 = a friend from AniList you removed (FR-70): not listed, compared, fetched or shown on detail pages. NOT NULL, default 0 |
+
+## friend_sync
+
+Single row (id=1): the friends setting and the last friend sync (FR-79).
+
+| **Field** | **Type** | **Notes** |
+| --- | --- | --- |
+| id | INTEGER PK | Always 1 |
+| mutual_only | INTEGER | 0 = everyone you follow (default), 1 = only mutual follows. NOT NULL |
+| synced_at | TEXT | ISO timestamp of the last successful friend sync; NULL = never |
 
 ## friend_entry
 
@@ -424,6 +443,7 @@ Response: { "connected": false }   // clears anilist_auth only; library data unt
 Fetches the connected account's full AniList anime + manga lists.
 Response: { "imported": number, "updated": number, "conflicts": [ { media_id, title, local: {status,progress,updated_at}, remote: {status,progress,updatedAt} } ] }
 // conflicts = entries where BOTH sides changed since last_synced_at (FR-23); frontend prompts per-entry, then calls POST /sync/resolve for each choice.
+// Afterwards runs a friend sync (FR-79); its failure is logged and doesn't change this response.
 ```
 
 ## POST /sync/resolve/{media_id}
@@ -563,9 +583,12 @@ Response: { anilist_id, name, avatar_url, banner_url, about, site_url, created_a
 ## GET /friends
 
 ```
-Response: { "friends": [ Friend ] }
-Friend = { anilist_user_id, name, avatar_url, fetched_at, anime_count, manga_count }
-// FR-70. Local only, no AniList call. Counts are entries on their stored list, any status.
+Response: { "friends": [ Friend ], "synced_at": string | null, "mutual_only": boolean }
+Friend = { anilist_user_id, name, avatar_url, source: "anilist" | "manual",
+           list_status: "pending" | "fetching" | "fetched" | "private", fetched_at: string | null,
+           anime_count, manga_count }
+// FR-70/FR-79. Local only, no AniList call. Hidden friends aren't listed. Counts are entries on their stored list, any status.
+// list_status: "fetching" while a fetch of theirs runs, else "private" when private_at is set (FR-73), else "fetched" when fetched_at is set, else "pending".
 ```
 
 ## POST /friends
@@ -573,22 +596,38 @@ Friend = { anilist_user_id, name, avatar_url, fetched_at, anime_count, manga_cou
 ```
 Body: { "username": string }
 Response: Friend
-// FR-70/FR-71: looks the user up on AniList, fetches both lists without the token, stores them. Adding someone who's already a friend refreshes them.
-// 400 if it's your own account; 404 "No AniList user named X"; 403 "X's list is private on AniList" (FR-73); 502 if AniList can't be reached. Nothing is stored on any failure.
+// FR-70/FR-71: looks the user up on AniList, fetches both lists without the token, stores them as a manual friend. Adding someone who's already a friend (from AniList, hidden, or manual) makes them a visible manual friend and refreshes them.
+// 400 if it's your own account; 404 "No AniList user named X"; 403 "X's list is private on AniList" (FR-73); 502 if AniList can't be reached. A new friend is stored on none of these failures.
+```
+
+## POST /friends/sync
+
+```
+Response: same as GET /friends
+// FR-79: reads your following list (and your followers when mutual_only) without the token, then adds, updates and removes friends from AniList. Fetches no lists.
+// 502 if AniList can't be reached part-way; nothing changes.
+```
+
+## PUT /friends/settings
+
+```
+Body: { "mutual_only": boolean }
+Response: { "mutual_only": boolean }
+// FR-79. Local only; the frontend runs POST /friends/sync right after, so the list follows the new setting.
 ```
 
 ## POST /friends/{anilist_user_id}/refresh
 
 ```
 Response: Friend
-// FR-71: refetches both lists and replaces the stored ones. 404 if not a friend; on 403/502 the previously stored list is kept (FR-73).
+// FR-71: refetches both lists and replaces the stored ones, even for a friend marked private. 404 if not a friend (or hidden); on 403/502 the previously stored list is kept (FR-73), and a 403 marks them private.
 ```
 
 ## DELETE /friends/{anilist_user_id}
 
 ```
-Response: { "deleted": true }   // 404 if not a friend
-// Local only: removes the friend and (ON DELETE CASCADE) their stored entries. Nothing changes on AniList.
+Response: { "deleted": true, "hidden": boolean }   // 404 if not a friend (or already hidden)
+// FR-70. Local only, nothing changes on AniList. A manual friend is removed with (ON DELETE CASCADE) their stored entries; a friend from AniList is hidden (hidden: true), and their stored entries are deleted.
 ```
 
 ## GET /friends/{anilist_user_id}/compare?media_type=anime|manga
@@ -603,7 +642,8 @@ Response: {
   genres: [ { genre, your_avg: number | null, your_count, their_avg: number | null, their_count } ]
 }
 Shared = { anilist_id, media_id, media_type, title, title_english, cover_url, your_score, their_score, delta }   // delta = your_score − their_score
-// FR-72–FR-78, computed from the stored lists only, no AniList call. taste_match is null when overlap < 5; skew is null when overlap is 0.
+// FR-72–FR-78, computed from the stored lists. FR-81: first fetches the friend's lists (two requests) if they've never been fetched or are older than 24 hours, unless the friend is marked private; if that fetch fails, the stored copy is used.
+// 404 if not a friend (or hidden); 403 "X's list is private on AniList" for a private friend with no stored list; 502 if the fetch failed and nothing is stored. taste_match is null when overlap < 5; skew is null when overlap is 0.
 // shared is ordered by your_score descending; the frontend re-sorts it (FR-76). genres is ordered by your_count + their_count descending.
 ```
 
@@ -611,7 +651,7 @@ Shared = { anilist_id, media_id, media_type, title, title_english, cover_url, yo
 
 ```
 Response: { "scores": [ { anilist_user_id, name, avatar_url, status, score } ] }
-// FR-78: friends who have scored this title, highest score first, from the stored lists only. Works for titles not in the library too.
+// FR-78: friends who have scored this title, highest score first, from the stored lists only (so friends whose lists aren't fetched yet, and hidden friends, never appear). Works for titles not in the library too.
 ```
 
 # 8. Frontend Design Brief (handoff for Claude Design)
@@ -638,7 +678,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 - **Catalog Search categories (FR-64)** — a category picker on the Search screen: Anime, Manga, Characters, Staff, Studios, Users.
 - **Studio detail (FR-65)** — name, studio type, member-favorites count, favorite heart, list of works.
 - **User profile (FR-66)** — avatar, banner, about, stats block, favorite shelves. Read-only (FR-67), plus a "Compare lists" button (FR-70).
-- **Friends (FR-70)** — a section on the Profile tab: add-by-username field, and one row per friend with avatar, name, last-fetched time, Refresh, Remove, Compare. Not a sixth bottom-nav tab.
+- **Friends (FR-70, FR-79)** — a section on the Profile tab: "Sync from AniList" with last-synced time, the everyone / mutual-only setting with a tooltip, add-by-username field, and one row per friend with avatar, name, source, list status, Refresh, Remove, Compare. Not a sixth bottom-nav tab.
 - **Friend comparison (FR-74–FR-78)** — Anime/Manga toggle; overlap, taste match (with a tooltip explaining it) and skew; biggest disagreements and strongest agreements; a sortable shared-titles table; "They've completed, you haven't" and "You've completed, they haven't" shelves; side-by-side genre averages. The detail view shows friends' scores for that title.
 - **Insights (optional)** — genre breakdown, score distribution, community-score divergence.
 
@@ -657,7 +697,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 | M7 | Accordion polish, format sub-splits, search/sort within tabs, detail view, delete, persistence polish. |
 | M8 (optional) | Insights dashboard. |
 | M9 | Studios & Users (4.11): /studios/search, /studios/{id}, /users/search, /users/{id}, and the Studios/Users categories in catalog Search — live pass-throughs to AniList, no schema changes. |
-| M10 | Friend Comparison (4.12): `friend` / `friend_entry` tables (additive, CREATE TABLE IF NOT EXISTS), /friends endpoints, the comparison view, and friends' scores on the detail view. |
+| M10 | Friend Comparison (4.12): `friend` / `friend_entry` / `friend_sync` tables (additive, CREATE TABLE IF NOT EXISTS, plus the additive `friend` migration in §5), /friends endpoints, friends synced from your AniList following (FR-79), the background list queue (FR-80), the comparison view, and friends' scores on the detail view. |
 
 # 10. Appendix: Reference App Feature Set (MyAniList)
 
