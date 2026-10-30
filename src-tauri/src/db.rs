@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS media (
     anilist_list_entry_id INTEGER,
     updated_at TEXT,
     last_synced_at TEXT,
-    pending_conflict INTEGER NOT NULL DEFAULT 0
+    pending_conflict INTEGER NOT NULL DEFAULT 0,
+    popularity INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS rating (
@@ -100,6 +101,7 @@ CREATE TABLE IF NOT EXISTS friend_entry (
     title_english TEXT,
     cover_url TEXT,
     genres TEXT,
+    popularity INTEGER,
     PRIMARY KEY (friend_id, anilist_id)
 );
 ";
@@ -160,6 +162,9 @@ pub struct MediaFields {
     pub synopsis: Option<String>,
     #[serde(default)]
     pub avg_score: Option<f64>,
+    /// FR-77's tie-break only; kept out of API responses.
+    #[serde(default, skip_serializing)]
+    pub popularity: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -225,6 +230,8 @@ pub struct FriendEntry {
     pub title_english: Option<String>,
     pub cover_url: Option<String>,
     pub genres: Vec<String>,
+    /// AniList popularity, FR-77's tie-break.
+    pub popularity: Option<i64>,
 }
 
 /// A friend's anime and manga lists, as fetched from AniList.
@@ -387,6 +394,7 @@ fn row_to_media(row: &Row) -> DbResult<Media> {
             runtime_minutes: row.get("runtime_minutes")?,
             synopsis: row.get("synopsis")?,
             avg_score: row.get("avg_score")?,
+            popularity: row.get("popularity")?,
         },
         status: row.get("status")?,
         progress: row.get("progress")?,
@@ -467,14 +475,14 @@ impl Db {
                     cover_url=:cover_url, genres=:genres, tags=:tags, producers=:producers,
                     year=:year, season=:season, format=:format, episodes=:episodes, chapters=:chapters,
                     volumes=:volumes, runtime_minutes=:runtime_minutes, synopsis=:synopsis,
-                    avg_score=:avg_score, status=COALESCE(:status, status)
+                    avg_score=:avg_score, popularity=COALESCE(:popularity, popularity), status=COALESCE(:status, status)
                  WHERE anilist_id = :anilist_id",
                 named_params! {
                     ":title": f.title, ":title_native": f.title_native, ":title_english": f.title_english,
                     ":cover_url": f.cover_url, ":genres": genres, ":tags": tags, ":producers": producers,
                     ":year": f.year, ":season": f.season, ":format": f.format, ":episodes": f.episodes,
                     ":chapters": f.chapters, ":volumes": f.volumes, ":runtime_minutes": f.runtime_minutes,
-                    ":synopsis": f.synopsis, ":avg_score": f.avg_score, ":status": status,
+                    ":synopsis": f.synopsis, ":avg_score": f.avg_score, ":popularity": f.popularity, ":status": status,
                     ":anilist_id": f.anilist_id,
                 },
             )?;
@@ -484,17 +492,17 @@ impl Db {
         conn.execute(
             "INSERT INTO media (anilist_id, media_type, title, title_native, title_english, cover_url,
                 genres, tags, producers, year, season, format, episodes, chapters, volumes,
-                runtime_minutes, synopsis, avg_score, status)
+                runtime_minutes, synopsis, avg_score, popularity, status)
              VALUES (:anilist_id, :media_type, :title, :title_native, :title_english, :cover_url,
                 :genres, :tags, :producers, :year, :season, :format, :episodes, :chapters, :volumes,
-                :runtime_minutes, :synopsis, :avg_score, COALESCE(:status, 'planning'))",
+                :runtime_minutes, :synopsis, :avg_score, :popularity, COALESCE(:status, 'planning'))",
             named_params! {
                 ":anilist_id": f.anilist_id, ":media_type": f.media_type, ":title": f.title,
                 ":title_native": f.title_native, ":title_english": f.title_english,
                 ":cover_url": f.cover_url, ":genres": genres, ":tags": tags, ":producers": producers,
                 ":year": f.year, ":season": f.season, ":format": f.format, ":episodes": f.episodes,
                 ":chapters": f.chapters, ":volumes": f.volumes, ":runtime_minutes": f.runtime_minutes,
-                ":synopsis": f.synopsis, ":avg_score": f.avg_score, ":status": status,
+                ":synopsis": f.synopsis, ":avg_score": f.avg_score, ":popularity": f.popularity, ":status": status,
             },
         )?;
         Ok(conn.last_insert_rowid())
@@ -521,6 +529,12 @@ impl Db {
 
     pub fn get_media_by_anilist_id(&self, anilist_id: i64) -> DbResult<Option<Media>> {
         self.media_where("anilist_id", anilist_id)
+    }
+
+    /// FR-77: Pull refreshes a title's popularity; nothing else about it changes.
+    pub fn set_media_popularity(&self, media_id: i64, popularity: i64) -> DbResult<()> {
+        self.conn().execute("UPDATE media SET popularity = ? WHERE id = ?", params![popularity, media_id])?;
+        Ok(())
     }
 
     /// FR-21: creates the rating row if one doesn't exist yet. Overall is
@@ -1108,7 +1122,7 @@ impl Db {
     pub fn friend_entries(&self, anilist_user_id: i64, media_type: &str) -> DbResult<Vec<FriendEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT anilist_id, media_type, status, score, title, title_english, cover_url, genres
+            "SELECT anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity
              FROM friend_entry WHERE friend_id = ? AND media_type = ? ORDER BY rowid",
         )?;
         let entries = stmt
@@ -1122,6 +1136,7 @@ impl Db {
                     title_english: r.get(5)?,
                     cover_url: r.get(6)?,
                     genres: json_list(r.get(7)?),
+                    popularity: r.get(8)?,
                 })
             })?
             .collect::<DbResult<Vec<_>>>()?;
@@ -1210,6 +1225,11 @@ fn migrate_existing_media_columns(conn: &Connection) -> DbResult<()> {
         conn.execute_batch("ALTER TABLE media ADD COLUMN pending_conflict INTEGER NOT NULL DEFAULT 0")?;
         log::info!("migrated: added media.pending_conflict");
     }
+    // FR-77's tie-break; NULL until the next Pull.
+    if !cols.contains("popularity") {
+        conn.execute_batch("ALTER TABLE media ADD COLUMN popularity INTEGER")?;
+        log::info!("migrated: added media.popularity");
+    }
     Ok(())
 }
 
@@ -1225,6 +1245,11 @@ fn migrate_friend_table(conn: &Connection) -> DbResult<()> {
     if !has("retry_at")? {
         conn.execute_batch("ALTER TABLE friend ADD COLUMN retry_at TEXT")?;
         log::info!("migrated: added friend.retry_at");
+    }
+    let entry_has = |col: &str| conn.query_row("SELECT COUNT(*) FROM pragma_table_info('friend_entry') WHERE name = ?", [col], |r| r.get::<_, bool>(0));
+    if !entry_has("popularity")? {
+        conn.execute_batch("ALTER TABLE friend_entry ADD COLUMN popularity INTEGER")?;
+        log::info!("migrated: added friend_entry.popularity");
     }
     Ok(())
 }
@@ -1364,14 +1389,14 @@ fn row_to_friend(r: &Row) -> DbResult<Friend> {
 fn write_friend_entries(tx: &rusqlite::Transaction, list: &FriendList) -> DbResult<()> {
     tx.execute("DELETE FROM friend_entry WHERE friend_id = ?", [list.anilist_user_id])?;
     let mut stmt = tx.prepare(
-        "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO friend_entry (friend_id, anilist_id, media_type, status, score, title, title_english, cover_url, genres, popularity)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for e in &list.entries {
         let genres = serde_json::to_string(&e.genres).unwrap_or_else(|_| "[]".into());
         stmt.execute(params![
             list.anilist_user_id, e.anilist_id, e.media_type, e.status, e.score,
-            e.title, e.title_english, e.cover_url, genres,
+            e.title, e.title_english, e.cover_url, genres, e.popularity,
         ])?;
     }
     Ok(())
@@ -1463,7 +1488,7 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
     rest.sort_by(|a, b| a.gap().total_cmp(&b.gap()).then(b.mean().total_cmp(&a.mean())).then(a.anilist_id.cmp(&b.anilist_id)));
     let rows = |v: Vec<&SharedTitle>| v.into_iter().map(|s| s.row.clone()).collect::<Vec<_>>();
 
-    let mut they_completed: Vec<(f64, i64, Value)> = theirs
+    let mut they_completed: Vec<(f64, Option<i64>, i64, Value)> = theirs
         .iter()
         .filter_map(|e| {
             let score = e.score.filter(|s| *s >= HIGHLY_RATED)?;
@@ -1471,14 +1496,14 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
             if !FINISHED.contains(&e.status.as_str()) || your_status.is_some_and(|s| s != "planning") {
                 return None;
             }
-            Some((score, e.anilist_id, json!({
+            Some((score, e.popularity, e.anilist_id, json!({
                 "anilist_id": e.anilist_id, "media_type": e.media_type, "title": e.title,
                 "title_english": e.title_english, "cover_url": e.cover_url,
                 "their_score": score, "your_status": your_status,
             })))
         })
         .collect();
-    let mut you_completed: Vec<(f64, i64, Value)> = yours
+    let mut you_completed: Vec<(f64, Option<i64>, i64, Value)> = yours
         .iter()
         .filter_map(|m| {
             let score = your_score(m).filter(|s| *s >= HIGHLY_RATED)?;
@@ -1486,16 +1511,18 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
             if !FINISHED.contains(&m.status.as_str()) || their_status.is_some_and(|s| s != "planning") {
                 return None;
             }
-            Some((score, m.fields.anilist_id, json!({
+            Some((score, m.fields.popularity, m.fields.anilist_id, json!({
                 "anilist_id": m.fields.anilist_id, "media_id": m.id, "media_type": m.fields.media_type,
                 "title": m.fields.title, "title_english": m.fields.title_english, "cover_url": m.fields.cover_url,
                 "your_score": score, "their_status": their_status,
             })))
         })
         .collect();
-    let best_first = |v: &mut Vec<(f64, i64, Value)>| {
-        v.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        v.drain(..).map(|x| x.2).collect::<Vec<_>>()
+    // FR-77: that person's score, then the more popular title (unknown
+    // counts as least popular), then id.
+    let best_first = |v: &mut Vec<(f64, Option<i64>, i64, Value)>| {
+        v.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        v.drain(..).map(|x| x.3).collect::<Vec<_>>()
     };
 
     json!({

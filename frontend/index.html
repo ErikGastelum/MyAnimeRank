@@ -265,10 +265,12 @@ async function loadFriendScores(anilistId){
 // _compare: undefined = loading, false = failed, object = the comparison for
 // state.compare. A response for a friend/media type no longer on screen is dropped.
 let _compare;
-async function loadCompare(){
-  const c=state.compare;_compare=undefined;
+// keep: show the comparison already on hand while the fresh one loads
+// (coming Back to it), instead of "Comparing…".
+async function loadCompare(keep){
+  const c=state.compare;if(!keep)_compare=undefined;
   try{ const r=await api.compareFriend(c.friendId,c.mediaType); if(state.compare===c)_compare=r; }
-  catch(e){ if(state.compare===c){_compare=false;friendFailed(c.friendId,e);} }
+  catch(e){ if(state.compare===c){if(!keep||!_compare)_compare=false;friendFailed(c.friendId,e);} }
   render();
 }
 const DISCOVER_SECTIONS=[
@@ -467,6 +469,9 @@ const state = {
   hiddenOpen:false, hiddenNote:null,  // the collapsed Hidden list, and what the last Unhide did
   compare:null,              // {friendId, mediaType}
   compareSort:{key:'your_score',dir:-1}, compareReturn:null,
+  // FR-77: which completed lists show everything, and where the page was
+  // scrolled when a title was opened, so Back finds it as it was left.
+  compareShowAll:{they:false,you:false}, compareScroll:0,
 };
 function persistExpanded(){localStorage.setItem('mar_expanded',JSON.stringify(state.expanded));}
 
@@ -673,10 +678,15 @@ H.backInsights = ()=>go('profile');
 /* detail */
 H.backView = ()=>{
   state.current=null;
-  // A rating or status change on that title changes the comparison too.
-  if(state.detailReturn==='compare'&&state.compare)loadCompare();
+  // A rating or status change on that title changes the comparison too, so
+  // it reloads, behind the one on screen, at the scroll position you left.
+  if(state.detailReturn==='compare'&&state.compare){backToCompare();return;}
   go(state.detailReturn||'library');
 };
+function backToCompare(){
+  loadCompare(true);go('compare');
+  const sc=document.getElementById('main-scroll');if(sc)sc.scrollTop=state.compareScroll||0;
+}
 H.toggleDetailMenu = (el,e)=>{e.stopPropagation();state.detailMenuOpen=!state.detailMenuOpen;setMenuOpen('menu-detail',state.detailMenuOpen);};
 H.retryCommunity = ()=>{
   const it=state.current&&state.current.item;if(!it)return;
@@ -1197,7 +1207,7 @@ function openCompare(friendId,mediaType){
   // target: otherwise Back would bounce between the two pages forever.
   if(!(state.view==='detail'&&state.detailReturn==='compare'))state.compareReturn=state.view;
   state.compare={friendId,mediaType:mediaType||state.mediaType};
-  state.compareSort={key:'your_score',dir:-1};
+  state.compareSort={key:'your_score',dir:-1};state.compareShowAll={they:false,you:false};state.compareScroll=0;
   if(state.friendError&&state.friendError.id!==friendId)state.friendError=null;
   loadCompare();
   go('compare');
@@ -1213,7 +1223,8 @@ H.compareUser = async ()=>{
   if(known||f)openCompare(known?u.anilist_id:f.anilist_user_id);
 };
 H.backCompare = ()=>{const r=state.compareReturn||'profile';state.compare=null;_compare=undefined;go(r);if(r==='profile')loadFriends();};
-H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};loadCompare();render();};
+H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};state.compareShowAll={they:false,you:false};loadCompare();render();};
+H.toggleCompareAll = (el)=>{const k=el.dataset.arg;state.compareShowAll={...state.compareShowAll,[k]:!state.compareShowAll[k]};render();};
 H.retryCompare = ()=>{loadCompare();render();};
 // FR-76: a new column sorts high to low; the same column again flips it.
 H.sortCompare = (el)=>{const k=el.dataset.arg,s=state.compareSort;state.compareSort={key:k,dir:s.key===k?-s.dir:-1};render();};
@@ -1270,6 +1281,7 @@ async function ensureFavoritesLoaded(){
   try{ _profileFavorites=await api.getFavorites(); }catch(e){ console.error('favorites fetch failed:',e); }
 }
 function openDetail(cur){
+  if(state.view==='compare'){const sc=document.getElementById('main-scroll');state.compareScroll=sc?sc.scrollTop:0;}
   if(state.view&&state.view!=='detail')state.detailReturn=state.view;
   state.current=cur;state.detailMenuOpen=false;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;
   if(_profileFavorites){
@@ -2855,15 +2867,21 @@ function compareView(){
     <div>${h2('Strongest agreements')}${pairCard(C.agreements,n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.')}</div>
   </div>`;
 
-  // FR-77 shelves: cover, title, the 8.0+ score, and a note when the title is
-  // only on a Planning list.
-  const pickShelf=(key,items,scoreKey,statusKey,planNote,msg)=>items.length?`<div data-shelf="${key}" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
-    ${items.map(it=>`<div data-act="openRelation" data-arg="${it.anilist_id}" style="flex:0 0 120px;width:120px;min-width:0;cursor:pointer;">
+  // FR-77: the top 10 in a wrapping grid, "Show all (N)" for the rest; each
+  // card has cover, title, the 8.0+ score, and a note when the title is only
+  // on a Planning list.
+  const pickGrid=(key,items,scoreKey,statusKey,planNote,msg)=>{
+    if(!items.length)return empty(msg);
+    const all=state.compareShowAll[key],shown=all?items:items.slice(0,10);
+    const more=items.length>10?`<div data-act="toggleCompareAll" data-arg="${key}" data-hover="color:var(--t1)" style="display:inline-block;margin-top:12px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--accent);">${all?'Show less':`Show all (${items.length})`}</div>`:'';
+    return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:16px 14px;">
+    ${shown.map(it=>`<div data-act="openRelation" data-arg="${it.anilist_id}" style="min-width:0;cursor:pointer;">
       <div style="aspect-ratio:2/3;border-radius:12px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}
         <div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:var(--accent);">${fmtScore(it[scoreKey])}</div></div>
       <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(it))}</div>
       ${it[statusKey]?`<div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${planNote}</div>`:''}
-    </div>`).join('')}</div>`:empty(msg);
+    </div>`).join('')}</div>${more}`;
+  };
 
   const themBar='color-mix(in srgb,var(--t2) 55%,transparent)';
   const bar=(v,bg)=>`<div style="height:6px;border-radius:4px;background:var(--s3);overflow:hidden;margin-top:5px;"><div style="height:100%;width:${v==null?'0%':pct(v,10)};background:${bg};border-radius:4px;"></div></div>`;
@@ -2891,9 +2909,9 @@ function compareView(){
   return page(`${stats}
     ${pairs}
     ${h2("They've completed, you haven't",`${esc(name)} rated these 8.0 or higher. They're not in your library, or only on your Planning list.`)}
-    ${pickShelf('they-'+mt,C.they_completed,'their_score','your_status','On your Planning list',"Nothing they've finished and rated 8.0+ is missing from your list.")}
+    ${pickGrid('they',C.they_completed,'their_score','your_status','On your Planning list',"Nothing they've finished and rated 8.0+ is missing from your list.")}
     ${h2("You've completed, they haven't",`You rated these 8.0 or higher. They're not on ${esc(name)}'s list, or only on their Planning list.`)}
-    ${pickShelf('you-'+mt,C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`)}
+    ${pickGrid('you',C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`)}
     ${h2('Genres')}
     ${genres}
     ${h2('Every title you both rated',`${n} ${mt}. Click a column to sort.`)}
