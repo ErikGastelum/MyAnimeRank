@@ -2918,11 +2918,11 @@ async fn an_empty_planning_pool_answers_without_calling_anilist() {
     // Planning manga and a Watching anime: no Planning anime at all.
     st.db.insert_or_update_media(&fields(7, "manga"), Some("planning")).unwrap();
     st.db.insert_or_update_media(&fields(4, "anime"), Some("watching")).unwrap();
-    let nothing = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": false, "size": null, "next_up_for": null, "blocked": false});
+    let nothing = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": false, "size": null, "next_up_for": null, "blocked": false, "requests": 0});
     assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5}))).await, (200, nothing));
     // Every Planning anime already shown: exhausted, still no call.
     st.db.insert_or_update_media(&fields(1, "anime"), Some("planning")).unwrap();
-    let used_up = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": true, "size": null, "next_up_for": null, "blocked": false});
+    let used_up = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": true, "size": null, "next_up_for": null, "blocked": false, "requests": 0});
     assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5, "exclude": [1]}))).await, (200, used_up));
     assert!(fake.calls().is_empty());
 }
@@ -2934,7 +2934,7 @@ async fn an_empty_pick_says_whether_the_shown_titles_used_up_the_pool() {
     login(&st);
     for (exclude, exhausted) in [(json!([5]), true), (json!([]), false)] {
         let body = json!({"source": "not_planning", "roll": 0.5, "exclude": exclude});
-        let want = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": exhausted, "size": null, "next_up_for": null, "blocked": false});
+        let want = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": exhausted, "size": null, "next_up_for": null, "blocked": false, "requests": 1});
         assert_eq!(call(&st, "POST", "/pick", Some(body)).await, (200, want));
     }
 }
@@ -2946,7 +2946,7 @@ async fn a_pool_that_fits_on_page_one_is_counted_exactly_and_picked_in_one_reque
     assert_eq!(calls.len(), 1);
     assert!(pick_indexes(&calls[0].0).is_empty());
     assert_eq!((body["pool"].as_i64(), body["pool_exact"].as_bool(), body["exhausted"].as_bool(), &body["size"]), (Some(30), Some(true), Some(false), &Value::Null));
-    assert_eq!((&body["next_up_for"], &body["blocked"]), (&Value::Null, &json!(false)));
+    assert_eq!((&body["next_up_for"], &body["blocked"], &body["requests"]), (&Value::Null, &json!(false), &json!(1)));
     // §7 shape: the search result fields, plus popularity, airing status and ranked tags.
     let result = &body["result"];
     assert!((1000..1030).contains(&result["anilist_id"].as_i64().unwrap()));
@@ -2990,6 +2990,7 @@ async fn a_bigger_pool_is_sized_by_probes_then_picked_from_a_random_page() {
         assert!(lo <= 1000 && 1000 <= hi);
         assert_eq!(body["size"], json!({"lo": lo, "hi": hi, "shown": 0}));
         assert_eq!((body["pool"].as_u64(), body["pool_exact"].as_bool()), (Some(lo as u64), Some(false)));
+        assert_eq!(body["requests"].as_u64(), Some(calls.len() as u64));
         // The rolled page, whole: page 1 is already in hand, any other is one more request.
         let page = 1 + (roll * hi.div_ceil(50) as f64) as usize;
         let id = body["result"]["anilist_id"].as_i64().unwrap() as usize - 1000;
@@ -3025,7 +3026,7 @@ async fn a_reroll_with_the_last_size_skips_straight_to_a_page() {
     assert_eq!(fetched_pages(&calls[before].0), [page]);
     assert_eq!(sorted_ids(pick_arg(&calls[before].0, &calls[before].1, "id_not_in")), [1300, 1301]);
     assert_eq!(again["size"], json!({"lo": lo - 2, "hi": hi - 2, "shown": 2}));
-    assert_eq!(again["pool"].as_u64(), Some(lo as u64 - 2));
+    assert_eq!((again["pool"].as_u64(), again["requests"].as_u64()), (Some(lo as u64 - 2), Some(1)));
     let id = again["result"]["anilist_id"].as_i64().unwrap() as usize - 1000;
     assert!((page - 1) * 50 <= id && id < page * 50);
 }
@@ -3341,17 +3342,17 @@ async fn next_up_is_only_offered_when_the_filters_allow_it() {
 }
 
 #[tokio::test]
-async fn the_walk_back_stops_after_five_hops() {
-    // 50 <- 51 <- ... <- 57, nothing seen: the start is 7 hops back from 57.
+async fn the_walk_back_stops_when_the_request_budget_is_spent() {
+    // 50 <- 51 <- ... <- 57, nothing seen. Page 1 is one request, so the walk gets three lookups.
     let catalog: Vec<Value> = (50..=57).map(|id| if id == 50 { related(id, &[]) } else { related(id, &[("PREQUEL", id - 1, "TV", "ANIME")]) }).collect();
     let (fake, st) = catalog_state(catalog.clone(), &[57]).await;
     let (_, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
-    assert_eq!((&body["result"], &body["blocked"]), (&Value::Null, &json!(true)));
-    assert_eq!(lookups(&fake), [56, 55, 54, 53, 52]);
-    // Five back is within reach.
-    let (_, st) = catalog_state(catalog, &[55]).await;
+    assert_eq!((&body["result"], &body["blocked"], &body["requests"]), (&Value::Null, &json!(true), &json!(4)));
+    assert_eq!((lookups(&fake), fake.calls().len()), (vec![56, 55, 54], 4));
+    // Three back is within reach.
+    let (fake, st) = catalog_state(catalog, &[53]).await;
     let (_, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
-    assert_eq!(body["result"]["anilist_id"], 50);
+    assert_eq!((body["result"]["anilist_id"].as_i64(), lookups(&fake)), (Some(50), vec![52, 51, 50]));
 }
 
 #[tokio::test]
@@ -3367,7 +3368,7 @@ async fn the_toggle_turns_the_prequel_check_off() {
 }
 
 #[tokio::test]
-async fn retrying_other_pages_stops_after_three_extra_requests() {
+async fn retrying_other_pages_stops_when_the_request_budget_is_spent() {
     // 1000 titles, every one held back by a TV prequel AniList doesn't have (so no next-up).
     let fake = fake_anilist(|q, _| {
         if q.contains("Media(id: $id") {
@@ -3380,11 +3381,61 @@ async fn retrying_other_pages_stops_after_three_extra_requests() {
     login(&st);
     let body = json!({"source": "not_planning", "roll": 0.5, "size": {"lo": 1000, "hi": 1000, "shown": 0}});
     let (s, picked) = call(&st, "POST", "/pick", Some(body)).await;
-    assert_eq!((s, &picked["result"], &picked["blocked"]), (200, &Value::Null, &json!(true)));
+    assert_eq!((s, &picked["result"], &picked["blocked"], &picked["requests"]), (200, &Value::Null, &json!(true), &json!(4)));
     let calls = fake.calls();
     let pages: Vec<usize> = calls.iter().flat_map(|(q, _)| fetched_pages(q)).collect();
-    assert_eq!(pages.len(), 4, "the rolled page and three more: {pages:?}");
-    assert_eq!(pages.iter().collect::<std::collections::HashSet<_>>().len(), 4, "never the same page twice");
-    // Only one walk back per pick.
-    assert_eq!((lookups(&fake), calls.len()), (vec![99999], 5));
+    // The rolled page, one walk back (once per pick), then two more pages: four requests.
+    assert_eq!((pages.len(), lookups(&fake), calls.len()), (3, vec![99999], 4), "{pages:?}");
+    assert_eq!(pages.iter().collect::<std::collections::HashSet<_>>().len(), 3, "never the same page twice");
+}
+
+// ----------------------------------------------- pick: AniList's 30 a minute (notes #24) ----
+
+#[tokio::test]
+async fn a_pick_never_sends_more_than_four_requests_429_retries_included() {
+    // 1000 titles, each held back by a prequel that's held back in turn, forever: a walk that never ends.
+    let endless = |q: &str, v: &Value| -> Reply {
+        if q.contains("Media(id: $id") {
+            let id = v["id"].as_i64().unwrap();
+            return (200, json!({"data": {"Media": related(id, &[("PREQUEL", id + 1, "TV", "ANIME")])}}), None);
+        }
+        page_reply(q, 1000, |i| related(1000 + i as i64, &[("PREQUEL", 50000 + 10 * i as i64, "TV", "ANIME")]))
+    };
+    for size in [Value::Null, json!({"lo": 1000, "hi": 1000, "shown": 0})] {
+        let fake = fake_anilist(endless).await;
+        let st = state_with(&fake);
+        login(&st);
+        let mut body = json!({"source": "not_planning", "roll": 0.5});
+        if !size.is_null() {
+            body["size"] = size.clone();
+        }
+        let (s, picked) = call(&st, "POST", "/pick", Some(body)).await;
+        assert_eq!((s, &picked["result"], &picked["blocked"]), (200, &Value::Null, &json!(true)), "size {size}");
+        assert_eq!((fake.calls().len(), picked["requests"].as_u64()), (4, Some(4)), "size {size}");
+    }
+
+    // Two 429s on page 1, then fine: the retries are two of the four, so after
+    // the probes there's nothing left for another page and page 1 is the pick.
+    let sent = Arc::new(Mutex::new(0));
+    let counter = sent.clone();
+    let fake = fake_anilist(move |q, v| {
+        *counter.lock().unwrap() += 1;
+        if *counter.lock().unwrap() <= 2 {
+            return (429, json!({"errors": [{"message": "Too Many Requests.", "status": 429}]}), Some("0.01"));
+        }
+        pool_reply(1000, q, v)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, picked) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    assert_eq!((s, *sent.lock().unwrap(), picked["requests"].as_u64()), (200, 4, Some(4)));
+    assert!((1000..1050).contains(&picked["result"]["anilist_id"].as_i64().unwrap()), "{picked}");
+
+    // 429 every time: page 1 gives up after its usual three tries, and the pick fails cleanly.
+    let fake = fake_anilist(|_, _| (429, json!({"errors": [{"message": "Too Many Requests.", "status": 429}]}), Some("0.01"))).await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, _) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    assert_eq!((s, fake.calls().len()), (502, 3));
 }
