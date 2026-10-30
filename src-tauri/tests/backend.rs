@@ -3194,13 +3194,23 @@ fn three_seasons() -> Vec<Value> {
 
 /// AniList over a fixed `catalog`: Page.media matches the entries whose ids
 /// are in `pool` (minus id_not_in, within id_in, by id), and `Media(id:)`
-/// finds any catalog entry, or 404s like AniList does.
+/// finds any catalog entry, or 404s like AniList does. A lookup that asks for
+/// its related entries in full gets them, with their own relations, as far
+/// as the catalog has them (anilist-api-notes #27).
 fn catalog_reply(catalog: &[Value], pool: &[i64], q: &str, v: &Value) -> Reply {
     if q.contains("Media(id: $id") {
-        return match catalog.iter().find(|m| m["id"] == v["id"]) {
-            Some(m) => (200, json!({"data": {"Media": m}}), None),
-            None => (404, json!({"data": {"Media": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None),
+        let Some(found) = catalog.iter().find(|m| m["id"] == v["id"]) else {
+            return (404, json!({"data": {"Media": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None);
         };
+        let mut found = found.clone();
+        if q.contains("relations { edges { node {") {
+            for edge in found["relations"]["edges"].as_array_mut().unwrap() {
+                if let Some(full) = catalog.iter().find(|c| c["id"] == edge["node"]["id"]) {
+                    edge["node"] = full.clone();
+                }
+            }
+        }
+        return (200, json!({"data": {"Media": found}}), None);
     }
     let ids = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
     let mut matches: Vec<Value> = catalog
@@ -3301,10 +3311,10 @@ async fn next_up_is_the_earliest_unwatched_entry_of_the_chain() {
     assert_eq!(body["result"]["anilist_id"], 11, "{body}");
     assert_eq!(body["next_up_for"], json!({"anilist_id": 12, "title": "Title 12", "title_english": null}));
     assert_eq!((&body["blocked"], lookups(&fake)), (&json!(false), vec![11]));
-    // Nothing seen: S1 itself, two lookups back.
+    // Nothing seen: S1 itself. The lookup of S2 brought S1 in full, so still one lookup.
     let (fake, st) = catalog_state(three_seasons(), &[12]).await;
     let (_, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
-    assert_eq!((body["result"]["anilist_id"].as_i64(), lookups(&fake)), (Some(10), vec![11, 10]));
+    assert_eq!((body["result"]["anilist_id"].as_i64(), lookups(&fake)), (Some(10), vec![11]));
     // From On Planning too.
     let (_, st) = catalog_state(three_seasons(), &[12]).await;
     add(&st, 10, "completed");
@@ -3343,16 +3353,17 @@ async fn next_up_is_only_offered_when_the_filters_allow_it() {
 
 #[tokio::test]
 async fn the_walk_back_stops_when_the_request_budget_is_spent() {
-    // 50 <- 51 <- ... <- 57, nothing seen. Page 1 is one request, so the walk gets three lookups.
+    // 50 <- 51 <- ... <- 57, nothing seen. Page 1 is one request, leaving three
+    // lookups, and each settles two entries: from 57 the start is seven back.
     let catalog: Vec<Value> = (50..=57).map(|id| if id == 50 { related(id, &[]) } else { related(id, &[("PREQUEL", id - 1, "TV", "ANIME")]) }).collect();
     let (fake, st) = catalog_state(catalog.clone(), &[57]).await;
     let (_, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
     assert_eq!((&body["result"], &body["blocked"], &body["requests"]), (&Value::Null, &json!(true), &json!(4)));
-    assert_eq!((lookups(&fake), fake.calls().len()), (vec![56, 55, 54], 4));
-    // Three back is within reach.
-    let (fake, st) = catalog_state(catalog, &[53]).await;
+    assert_eq!((lookups(&fake), fake.calls().len()), (vec![56, 54, 52], 4));
+    // Six back is within reach.
+    let (fake, st) = catalog_state(catalog, &[56]).await;
     let (_, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
-    assert_eq!((body["result"]["anilist_id"].as_i64(), lookups(&fake)), (Some(50), vec![52, 51, 50]));
+    assert_eq!((body["result"]["anilist_id"].as_i64(), lookups(&fake)), (Some(50), vec![55, 53, 51]));
 }
 
 #[tokio::test]
@@ -3438,4 +3449,41 @@ async fn a_pick_never_sends_more_than_four_requests_429_retries_included() {
     login(&st);
     let (s, _) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
     assert_eq!((s, fake.calls().len()), (502, 3));
+}
+
+#[tokio::test]
+async fn a_large_pool_first_pick_reaches_a_next_up_two_entries_back() {
+    // Re:Zero's shape (notes #26): every one of 1000 titles is a "3rd Season"
+    // waiting on 2nd Season Part 2 (2), which waits on 2nd Season (3), which
+    // waits on the 1st Season (4).
+    let chain = vec![
+        related(2, &[("PREQUEL", 3, "TV", "ANIME"), ("SEQUEL", 1000, "TV", "ANIME")]),
+        related(3, &[("PREQUEL", 4, "TV", "ANIME"), ("SEQUEL", 2, "TV", "ANIME")]),
+        related(4, &[("SEQUEL", 3, "TV", "ANIME")]),
+    ];
+    for (first_season, want) in [("completed", Some(3)), ("planning", None)] {
+        let chain = chain.clone();
+        let fake = fake_anilist(move |q, v| {
+            if q.contains("Media(id: $id") {
+                return catalog_reply(&chain, &[], q, v);
+            }
+            page_reply(q, 1000, |i| related(1000 + i as i64, &[("PREQUEL", 2, "TV", "ANIME")]))
+        })
+        .await;
+        let st = state_with(&fake);
+        login(&st);
+        add(&st, 4, first_season);
+        let (s, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+        assert_eq!(s, 200);
+        // Page 1, the probes and the rolled page (12 of 23) leave one request:
+        // one lookup of 2nd Season Part 2, which brings 2nd Season in full.
+        assert_eq!((fake.calls().len(), body["requests"].as_u64(), lookups(&fake)), (4, Some(4), vec![2]), "S1 {first_season}");
+        assert_eq!(body["result"]["anilist_id"].as_i64(), want, "S1 {first_season}: {body}");
+        if want.is_some() {
+            assert!(body["next_up_for"]["anilist_id"].as_i64().unwrap() >= 1000);
+        } else {
+            // The 1st Season would be three back: past what one lookup settles.
+            assert_eq!(body["blocked"], json!(true));
+        }
+    }
 }
