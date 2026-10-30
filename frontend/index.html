@@ -673,6 +673,36 @@ let _pickOptions=null, _pickOptionsError=null;
 // Per app session, per source + filters: the titles already shown (so none
 // repeats until all have been) and the pool size the server measured.
 const _pickSeen={};
+// AniList allows 30 requests a minute (anilist-api-notes #24) and one pick
+// sends at most 4. So after each pick Reroll waits a short gap, and longer
+// whenever a worst-case next pick would take the last minute past 30.
+const PICK_RATE={limit:30,windowMs:60000,perPick:4,gapMs:2000};
+const _pickLog=[]; // {at, requests} for each pick started in the last minute
+let _pickDoneAt=0, _pickTimer=null;
+function pickWaitMs(){
+  const now=Date.now();
+  while(_pickLog.length&&now-_pickLog[0].at>=PICK_RATE.windowMs)_pickLog.shift();
+  let wait=Math.max(0,_pickDoneAt+PICK_RATE.gapMs-now);
+  let over=_pickLog.reduce((n,x)=>n+x.requests,0)+PICK_RATE.perPick-PICK_RATE.limit;
+  for(const x of _pickLog){ if(over<=0)break; wait=Math.max(wait,x.at+PICK_RATE.windowMs-now); over-=x.requests; }
+  return wait;
+}
+function rerollButton(){
+  const busy=state.pickBusy, wait=busy?0:pickWaitMs(), off=busy||wait>0;
+  const word=state.pickResult&&state.pickResult.item?'Reroll':'Pick';
+  const label=busy?'Picking…':wait>0?`${word} in ${Math.ceil(wait/1000)}s`:word;
+  return `<div id="pick-reroll" data-act="reroll"${wait>0?' title="Waiting so picks stay within AniList’s 30 requests a minute"':''} style="flex:1 1 120px;padding:12px;border-radius:11px;text-align:center;font-weight:700;font-size:13.5px;background:var(--accent);color:#04121d;box-shadow:0 6px 22px color-mix(in srgb,var(--accent) 30%,transparent);cursor:${off?'default':'pointer'};opacity:${off?'.55':'1'};pointer-events:${off?'none':'auto'};">${label}</div>`;
+}
+// Repaints just the button while it waits: a full render() every tick would
+// rebuild any input being typed in.
+function pickCooldown(){
+  if(_pickTimer)return;
+  _pickTimer=setInterval(()=>{
+    const n=document.getElementById('pick-reroll');
+    if(n)n.outerHTML=rerollButton();
+    if(pickWaitMs()<=0||!state.pickOpen){clearInterval(_pickTimer);_pickTimer=null;}
+  },250);
+}
 function pickFilters(p){
   const f={}, picked=(o,v)=>Object.keys(o).filter(k=>o[k]===v);
   const lists={genres_in:picked(p.genres,'in'),genres_not_in:picked(p.genres,'out'),tags_in:picked(p.tags,'in'),
@@ -700,6 +730,7 @@ async function loadPickOptions(){
 }
 async function runPick(){
   if(state.pickBusy)return;
+  if(pickWaitMs()>0){render();pickCooldown();return;}
   const p=state.pick, filters=pickFilters(p), key=JSON.stringify([p.source,filters]);
   const seen=_pickSeen[key]||(_pickSeen[key]={ids:[],size:null});
   const ask=()=>api.pick({source:p.source,roll:Math.random(),exclude:seen.ids,filters,...(seen.size?{size:seen.size}:{})});
@@ -709,33 +740,36 @@ async function runPick(){
   const problem=backwards?`${backwards[1]} can’t be more than ${backwards[2]}.`
     :filters.score_min!=null&&(filters.score_min<1||filters.score_min>10)?'The minimum score has to be between 1 and 10.':null;
   if(problem){state.pickError=problem;render();return;}
+  // Logged as a worst case until the server says what it sent.
+  const logged={at:Date.now(),requests:PICK_RATE.perPick};_pickLog.push(logged);
   state.pickBusy=true;state.pickError=null;render();
   try{
-    let resp=await ask(), note=null;
-    if(!resp.result&&resp.exhausted){
-      // Start over; only if that finds something were the shown ones really all of it.
-      const count=seen.ids.length;
-      seen.ids=[];seen.size=null;
-      resp=await ask();
-      if(resp.result)note=`You’ve seen all ${count} ${count===1?'match':'matches'} for these filters, so it’s starting over.`;
-    }
-    seen.size=resp.size;
+    const resp=await ask();
+    logged.requests=resp.requests??PICK_RATE.perPick;
+    // Nothing left but titles already shown: one click is one pick, so say
+    // so and let the next pick start over.
+    const usedUp=!resp.result&&resp.exhausted?seen.ids.length:0;
+    if(usedUp){seen.ids=[];seen.size=null;}
+    else seen.size=resp.size;
     if(resp.result)seen.ids.push(resp.result.anilist_id);
     // Everything that matched: what's left (pool, this pick included) plus what was shown before.
     const total=resp.result?resp.pool+seen.ids.length-1:0;
-    state.pickResult={item:resp.result,total,exact:resp.pool_exact,capped:!resp.pool_exact&&resp.pool>=5000,source:p.source,note,fresh:true,
+    state.pickResult={item:resp.result,total,exact:resp.pool_exact,capped:!resp.pool_exact&&resp.pool>=5000,source:p.source,usedUp,fresh:true,
       nextUpFor:resp.next_up_for,blocked:resp.blocked};
   }catch(e){
     console.error('pick failed:',e);
     state.pickError=pickErrorText(e,'Something went wrong picking a title. Try again.');
   }
+  _pickDoneAt=Date.now();
   state.pickBusy=false;render();
   if(state.pickResult)state.pickResult.fresh=false;
+  pickCooldown();
 }
 function pickLibItem(r){return r?library.find(x=>x.anilist_id===r.anilist_id):null;}
 H.openPick = ()=>{
   state.pickOpen=true;state.pickJustOpened=true;loadPickOptions();render();state.pickJustOpened=false;
   if(!state.pickResult)runPick();
+  else if(pickWaitMs()>0)pickCooldown();
 };
 H.closePick = ()=>{state.pickOpen=false;render();};
 H.setPickSource = (el)=>{
@@ -2182,12 +2216,14 @@ function pickModal(){
   // ---- result ----
   const res=state.pickResult, r=res&&res.item, inLib=pickLibItem(r), busy=state.pickBusy;
   const watching=inLib&&inLib.status==='watching', onPlanning=inLib&&inLib.status==='planning';
-  const rerollBtn=`<div data-act="reroll" style="flex:1 1 120px;padding:12px;border-radius:11px;text-align:center;font-weight:700;font-size:13.5px;background:var(--accent);color:#04121d;box-shadow:0 6px 22px color-mix(in srgb,var(--accent) 30%,transparent);cursor:${busy?'default':'pointer'};opacity:${busy?'.55':'1'};pointer-events:${busy?'none':'auto'};">${busy?'Picking…':r?'Reroll':'Pick'}</div>`;
+  const rerollBtn=rerollButton();
   const quietBtn=(act,text,done)=>`<div ${done?'':`data-act="${act}" data-hover="border-color:var(--accent)"`} style="flex:1 1 120px;padding:12px;border-radius:11px;text-align:center;font-weight:600;font-size:13.5px;background:var(--s3);border:1px solid var(--line);color:${done?'var(--t4)':'var(--t1)'};cursor:${done?'default':'pointer'};">${text}</div>`;
   const msg=(html)=>`<div style="background:var(--s2);border:1px solid var(--line2);border-radius:14px;padding:26px 22px;text-align:center;color:var(--t3);font-size:13.5px;line-height:1.6;">${html}</div>`;
   let result;
   if(!res&&busy)result=msg('<span style="font-family:\'Overpass Mono\',monospace;font-size:12px;color:var(--t4);">Picking…</span>');
   else if(!res)result=msg('Set any filters you like, then pick.');
+  else if(!r&&res.usedUp)result=msg(`<div style="font-weight:700;color:var(--t1);margin-bottom:6px;">You’ve seen all ${res.usedUp} ${res.usedUp===1?'match':'matches'} for these filters</div>
+      Pick again to start over from the top.`);
   else if(!r&&res.blocked)result=msg(`<div style="font-weight:700;color:var(--t1);margin-bottom:6px;">Nothing you can start right now</div>
       The matches it tried are all sequels you're not caught up on. Turn on “Include sequels I'm not caught up on”, or loosen a filter.
       <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:16px;">
@@ -2203,8 +2239,7 @@ function pickModal(){
     const count=res.capped?'One of over 5,000 matches':`One of ${fmtCount(res.total)}${res.exact?'':'+'} ${res.total===1&&res.exact?'match':'matches'}${res.source==='planning'?' on your Planning list':''}`;
     // FR-71: the pick landed on a sequel you're not caught up on; this is where to start.
     const via=res.nextUpFor;
-    result=`${res.note?`<div style="margin-bottom:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);color:var(--t2);font-size:12.5px;">${esc(res.note)}</div>`:''}
-    ${via?`<div style="margin-bottom:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);font-size:12.5px;line-height:1.5;">
+    result=`${via?`<div style="margin-bottom:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);font-size:12.5px;line-height:1.5;">
       <div style="color:var(--t1);font-weight:600;">You haven't seen the prequel. Next up: ${esc(displayTitle(r))}</div>
       <div style="color:var(--t3);margin-top:2px;">Picked: ${esc(displayTitle(via))}</div></div>`:''}
     <div style="background:var(--s2);border:1px solid var(--line2);border-radius:14px;overflow:hidden;${res.fresh?'animation:rk-pop .2s ease;':''}">
