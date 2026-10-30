@@ -3487,3 +3487,17 @@ async fn a_large_pool_first_pick_reaches_a_next_up_two_entries_back() {
         }
     }
 }
+
+#[tokio::test]
+async fn page_one_in_hand_is_still_tried_after_the_requests_run_out() {
+    // 51 titles: 1..=50 stand alone (page 1), and 99 (alone on page 2) waits
+    // on a prequel AniList doesn't have.
+    let mut catalog: Vec<Value> = (1..=50).map(|id| related(id, &[])).collect();
+    catalog.push(related(99, &[("PREQUEL", 98, "TV", "ANIME")]));
+    let pool: &'static [i64] = Box::leak((1..=50).chain([99]).collect::<Vec<i64>>().into_boxed_slice());
+    let (fake, st) = catalog_state(catalog, pool).await;
+    // roll 0.75 lands on page 2; its walk spends the last request.
+    let (s, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.75}))).await;
+    assert_eq!((s, body["requests"].as_u64(), lookups(&fake)), (200, Some(4), vec![98]));
+    assert!((1..=50).contains(&body["result"]["anilist_id"].as_i64().unwrap_or(0)), "page 1 costs nothing to try: {body}");
+}
