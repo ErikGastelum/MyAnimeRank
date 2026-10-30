@@ -1288,21 +1288,24 @@ function countLabel(it){const n=totalCount(it);const unit=it.media_type==='anime
 // titles (confirmed real case: Berserk). No total means no denominator, no "?"
 // placeholder, no "Ongoing" label -- just a bare read/watched count.
 function progressLabel(it){const n=totalCount(it);const unit=it.media_type==='anime'?'eps':'ch';if(n==null)return it.progress+' '+unit+' '+(it.media_type==='anime'?'watched':'read');return it.progress+' / '+n+' '+unit;}
-async function addFromCatalog(c,status){
+// Throws when the import fails; callers decide how to show it.
+async function importToLibrary(c,status){
   let ex=library.find(x=>x.anilist_id===c.anilist_id);
   if(ex){
     ex.status=status;
     backgroundSync(()=>api.putStatus(ex.id,status));
     return ex;
   }
-  try{
-    const resp=await api.importMedia({...c,status:status});
-    // real backend id -- everything downstream (rating, progress, status PUTs)
-    // needs it. A failed import adds nothing locally: a row without a real id
-    // would 404 on every later write.
-    const it=mk(Object.assign({},c,{status:status,progress:0,rating:null,id:resp.id}));
-    library.push(it);return it;
-  }catch(e){
+  const resp=await api.importMedia({...c,status:status});
+  // real backend id -- everything downstream (rating, progress, status PUTs)
+  // needs it. A failed import adds nothing locally: a row without a real id
+  // would 404 on every later write.
+  const it=mk(Object.assign({},c,{status:status,progress:0,rating:null,id:resp.id}));
+  library.push(it);return it;
+}
+async function addFromCatalog(c,status){
+  try{ return await importToLibrary(c,status); }
+  catch(e){
     console.error('import failed:',e);
     alert('Could not add this title -- the import request failed.');
     return null;
