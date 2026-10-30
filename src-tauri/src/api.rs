@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::anilist::{self, AlError, FriendLookup, PickFilters, PickPool, PickSize, PICK_DEPTH};
+use crate::anilist::{self, AlError, FriendLookup, PickCheck, PickFilters, PickPool, PickSize, PICK_DEPTH};
 use crate::db::{self, AnchorError, Auth, MediaFields, Scores};
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
@@ -806,7 +806,7 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         let left: Vec<i64> = planning.iter().copied().filter(|id| !shown.contains(id)).collect();
         if left.is_empty() {
             // No AniList call: there's nothing to ask about.
-            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null}));
+            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null, "next_up_for": null, "blocked": false}));
         }
         PickPool::Only(left)
     } else {
@@ -818,9 +818,18 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         let since = if s.lo >= PICK_DEPTH { 0 } else { body.exclude.len() - s.shown };
         PickSize { lo: s.lo.saturating_sub(since), hi: s.hi.saturating_sub(since) }
     });
-    let picked = st.anilist.pick(&body.filters, &pool, body.roll, known).await?;
-    // Empty because of `exclude` alone: the client clears it and starts over.
+    // FR-71: a prequel counts as seen when it's Completed or Rewatching.
+    let check = (!body.filters.include_unwatched_sequels).then(|| PickCheck {
+        watched: library.iter().filter(|m| matches!(m.status.as_str(), "completed" | "rewatching")).map(|m| m.fields.anilist_id).collect(),
+        shown: shown.clone(),
+    });
+    let picked = st.anilist.pick(&body.filters, &pool, body.roll, known, check.as_ref()).await?;
+    // Nothing, with titles already shown: the client clears `exclude` and
+    // tries once more, which tells "seen them all" from "nothing usable".
     let exhausted = picked.result.is_none() && !shown.is_empty();
     let size = picked.size.map(|s| json!({"lo": s.lo, "hi": s.hi, "shown": body.exclude.len()}));
-    ok(json!({"result": picked.result, "pool": picked.pool, "pool_exact": picked.pool_exact, "exhausted": exhausted, "size": size}))
+    ok(json!({
+        "result": picked.result, "pool": picked.pool, "pool_exact": picked.pool_exact, "exhausted": exhausted,
+        "size": size, "next_up_for": picked.next_up_for, "blocked": picked.blocked,
+    }))
 }
