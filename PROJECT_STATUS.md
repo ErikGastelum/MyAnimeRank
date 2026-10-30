@@ -25,7 +25,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (61), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (62), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -101,11 +101,12 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
-- **Friend Comparison (M10):** 9 more tests (60 in `tests/backend.rs`): the
+- **Friend Comparison (M10):** 10 more tests (61 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, cascade on removal, no token and no mutation on friend
-  fetches, score normalization, private/unknown/own-account refusals, an
-  empty public list, the comparison math and every PRD §7 shape. The UI was
+  fetches, score normalization (POINT_5/POINT_3 read in the friend's own
+  format), private/unknown/own-account refusals, an empty public list, the
+  comparison math and every PRD §7 shape. The UI was
   driven in headless Chromium against the real router and a fake AniList.
   Checked against the live AniList API (logged out) on a temp DB: public,
   private, unknown and empty-list users, every score format, lists of 11,905
@@ -176,9 +177,13 @@ Roughly by priority:
    `rating.animation`, no `ON DELETE CASCADE`.
 9. **Hero tint CSS** is invalid and silently dropped; fixing it changes the look.
 10. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
-11. **Request volume:** debounce rapid +1 progress clicks; use the single-entry
-    lookup in `resolve(remote)` and pending conflicts instead of the whole list.
+11. **Request volume** (AniList's limit is now 30 req/min): debounce rapid +1
+    progress clicks; use the single-entry lookup in `resolve(remote)` and
+    pending conflicts instead of the whole list. Discover fires its 6 shelves
+    in parallel per media type (12 with the toggle), and the push retry loop
+    retries every queued title each 30 s without stopping at a 429, so a long
+    queue can keep the account rate-limited.
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
     detail page); adding a private user *by name* (only by id was possible);
-    a real 429's `Retry-After` (AniList now reports 30 req/min, not ~90).
+    a real 429's `Retry-After`.
