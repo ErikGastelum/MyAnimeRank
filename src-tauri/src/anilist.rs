@@ -537,7 +537,7 @@ impl AniList {
     /// here can act as, or for, anyone. Looks them up by id when known (a
     /// refresh), since usernames can change.
     pub async fn get_friend_list(&self, name: &str, id: Option<i64>) -> AlResult<FriendLookup> {
-        let q = "query ($id: Int, $name: String) { User(id: $id, name: $name) { id name avatar { large } } }";
+        let q = "query ($id: Int, $name: String) { User(id: $id, name: $name) { id name avatar { large } mediaListOptions { scoreFormat } } }";
         let vars = match id {
             Some(id) => json!({"id": id}),
             None => json!({"name": name}),
@@ -560,13 +560,20 @@ impl AniList {
         };
         let user_id = user["id"].as_i64().ok_or_else(|| unexpected("User.id missing"))?;
         let name = str_of(&user["name"]).unwrap_or_else(|| name.to_string());
+        // FR-72: POINT_5 and POINT_3 are read in the friend's own format and
+        // mapped by normalize_score(); AniList converts every other format.
+        let format = match user["mediaListOptions"]["scoreFormat"].as_str() {
+            Some("POINT_5") => "POINT_5",
+            Some("POINT_3") => "POINT_3",
+            _ => "POINT_10_DECIMAL",
+        };
 
         let q = format!(
-            "query ($userId: Int) {{
+            "query ($userId: Int, $format: ScoreFormat) {{
                anime: MediaListCollection(userId: $userId, type: ANIME) {{ {FRIEND_LIST_FIELDS} }}
                manga: MediaListCollection(userId: $userId, type: MANGA) {{ {FRIEND_LIST_FIELDS} }} }}"
         );
-        let data = match self.graphql(&q, Some(json!({"userId": user_id})), None, 30).await {
+        let data = match self.graphql(&q, Some(json!({"userId": user_id, "format": format})), None, 30).await {
             // The lookup above found them, so a 404 here is AniList
             // withholding their lists rather than a missing user.
             Err(e) if is_private(&e) || matches!(e, AlError::NotFound(_)) => return Ok(FriendLookup::Private(name)),
@@ -588,7 +595,7 @@ impl AniList {
                     anilist_id,
                     status: local_status_from_al(e["status"].as_str().unwrap_or_default(), &media_type),
                     media_type,
-                    score: normalize_score(e["score"].as_f64()),
+                    score: normalize_score(e["score"].as_f64(), format),
                     title: pick_title(&media["title"]),
                     title_english: str_of(&media["title"]["english"]),
                     cover_url: str_of(&media["coverImage"]["large"]),
@@ -716,9 +723,9 @@ const FAVOURITES_FIELDS: &str = "favourites {
     staff { nodes { id name { full } image { large } } }
     studios { nodes { id name } } }";
 
-/// FR-72: AniList converts each score to POINT_10_DECIMAL, whatever format
-/// the friend uses.
-const FRIEND_LIST_FIELDS: &str = "lists { entries { status score(format: POINT_10_DECIMAL)
+/// FR-72: scores in `$format` (see get_friend_list). A bare `score` isn't
+/// reliably in any one format, so the format is always named.
+const FRIEND_LIST_FIELDS: &str = "lists { entries { status score(format: $format)
     media { id type title { romaji english native } coverImage { large } genres } } }";
 
 fn unexpected(msg: &str) -> AlError {

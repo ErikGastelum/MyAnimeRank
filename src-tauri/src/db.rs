@@ -285,11 +285,24 @@ pub fn snap_to_half_step(score: f64) -> f64 {
     ((score * 2.0 + 0.5).floor() / 2.0).clamp(1.0, 10.0)
 }
 
-/// FR-72: a friend's score as AniList sends it, already converted to
-/// POINT_10_DECIMAL whatever format they use. 0 means "not scored"; anything
-/// else is clamped onto this app's 1.0-10.0 scale (POINT_100's 4 arrives as 0.4).
-pub fn normalize_score(score: Option<f64>) -> Option<f64> {
-    score.filter(|s| *s > 0.0).map(|s| s.clamp(1.0, 10.0))
+/// FR-72: a friend's score as AniList sent it, in `format`. POINT_5 and
+/// POINT_3 come in the friend's own format, because AniList's conversion tops
+/// them out below 10 (5 stars is 9.0, :) is 8.5), and are mapped here; every
+/// other format arrives already converted to POINT_10_DECIMAL. 0 means "not
+/// scored"; the result is clamped onto this app's 1.0-10.0 scale (POINT_100's
+/// 4 arrives as 0.4).
+pub fn normalize_score(score: Option<f64>, format: &str) -> Option<f64> {
+    let s = score.filter(|s| *s > 0.0)?;
+    let s = match format {
+        "POINT_5" => s.round() * 2.0,
+        "POINT_3" => match s.round() as i64 {
+            1 => 4.0,
+            2 => 7.0,
+            _ => 10.0,
+        },
+        _ => s,
+    };
+    Some(s.clamp(1.0, 10.0))
 }
 
 fn ts_after(a: &str, b: &str) -> bool {

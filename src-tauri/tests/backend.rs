@@ -1180,15 +1180,45 @@ fn friend_node(anilist_id: i64, al_type: &str, status: &str, score: Value) -> Va
     json!({"status": status, "score": score, "media": friend_media(anilist_id, al_type)})
 }
 
+/// AniList's `score(format:)` for an entry stored as POINT_100 `p`, as
+/// recorded from real POINT_5 and POINT_3 lists (60 and 85 are entries scored
+/// before the user switched format).
+fn al_score(p: i64, format: &str) -> Value {
+    match (format, p) {
+        (_, 0) => json!(0),
+        ("POINT_5", 10) => json!(1),
+        ("POINT_5", 30) => json!(2),
+        ("POINT_5", 50 | 60) => json!(3),
+        ("POINT_5", 70 | 85) => json!(4),
+        ("POINT_5", 90) => json!(5),
+        ("POINT_3", 35) => json!(1),
+        ("POINT_3", 60) => json!(2),
+        ("POINT_3", 85) => json!(3),
+        ("POINT_10_DECIMAL", p) if p % 10 == 0 => json!(p / 10),
+        ("POINT_10_DECIMAL", p) => json!(p as f64 / 10.0),
+        other => panic!("no recorded conversion for {other:?}"),
+    }
+}
+
+/// Public friends besides Pal (id 42, POINT_10_DECIMAL): (id, name, scoreFormat).
+const FRIEND_USERS: [(i64, &str, &str); 5] = [
+    (1, "tester", "POINT_10_DECIMAL"),
+    (43, "hidden", "POINT_100"),
+    (44, "empty", "POINT_10"),
+    (45, "stars", "POINT_5"),
+    (46, "faces", "POINT_3"),
+];
+
 /// AniList as seen for friends, answering with the shapes recorded from the
-/// live API: `User` by name or id, then both lists in one aliased query. The
-/// `User` lookup says "Not Found." for a private user exactly as for a
-/// missing one; only `MediaListCollection` tells them apart ("Private User"
-/// vs "User not found"). "ghost" doesn't exist; "locked" is private;
-/// "hidden" (id 43) is found but its lists come back private; "empty" (id 44)
-/// is public with nothing listed; "tester" is the logged-in account (id 1);
-/// anything else is Pal (id 42). The first request gets a 429, and
-/// `private_lists` makes Pal private.
+/// live API: `User` by name or id (with the user's score format), then both
+/// lists in one aliased query, scores in the requested `$format`. The `User`
+/// lookup says "Not Found." for a private user exactly as for a missing one;
+/// only `MediaListCollection` tells them apart ("Private User" vs "User not
+/// found"). "ghost" doesn't exist; "locked" is private; "hidden" is found but
+/// its lists come back private; "empty" is public with nothing listed;
+/// "stars" and "faces" score in POINT_5 and POINT_3; "tester" is the
+/// logged-in account; anything else is Pal. The first request gets a 429,
+/// and `private_lists` makes Pal private.
 async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fake {
     let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     fake_anilist(move |q, v| {
@@ -1202,13 +1232,12 @@ async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fa
             if private || v["name"] == "ghost" {
                 return error("Not Found.", json!({"User": null}));
             }
-            let user = |id: i64, name: &str| (200, json!({"data": {"User": {"id": id, "name": name, "avatar": {"large": "https://img/u.png"}}}}), None);
-            return match v["name"].as_str() {
-                Some("hidden") => user(43, "hidden"),
-                Some("empty") => user(44, "empty"),
-                Some("tester") => user(1, "tester"),
-                _ => user(42, "Pal"),
-            };
+            let (id, name, format) = FRIEND_USERS
+                .into_iter()
+                .find(|(id, name, _)| v["id"] == *id || v["name"] == *name)
+                .unwrap_or((42, "Pal", "POINT_10_DECIMAL"));
+            let user = json!({"id": id, "name": name, "avatar": {"large": "https://img/u.png"}, "mediaListOptions": {"scoreFormat": format}});
+            return (200, json!({"data": {"User": user}}), None);
         }
         if !q.contains("anime:") {
             return error(if private { "Private User" } else { "User not found" }, json!({"MediaListCollection": null}));
@@ -1220,6 +1249,20 @@ async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fa
         }
         if v["userId"] == 44 {
             return (200, json!({"data": {"anime": {"lists": []}, "manga": {"lists": []}}}), None);
+        }
+        // stars and faces: each entry stored as POINT_100, sent in `$format`.
+        let stored: Option<([i64; 6], [i64; 2])> = match v["userId"].as_i64() {
+            Some(45) => Some(([90, 70, 50, 30, 10, 0], [85, 60])),
+            Some(46) => Some(([85, 60, 35, 0, 0, 0], [60, 35])),
+            _ => None,
+        };
+        if let Some((anime, manga)) = stored {
+            let format = v["format"].as_str().unwrap_or_default();
+            let list = |al_type: &str, first: i64, p100: &[i64]| {
+                let entries: Vec<Value> = p100.iter().zip(first..).map(|(p, id)| friend_node(id, al_type, "COMPLETED", al_score(*p, format))).collect();
+                json!({"lists": [{"entries": entries}]})
+            };
+            return (200, json!({"data": {"anime": list("ANIME", 100, &anime), "manga": list("MANGA", 200, &manga)}}), None);
         }
         let anime = json!({"lists": [
             {"entries": [friend_node(1, "ANIME", "CURRENT", json!(8.5)), friend_node(2, "ANIME", "REPEATING", json!(0)), friend_node(3, "ANIME", "PLANNING", json!(0))]},
@@ -1236,11 +1279,45 @@ async fn friend_anilist(private_lists: Arc<std::sync::atomic::AtomicBool>) -> Fa
 
 #[test]
 fn friend_scores_normalize_to_the_one_to_ten_scale_and_zero_means_unscored() {
-    // AniList already converted every format to POINT_10_DECIMAL (FR-72).
-    let cases = [(None, None), (Some(0.0), None), (Some(0.4), Some(1.0)), (Some(1.0), Some(1.0)), (Some(7.3), Some(7.3)), (Some(10.0), Some(10.0))];
-    for (raw, want) in cases {
-        assert_eq!(db::normalize_score(raw), want, "{raw:?}");
+    // FR-72: POINT_10_DECIMAL is what AniList converts every other format to.
+    let decimal = [(None, None), (Some(0.0), None), (Some(0.4), Some(1.0)), (Some(1.0), Some(1.0)), (Some(7.3), Some(7.3)), (Some(10.0), Some(10.0))];
+    // POINT_5 and POINT_3 arrive in the friend's own format: stars x 2, and
+    // 1/2/3 -> 4/7/10, so the top score is 10 in every format.
+    let stars = [(Some(0.0), None), (Some(1.0), Some(2.0)), (Some(2.0), Some(4.0)), (Some(3.0), Some(6.0)), (Some(4.0), Some(8.0)), (Some(5.0), Some(10.0))];
+    let faces = [(None, None), (Some(0.0), None), (Some(1.0), Some(4.0)), (Some(2.0), Some(7.0)), (Some(3.0), Some(10.0))];
+    for (format, cases) in [("POINT_10_DECIMAL", &decimal[..]), ("POINT_5", &stars[..]), ("POINT_3", &faces[..])] {
+        for (raw, want) in cases {
+            assert_eq!(db::normalize_score(*raw, format), *want, "{format} {raw:?}");
+        }
     }
+}
+
+#[tokio::test]
+async fn point_5_and_point_3_friends_are_read_in_their_own_format_and_reach_ten() {
+    let fake = friend_anilist(Arc::default()).await;
+    let st = state_with(&fake);
+    login(&st);
+    // (username, id, format, anime scores, manga scores) as stored
+    let cases = [
+        ("stars", 45, "POINT_5", vec![Some(10.0), Some(8.0), Some(6.0), Some(4.0), Some(2.0), None], vec![Some(8.0), Some(6.0)]),
+        ("faces", 46, "POINT_3", vec![Some(10.0), Some(7.0), Some(4.0), None, None, None], vec![Some(7.0), Some(4.0)]),
+    ];
+    for (username, id, format, anime, manga) in cases {
+        for (method, path, body) in [("POST", "/friends".to_string(), Some(json!({"username": username}))), ("POST", format!("/friends/{id}/refresh"), None)] {
+            let before = fake.calls().len();
+            let (s, b) = call(&st, method, &path, body).await;
+            assert_eq!(s, 200, "{path}: {b}");
+            // Still two requests: the lookup brings the format, the lists come in it.
+            let calls = &fake.calls()[before..];
+            let n = calls.len();
+            assert!(n == 2 || (n == 3 && before == 0), "{path}: {n} requests");
+            assert_eq!(calls[n - 1].1, json!({"userId": id, "format": format}), "{path}");
+            assert!(calls[n - 1].0.contains("score(format: $format)"), "{path}");
+            let scores = |t| st.db.friend_entries(id, t).unwrap().into_iter().map(|e| e.score).collect::<Vec<_>>();
+            assert_eq!((scores("anime"), scores("manga")), (anime.clone(), manga.clone()), "{path}");
+        }
+    }
+    assert!(fake.auths().iter().all(Option::is_none));
 }
 
 #[tokio::test]
@@ -1261,8 +1338,8 @@ async fn adding_a_friend_reads_their_public_lists_without_the_token_and_writes_n
     let calls = fake.calls();
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[1].1, json!({"name": "pal"}));
-    assert_eq!(calls[2].1, json!({"userId": 42}));
-    assert!(calls[2].0.contains("score(format: POINT_10_DECIMAL)"));
+    assert_eq!(calls[2].1, json!({"userId": 42, "format": "POINT_10_DECIMAL"}));
+    assert!(calls[2].0.contains("score(format: $format)"));
     // Public data only: never the token, never a mutation.
     assert!(fake.auths().iter().all(Option::is_none), "{:?}", fake.auths());
     assert!(calls.iter().all(|(q, _)| !q.contains("mutation")));
