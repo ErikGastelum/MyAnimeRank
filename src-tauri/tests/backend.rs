@@ -1631,10 +1631,12 @@ async fn comparison_matches_on_anilist_id_within_one_media_type() {
     // Mean gap 10/7 -> 100 * (1 - (10/7) / 9) = 84.1 -> 84.
     assert_eq!(b["taste_match"], json!(84));
     assert!((b["skew"].as_f64().unwrap() - 3.0 / 7.0).abs() < 1e-9, "{}", b["skew"]);
-    // Gap >= 1.0, largest first; the tie at 3.0 goes to the higher average (5: 8.5 over 3: 7.5).
-    assert_eq!(ids(&b["disagreements"]), vec![5, 3, 7, 1]);
+    // FR-75: the 5 largest gaps, however small (4's is 0.5); the tie at 3.0
+    // goes to the higher average (5: 8.5 over 3: 7.5).
+    assert_eq!(ids(&b["disagreements"]), vec![5, 3, 7, 1, 4]);
     // The rest, smallest gap first; the tie at 0 goes to the higher average.
-    assert_eq!(ids(&b["agreements"]), vec![2, 6, 4]);
+    assert_eq!(ids(&b["agreements"]), vec![2, 6]);
+    assert_eq!(b["rarely_disagree"], json!(false));
     assert_eq!(ids(&b["shared"]), vec![5, 1, 7, 2, 4, 3, 6]);
     let row = &b["shared"][0];
     for key in ["anilist_id", "media_id", "media_type", "title", "title_english", "cover_url", "your_score", "their_score", "delta"] {
@@ -1670,6 +1672,43 @@ async fn comparison_matches_on_anilist_id_within_one_media_type() {
     assert_eq!(call(&st, "GET", "/friends/42/compare?media_type=novel", None).await.0, 400);
     assert_eq!(call(&st, "GET", "/friends/42/compare", None).await.0, 422);
     assert_eq!(call(&st, "GET", "/friends/7/compare?media_type=anime", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn disagreements_are_always_the_five_largest_gaps_and_close_friends_rarely_disagree() {
+    let st = offline_state().await;
+    login(&st);
+    // Eight shared anime, every gap 0.5 or 0: a friend who scores like you.
+    let pairs = [(1, 9.0, 8.5), (2, 8.5, 8.5), (3, 8.0, 7.5), (4, 7.5, 7.5), (5, 7.0, 6.5), (6, 6.5, 6.5), (7, 6.0, 5.5), (8, 5.5, 5.5)];
+    let mut entries = Vec::new();
+    for (id, yours, theirs) in pairs {
+        mine(&st, id, "anime", "completed", Some(yours), &["Action"]);
+        entries.push(their(id, "anime", "completed", Some(theirs), &["Action"]));
+    }
+    // Manga is its own pool: one big gap, one none.
+    for (id, yours, theirs) in [(50, 9.0, 5.0), (51, 7.0, 7.0)] {
+        mine(&st, id, "manga", "completed", Some(yours), &["Drama"]);
+        entries.push(their(id, "manga", "completed", Some(theirs), &["Drama"]));
+    }
+    // A friend with no titles in common.
+    mine(&st, 60, "anime", "completed", Some(8.0), &["Action"]);
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+    st.db.replace_friend_list(&friend_list(43, "Amy", vec![their(61, "anime", "completed", Some(8.0), &["Action"])]), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    // Half-point gaps still fill the card: the four 0.5s (higher average
+    // first), then the best-liked of the exact matches.
+    assert_eq!(ids(&b["disagreements"]), vec![1, 3, 5, 7, 2]);
+    assert_eq!(ids(&b["agreements"]), vec![4, 6, 8]);
+    assert_eq!(b["rarely_disagree"], json!(true));
+    let (dis, agr) = (ids(&b["disagreements"]), ids(&b["agreements"]));
+    assert!(dis.iter().all(|id| !agr.contains(id)), "a title in both lists");
+
+    let (_, m) = call(&st, "GET", "/friends/42/compare?media_type=manga", None).await;
+    assert_eq!((ids(&m["disagreements"]), ids(&m["agreements"]), &m["rarely_disagree"]), (vec![50, 51], vec![], &json!(false)));
+
+    let (_, none) = call(&st, "GET", "/friends/43/compare?media_type=anime", None).await;
+    assert_eq!((&none["overlap"], ids(&none["disagreements"]), ids(&none["agreements"]), &none["rarely_disagree"]), (&json!(0), vec![], vec![], &json!(false)));
 }
 
 #[tokio::test]

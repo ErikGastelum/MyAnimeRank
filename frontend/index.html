@@ -2847,10 +2847,12 @@ function compareView(){
     <div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(s))}</div>
     <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">You <span style="color:var(--accent);">${fmtScore(s.your_score)}</span> · ${esc(name)} <span style="color:var(--t2);">${fmtScore(s.their_score)}</span></div></div>
     <span style="font-family:'Overpass Mono',monospace;font-size:14px;font-weight:700;color:${deltaColor(s.delta)};flex:0 0 auto;">${fmtDelta(s.delta)}</span></div>`;
-  const pairCard=(items,msg)=>`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:6px;">${items.length?items.map(pairRow).join(''):empty(msg)}</div>`;
+  // FR-75: the 5 biggest gaps however small, and a note when every gap is half a point or less.
+  const rarely=C.rarely_disagree?`<div style="font-size:12px;color:var(--t3);line-height:1.5;padding:8px 10px 4px;">You two rarely disagree: every title you both rated is within half a point.</div>`:'';
+  const pairCard=(items,msg,top)=>`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:6px;">${top||''}${items.length?items.map(pairRow).join(''):empty(msg)}</div>`;
   const pairs=`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;">
-    <div>${h2('Biggest disagreements')}${pairCard(C.disagreements,n?'No gaps of a point or more.':'Nothing rated by both yet.')}</div>
-    <div>${h2('Strongest agreements')}${pairCard(C.agreements,n?'Every shared title is already a disagreement.':'Nothing rated by both yet.')}</div>
+    <div>${h2('Biggest disagreements')}${pairCard(C.disagreements,'Nothing rated by both yet.',rarely)}</div>
+    <div>${h2('Strongest agreements')}${pairCard(C.agreements,n?'Every title you both rated is already under Biggest disagreements.':'Nothing rated by both yet.')}</div>
   </div>`;
 
   // FR-77 shelves: cover, title, the 8.0+ score, and a note when the title is
