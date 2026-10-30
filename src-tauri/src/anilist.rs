@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields};
@@ -807,6 +808,274 @@ impl AniList {
             "banner_url": str_of(&viewer["bannerImage"]),
         }))
     }
+
+    // -------------------------------------------------------- pick an anime ----
+
+    /// FR-70: the genre and tag lists for the picker's filters, in one request.
+    pub async fn pick_options(&self) -> AlResult<Value> {
+        let q = "{ GenreCollection MediaTagCollection { name category isGeneralSpoiler isAdult } }";
+        let data = self.graphql(q, None, None, 15).await?;
+        let tags: Vec<Value> = arr(&data["MediaTagCollection"])
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t["name"], "category": t["category"],
+                    "is_spoiler": t["isGeneralSpoiler"].as_bool().unwrap_or(false),
+                    "is_adult": t["isAdult"].as_bool().unwrap_or(false),
+                })
+            })
+            .collect();
+        let genres: Vec<String> = arr(&data["GenreCollection"]).iter().filter_map(str_of).collect();
+        Ok(json!({"genres": genres, "tags": tags}))
+    }
+
+    /// FR-70: one random anime from everything the filters match in `pool`.
+    ///
+    /// Page 1 comes first, alone: a pool that fits on it is counted and
+    /// picked exactly, in one request. pageInfo.total isn't a count (notes
+    /// #17), so a bigger pool is then bracketed with single-entry probes
+    /// (each probe past the end costs AniList a full scan, notes #25, which is
+    /// why small pools never send them). The pool holds `lo` to `hi` titles:
+    /// the rolled index is uniform over `hi` and kept if it exists, else a
+    /// fallback uniform over the `lo` known to exist, both asked for in one
+    /// last request. `known` is that size from an earlier pick on the same
+    /// filters, already shrunk by the titles shown since: it skips straight to
+    /// the last request. `roll` comes from the client (0 <= roll < 1), so this
+    /// stays deterministic.
+    pub async fn pick(&self, filters: &PickFilters, pool: &PickPool, roll: f64, known: Option<PickSize>) -> AlResult<Picked> {
+        let mut vars = pick_variables(filters, pool);
+        vars["sort"] = json!(["ID"]);
+        if let Some(size) = known.filter(|s| PICK_PAGE < s.lo && s.lo <= s.hi && s.hi <= PICK_DEPTH) {
+            if let Some(node) = self.pick_entry(&vars, size, roll, &[]).await? {
+                return Ok(Picked { result: Some(map_pick(&node)?), pool: size.lo, pool_exact: false, size: Some(size) });
+            }
+            // Nothing there: the pool shrank more than the hint knew. Size it afresh.
+        }
+
+        let q = format!(
+            "query ({PICK_VARS}) {{ first: Page(page: 1, perPage: {PICK_PAGE}) {{ pageInfo {{ hasNextPage }}
+               media({PICK_ARGS}) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }} }}"
+        );
+        let data = self.graphql(&q, Some(vars.clone()), None, 20).await?;
+        let first = arr(&data["first"]["media"]);
+        let at_roll = |page: &[Value]| page[((roll * page.len() as f64) as usize).min(page.len() - 1)].clone();
+        if first.is_empty() {
+            return Ok(Picked { result: None, pool: 0, pool_exact: true, size: None });
+        }
+        if data["first"]["pageInfo"]["hasNextPage"] != true {
+            return Ok(Picked { result: Some(map_pick(&at_roll(&first))?), pool: first.len(), pool_exact: true, size: None });
+        }
+
+        let probes = pick_probes();
+        let pages: String = probes.iter().map(|i| pick_page(*i, "id")).collect();
+        let data = self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(vars.clone()), None, 20).await?;
+        let exists = |i: &&usize| !arr(&data[format!("at{i}")]["media"]).is_empty();
+        let lo = probes.iter().take_while(exists).last().map_or(first.len(), |i| i + 1);
+        let hi = probes.iter().find(|i| !exists(i)).copied().unwrap_or(PICK_DEPTH);
+        let size = PickSize { lo, hi };
+        // Nothing where the probes said there was: the pool shrank in
+        // between, so fall back to page 1.
+        let node = self.pick_entry(&vars, size, roll, &first).await?.unwrap_or_else(|| at_roll(&first));
+        Ok(Picked { result: Some(map_pick(&node)?), pool: lo, pool_exact: false, size: Some(size) })
+    }
+
+    /// The pool entry `roll` lands on, or its fallback when the rolled index
+    /// is past the end; None when neither exists. Entries already on `first`
+    /// (page 1, sorted by ID) aren't asked for again.
+    async fn pick_entry(&self, vars: &Value, size: PickSize, roll: f64, first: &[Value]) -> AlResult<Option<Value>> {
+        // Over the paging limit (notes #18): alternate the oldest and newest
+        // 5000, splitting roll into two independent draws.
+        let (sort, roll) = if size.lo < PICK_DEPTH {
+            ("ID", roll)
+        } else if roll < 0.5 {
+            ("ID", roll * 2.0)
+        } else {
+            ("ID_DESC", roll * 2.0 - 1.0)
+        };
+        let x = roll * size.hi as f64;
+        let idx = (x as usize).min(size.hi - 1);
+        let mut wanted = vec![idx];
+        if idx >= size.lo {
+            wanted.push((x.fract() * size.lo as f64) as usize);
+        }
+        let on_first = |i: usize| (sort == "ID").then(|| first.get(i)).flatten().cloned();
+        let fetch: Vec<usize> = wanted.iter().copied().filter(|i| on_first(*i).is_none()).collect();
+        let fetched = if fetch.is_empty() {
+            Value::Null
+        } else {
+            let mut vars = vars.clone();
+            vars["sort"] = json!([sort]);
+            let pages: String = fetch.iter().map(|i| pick_page(*i, &format!("{MEDIA_FIELDS} {PICK_FIELDS}"))).collect();
+            self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(vars), None, 20).await?
+        };
+        Ok(wanted.into_iter().find_map(|i| on_first(i).or_else(|| arr(&fetched[format!("at{i}")]["media"]).into_iter().next())))
+    }
+}
+
+// --------------------------------------------------------- pick an anime ----
+
+/// FR-70 filters, as POST /pick's body carries them. All optional; ranges
+/// are inclusive here and converted to AniList's bounds in pick_variables().
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickFilters {
+    #[serde(default)]
+    pub genres_in: Vec<String>,
+    #[serde(default)]
+    pub genres_not_in: Vec<String>,
+    #[serde(default)]
+    pub tags_in: Vec<String>,
+    #[serde(default)]
+    pub tags_not_in: Vec<String>,
+    pub popularity_min: Option<i64>,
+    pub popularity_max: Option<i64>,
+    /// The app's 1-10 scale.
+    pub score_min: Option<f64>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    pub year_min: Option<i64>,
+    pub year_max: Option<i64>,
+    pub season: Option<String>,
+    pub episodes_min: Option<i64>,
+    pub episodes_max: Option<i64>,
+    #[serde(default)]
+    pub statuses: Vec<String>,
+    #[serde(default)]
+    pub include_adult: bool,
+}
+
+/// Which AniList ids a pick may land on.
+pub enum PickPool {
+    /// On Planning: only these.
+    Only(Vec<i64>),
+    /// Not on Planning: anything but these.
+    Except(Vec<i64>),
+}
+
+pub struct Picked {
+    pub result: Option<Value>,
+    /// Matches left: exact when `pool_exact`, else a lower bound (at most PICK_DEPTH).
+    pub pool: usize,
+    pub pool_exact: bool,
+    /// For a pool bigger than a page: its size, for the next pick to reuse.
+    pub size: Option<PickSize>,
+}
+
+/// A pool bigger than a page holds `lo` to `hi` titles (`hi` within 25% of
+/// `lo`); 5000 and 5000 when it's past the paging limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PickSize {
+    pub lo: usize,
+    pub hi: usize,
+}
+
+pub const PICK_FORMATS: [&str; 6] = ["TV", "TV_SHORT", "MOVIE", "OVA", "ONA", "SPECIAL"];
+pub const PICK_STATUSES: [&str; 3] = ["FINISHED", "RELEASING", "NOT_YET_RELEASED"];
+
+/// AniList won't page past its first 5000 matches (notes #18).
+pub const PICK_DEPTH: usize = 5000;
+const PICK_PAGE: usize = 50;
+
+const PICK_VARS: &str = "$idIn: [Int], $idNotIn: [Int], $genreIn: [String], $genreNotIn: [String],
+    $tagIn: [String], $tagNotIn: [String], $popularityGreater: Int, $popularityLesser: Int,
+    $scoreGreater: Int, $formatIn: [MediaFormat], $startGreater: FuzzyDateInt, $startLesser: FuzzyDateInt,
+    $season: MediaSeason, $episodesGreater: Int, $episodesLesser: Int, $statusIn: [MediaStatus],
+    $isAdult: Boolean, $sort: [MediaSort]";
+
+const PICK_ARGS: &str = "type: ANIME, id_in: $idIn, id_not_in: $idNotIn, genre_in: $genreIn,
+    genre_not_in: $genreNotIn, tag_in: $tagIn, tag_not_in: $tagNotIn,
+    popularity_greater: $popularityGreater, popularity_lesser: $popularityLesser,
+    averageScore_greater: $scoreGreater, format_in: $formatIn, startDate_greater: $startGreater,
+    startDate_lesser: $startLesser, season: $season, episodes_greater: $episodesGreater,
+    episodes_lesser: $episodesLesser, status_in: $statusIn, isAdult: $isAdult, sort: $sort";
+
+/// On top of MEDIA_FIELDS (GraphQL merges the two `tags` selections).
+const PICK_FIELDS: &str = "tags { rank isMediaSpoiler isGeneralSpoiler isAdult } popularity status startDate { year }";
+
+/// FR-70 filters as AniList variables. Only the filters that are set are
+/// sent: an explicit null for a list argument is a 500 on AniList (notes #20).
+fn pick_variables(f: &PickFilters, pool: &PickPool) -> Value {
+    let mut vars = Map::new();
+    let (pool_key, ids) = match pool {
+        PickPool::Only(ids) => ("idIn", ids),
+        PickPool::Except(ids) => ("idNotIn", ids),
+    };
+    if !ids.is_empty() {
+        vars.insert(pool_key.into(), json!(ids));
+    }
+    let lists = [
+        ("genreIn", &f.genres_in), ("genreNotIn", &f.genres_not_in), ("tagIn", &f.tags_in),
+        ("tagNotIn", &f.tags_not_in), ("formatIn", &f.formats), ("statusIn", &f.statuses),
+    ];
+    for (key, list) in lists {
+        if !list.is_empty() {
+            vars.insert(key.into(), json!(list));
+        }
+    }
+    // Popularity and episode bounds are strict on AniList; averageScore_greater
+    // already includes its bound; year-only start dates are YYYY0000 (notes #23).
+    let bounds = [
+        ("popularityGreater", f.popularity_min.map(|n| n - 1)),
+        ("popularityLesser", f.popularity_max.map(|n| n + 1)),
+        ("episodesGreater", f.episodes_min.map(|n| n - 1)),
+        ("episodesLesser", f.episodes_max.map(|n| n + 1)),
+        ("scoreGreater", f.score_min.map(|s| (s * 10.0).round() as i64)),
+        ("startGreater", f.year_min.map(|y| y * 10000 - 1)),
+        ("startLesser", f.year_max.map(|y| y * 10000 + 9999)),
+    ];
+    for (key, bound) in bounds {
+        if let Some(n) = bound {
+            vars.insert(key.into(), json!(n));
+        }
+    }
+    if let Some(season) = &f.season {
+        vars.insert("season".into(), json!(season));
+    }
+    if !f.include_adult {
+        vars.insert("isAdult".into(), json!(false));
+    }
+    Value::Object(vars)
+}
+
+/// Pool indexes probed to bracket a pool's size: page 1 covers 0..50, then a
+/// x1.25 ladder up to the paging limit, so `hi` is within 25% of `lo`.
+fn pick_probes() -> Vec<usize> {
+    let mut probes = Vec::new();
+    let mut x = PICK_PAGE as f64;
+    while x < (PICK_DEPTH - 1) as f64 {
+        probes.push(x.round() as usize);
+        x *= 1.25;
+    }
+    probes.push(PICK_DEPTH - 1);
+    probes
+}
+
+/// The single pool entry at `index`, aliased `at{index}`.
+fn pick_page(index: usize, fields: &str) -> String {
+    format!(" at{index}: Page(page: {}, perPage: 1) {{ media({PICK_ARGS}) {{ {fields} }} }}", index + 1)
+}
+
+/// A search result (map_media) plus what the picker's card shows on top.
+fn map_pick(node: &Value) -> AlResult<Value> {
+    let mut out = json!(map_media(node)?);
+    let mut tags: Vec<Value> = arr(&node["tags"])
+        .iter()
+        .map(|t| {
+            let flag = |k: &str| t[k].as_bool().unwrap_or(false);
+            json!({
+                "name": t["name"], "rank": t["rank"],
+                "is_spoiler": flag("isMediaSpoiler") || flag("isGeneralSpoiler"),
+                "is_adult": flag("isAdult"),
+            })
+        })
+        .collect();
+    tags.sort_by_key(|t| std::cmp::Reverse(t["rank"].as_i64().unwrap_or(0)));
+    out["popularity"] = node["popularity"].clone();
+    out["airing_status"] = node["status"].clone();
+    // The year filter is on start date; `year` is seasonYear, which some titles lack.
+    out["start_year"] = node["startDate"]["year"].clone();
+    out["tags_ranked"] = json!(tags);
+    Ok(out)
 }
 
 // ------------------------------------------------------------------ helpers ----
@@ -935,8 +1204,9 @@ pub fn authorize_url(client_id: &str) -> String {
     format!("{AUTHORIZE_URL}?client_id={client_id}&response_type=token")
 }
 
+pub const SEASONS: [&str; 4] = ["WINTER", "SPRING", "SUMMER", "FALL"];
+
 fn season_year(offset: i32) -> (&'static str, i32) {
-    const SEASONS: [&str; 4] = ["WINTER", "SPRING", "SUMMER", "FALL"];
     let now = Utc::now();
     let idx = (now.month() as i32 - 1) / 3 + offset;
     (SEASONS[(idx % 4) as usize], now.year() + idx / 4)
