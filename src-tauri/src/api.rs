@@ -22,13 +22,15 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::anilist::{self, AlError, FriendLookup};
+use crate::anilist::{self, AlError, FriendLookup, PickFilters, PickPool, PickSize, PICK_DEPTH};
 use crate::db::{self, AnchorError, Auth, MediaFields, Scores};
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
 
 const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
 const CACHE_TTL: Duration = Duration::from_secs(60);
+/// FR-70: AniList's genre and tag lists barely change.
+const PICK_OPTIONS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ------------------------------------------------------------------- errors ----
 
@@ -224,6 +226,8 @@ pub fn router(st: Shared) -> Router {
         .route("/friends/{id}/unhide", post(friends_unhide))
         .route("/friends/{id}/compare", get(friends_compare))
         .route("/media/by-anilist/{id}/friend-scores", get(media_friend_scores))
+        .route("/pick/options", get(pick_options))
+        .route("/pick", post(pick))
         // FR-47: nothing below is usable without a stored token.
         .route_layer(middleware::from_fn_with_state(st.clone(), require_auth));
 
@@ -724,4 +728,99 @@ async fn friends_compare(State(st): State<Shared>, Id(id): Id, q: Params) -> Api
 /// FR-78: works whether or not the title is in the library.
 async fn media_friend_scores(State(st): State<Shared>, Id(anilist_id): Id) -> ApiResult {
     ok(json!({"scores": st.db.friend_scores(anilist_id)?}))
+}
+
+// ------------------------------------------------------------ pick (FR-70) ----
+
+async fn pick_options(State(st): State<Shared>) -> ApiResult {
+    ok(st.pick_cache.get_or_fetch("pick:options", PICK_OPTIONS_TTL, || st.anilist.pick_options()).await?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PickIn {
+    source: String,
+    roll: f64,
+    /// Titles already shown for this source and filters.
+    #[serde(default)]
+    exclude: Vec<i64>,
+    #[serde(default)]
+    filters: PickFilters,
+    /// The previous response's `size` for this source and filters.
+    size: Option<SizeHint>,
+}
+
+/// A pool's measured size, and how many titles `exclude` held then.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SizeHint {
+    lo: usize,
+    hi: usize,
+    shown: usize,
+}
+
+fn validate_pick(p: &PickIn) -> Result<(), ApiError> {
+    let fail = |detail: String| Err(ApiError::new(422, detail));
+    if !matches!(p.source.as_str(), "planning" | "not_planning") {
+        return fail("source must be 'planning' or 'not_planning'".into());
+    }
+    if !(0.0..1.0).contains(&p.roll) {
+        return fail("roll must be at least 0 and less than 1".into());
+    }
+    let f = &p.filters;
+    for (field, values, allowed) in [("formats", &f.formats, &anilist::PICK_FORMATS[..]), ("statuses", &f.statuses, &anilist::PICK_STATUSES[..])] {
+        if let Some(v) = values.iter().find(|v| !allowed.contains(&v.as_str())) {
+            return fail(format!("{field} can't include {v:?}; use {allowed:?}"));
+        }
+    }
+    if let Some(season) = f.season.as_deref().filter(|s| !anilist::SEASONS.contains(s)) {
+        return fail(format!("season can't be {season:?}; use {:?}", anilist::SEASONS));
+    }
+    if f.score_min.is_some_and(|s| !(1.0..=10.0).contains(&s)) {
+        return fail("score_min must be between 1 and 10".into());
+    }
+    let ranges = [("popularity", f.popularity_min, f.popularity_max), ("episodes", f.episodes_min, f.episodes_max), ("year", f.year_min, f.year_max)];
+    for (name, min, max) in ranges {
+        if min.into_iter().chain(max).any(|n| n < 0) {
+            return fail(format!("{name} can't be negative"));
+        }
+        if let (Some(min), Some(max)) = (min, max) {
+            if min > max {
+                return fail(format!("{name}_min can't be more than {name}_max"));
+            }
+        }
+    }
+    if f.year_min.into_iter().chain(f.year_max).any(|y| !(1900..=2100).contains(&y)) {
+        return fail("years must be between 1900 and 2100".into());
+    }
+    Ok(())
+}
+
+/// FR-70. Anime only, from either source; nothing here writes anything.
+async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
+    validate_pick(&body)?;
+    let shown: HashSet<i64> = body.exclude.iter().copied().collect();
+    let library = st.db.get_library(Some("anime"), None, "overall")?;
+    let pool = if body.source == "planning" {
+        let planning: Vec<i64> = library.iter().filter(|m| m.status == "planning").map(|m| m.fields.anilist_id).collect();
+        let left: Vec<i64> = planning.iter().copied().filter(|id| !shown.contains(id)).collect();
+        if left.is_empty() {
+            // No AniList call: there's nothing to ask about.
+            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null}));
+        }
+        PickPool::Only(left)
+    } else {
+        PickPool::Except(library.iter().map(|m| m.fields.anilist_id).chain(shown.iter().copied()).collect())
+    };
+    // Every title shown since the size was measured came from this pool, so
+    // the pool is that many smaller (a capped pool still fills the limit).
+    let known = body.size.filter(|s| s.shown <= body.exclude.len()).map(|s| {
+        let since = if s.lo >= PICK_DEPTH { 0 } else { body.exclude.len() - s.shown };
+        PickSize { lo: s.lo.saturating_sub(since), hi: s.hi.saturating_sub(since) }
+    });
+    let picked = st.anilist.pick(&body.filters, &pool, body.roll, known).await?;
+    // Empty because of `exclude` alone: the client clears it and starts over.
+    let exhausted = picked.result.is_none() && !shown.is_empty();
+    let size = picked.size.map(|s| json!({"lo": s.lo, "hi": s.hi, "shown": body.exclude.len()}));
+    ok(json!({"result": picked.result, "pool": picked.pool, "pool_exact": picked.pool_exact, "exhausted": exhausted, "size": size}))
 }

@@ -30,6 +30,9 @@ pub struct AppState {
     /// FR-26 retry queue. In memory, as before (a known open item).
     pub push_queue: Mutex<BTreeSet<i64>>,
     pub cache: cache::TtlCache,
+    /// FR-70's genre/tag lists. Its own instance: a TtlCache evicts by the
+    /// caller's TTL, so sharing Discover's 60 s would drop a 24 h entry.
+    pub pick_cache: cache::TtlCache,
     pub oauth_port: u16,
     pub oauth_active: Mutex<bool>,
     /// FR-70: friends whose lists are being fetched right now ("fetching"),
@@ -48,6 +51,7 @@ impl AppState {
             config,
             push_queue: Mutex::new(BTreeSet::new()),
             cache: cache::TtlCache::default(),
+            pick_cache: cache::TtlCache::default(),
             oauth_port: oauth::OAUTH_PORT,
             oauth_active: Mutex::new(false),
             friend_fetching: Mutex::new(HashMap::new()),

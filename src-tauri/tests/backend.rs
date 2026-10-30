@@ -2740,3 +2740,413 @@ fn client_id_comes_from_the_env_var_then_local_config_toml_then_the_builtin() {
     std::fs::write(dir.path().join("local_config.py"), "ANILIST_CLIENT_ID = \"999\"\n").unwrap();
     assert_eq!(Config::from_sources(None, Some(&toml)).client_id, config::BUILTIN_CLIENT_ID);
 }
+
+// ------------------------------------------------------- pick an anime (FR-70) ----
+
+/// One pool title: ids are 1000 + its index in ID order, whichever way the
+/// query sorts.
+fn pick_node(index: usize, n: usize, sort: &str) -> Value {
+    let i = if sort == "ID_DESC" { n - 1 - index } else { index };
+    let mut node = media_node(1000 + i as i64, "ANIME");
+    node["popularity"] = json!(12345);
+    node["status"] = json!("FINISHED");
+    node["startDate"] = json!({"year": 2019});
+    node["tags"] = json!([
+        {"name": "School", "rank": 60, "isMediaSpoiler": false, "isGeneralSpoiler": false, "isAdult": false},
+        {"name": "Twist", "rank": 90, "isMediaSpoiler": true, "isGeneralSpoiler": false, "isAdult": false},
+        {"name": "Isekai", "rank": 95, "isMediaSpoiler": false, "isGeneralSpoiler": false, "isAdult": false},
+        {"name": "Nudity", "rank": 40, "isMediaSpoiler": false, "isGeneralSpoiler": false, "isAdult": true},
+    ]);
+    node
+}
+
+/// AniList's Page.media over a pool of `n` matches: answers every aliased
+/// `Page(page:, perPage:)` in the query, with AniList's 5000-entry paging
+/// limit (anilist-api-notes #18).
+fn pool_reply(n: usize, q: &str, v: &Value) -> Reply {
+    let sort = v["sort"][0].as_str().unwrap_or("ID");
+    let mut data = serde_json::Map::new();
+    for (at, marker) in q.match_indices(": Page(page: ") {
+        let alias = q[..at].rsplit(|c: char| c.is_whitespace() || c == '{').next().unwrap();
+        let rest = &q[at + marker.len()..];
+        let page: usize = rest.split(',').next().unwrap().parse().unwrap();
+        let per: usize = rest.split("perPage: ").nth(1).unwrap().split(')').next().unwrap().parse().unwrap();
+        if page * per > 5000 {
+            let error = json!({"message": "Page depth exceeds maximum allowed for API requests (5000 entries)", "status": 400});
+            return (400, json!({"data": null, "errors": [error]}), None);
+        }
+        let start = (page - 1) * per;
+        let media: Vec<Value> = (start..(page * per).min(n).max(start)).map(|i| pick_node(i, n, sort)).collect();
+        data.insert(alias.into(), json!({"pageInfo": {"hasNextPage": page * per < n}, "media": media}));
+    }
+    (200, json!({"data": data}), None)
+}
+
+/// The variable a pick query binds to AniList argument `arg`, or None when
+/// the request leaves it out (an explicit null can 500 on AniList, notes #20).
+fn pick_arg(q: &str, v: &Value, arg: &str) -> Option<Value> {
+    let needle = format!(" {arg}: $");
+    let at = q.find(&needle).unwrap_or_else(|| panic!("{arg} is not in the query"));
+    let name: String = q[at + needle.len()..].chars().take_while(|c| c.is_alphanumeric()).collect();
+    v.get(name).cloned()
+}
+
+/// The pool indexes a pick query asks for, from its `at{index}:` aliases.
+fn pick_indexes(q: &str) -> Vec<usize> {
+    q.match_indices(" at").filter_map(|(i, _)| q[i + 3..].split(':').next()?.parse().ok()).collect()
+}
+
+fn sorted_ids(v: Option<Value>) -> Vec<i64> {
+    let mut ids: Vec<i64> = v.unwrap_or_default().as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_i64).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// One Not on Planning pick over a fake pool of `n`: (response, AniList calls).
+async fn pick_over(n: usize, roll: f64) -> (Value, Vec<(String, Value)>) {
+    let fake = fake_anilist(move |q, v| pool_reply(n, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": roll}))).await;
+    assert_eq!(s, 200, "{body}");
+    (body, fake.calls())
+}
+
+#[tokio::test]
+async fn pick_sends_each_filter_as_its_anilist_argument() {
+    let fake = fake_anilist(|q, v| pool_reply(3, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let filters = json!({
+        "genres_in": ["Action", "Comedy"], "genres_not_in": ["Horror"],
+        "tags_in": ["School"], "tags_not_in": ["Isekai", "Gore"],
+        "popularity_min": 10000, "popularity_max": 49999, "score_min": 7.5,
+        "formats": ["TV", "ONA"], "year_min": 2010, "year_max": 2015, "season": "SPRING",
+        "episodes_min": 14, "episodes_max": 49, "statuses": ["FINISHED", "RELEASING"],
+    });
+    let (s, _) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5, "filters": filters}))).await;
+    assert_eq!(s, 200);
+    let (q, v) = fake.calls()[0].clone();
+    assert!(q.contains("media(type: ANIME,"), "{q}");
+    let expected = [
+        ("genre_in", json!(["Action", "Comedy"])),
+        ("genre_not_in", json!(["Horror"])),
+        ("tag_in", json!(["School"])),
+        ("tag_not_in", json!(["Isekai", "Gore"])),
+        // The app's ranges are inclusive; AniList's popularity and episode bounds are strict.
+        ("popularity_greater", json!(9999)),
+        ("popularity_lesser", json!(50000)),
+        // averageScore_greater already includes its bound, on AniList's 100 scale.
+        ("averageScore_greater", json!(75)),
+        ("format_in", json!(["TV", "ONA"])),
+        // FuzzyDateInt: all of 2010 through all of 2015, year-only dates (YYYY0000) included.
+        ("startDate_greater", json!(20099999)),
+        ("startDate_lesser", json!(20159999)),
+        ("season", json!("SPRING")),
+        ("episodes_greater", json!(13)),
+        ("episodes_lesser", json!(50)),
+        ("status_in", json!(["FINISHED", "RELEASING"])),
+        ("isAdult", json!(false)),
+        ("sort", json!(["ID"])),
+    ];
+    for (arg, want) in expected {
+        assert_eq!(pick_arg(&q, &v, arg), Some(want), "{arg}");
+    }
+}
+
+#[tokio::test]
+async fn pick_leaves_unset_filters_out_and_adult_titles_are_opt_in() {
+    let fake = fake_anilist(|q, v| pool_reply(3, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5, "filters": {"include_adult": true, "genres_in": []}}))).await;
+    let calls = fake.calls();
+    assert_eq!(keys(&calls[0].1), ["isAdult", "sort"]);
+    assert_eq!(calls[0].1["isAdult"], false);
+    assert_eq!(keys(&calls[1].1), ["sort"]);
+}
+
+#[tokio::test]
+async fn not_on_planning_excludes_every_library_anime_and_the_titles_already_shown() {
+    let fake = fake_anilist(|q, v| pool_reply(3, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    for (i, status) in ANIME_STATUSES.iter().enumerate() {
+        st.db.insert_or_update_media(&fields(i as i64 + 1, "anime"), Some(status)).unwrap();
+    }
+    st.db.insert_or_update_media(&fields(7, "manga"), Some("reading")).unwrap();
+    let body = json!({"source": "not_planning", "roll": 0.5, "exclude": [501, 500]});
+    assert_eq!(call(&st, "POST", "/pick", Some(body)).await.0, 200);
+    let (q, v) = fake.calls()[0].clone();
+    assert_eq!(sorted_ids(pick_arg(&q, &v, "id_not_in")), [1, 2, 3, 4, 5, 6, 500, 501]);
+    assert_eq!(pick_arg(&q, &v, "id_in"), None);
+}
+
+#[tokio::test]
+async fn on_planning_offers_only_planning_anime_never_manga_minus_the_titles_already_shown() {
+    let fake = fake_anilist(|q, v| pool_reply(3, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    for (anilist_id, media_type, status) in [(1, "anime", "planning"), (2, "anime", "planning"), (3, "anime", "planning"), (4, "anime", "watching"), (7, "manga", "planning")] {
+        st.db.insert_or_update_media(&fields(anilist_id, media_type), Some(status)).unwrap();
+    }
+    let body = json!({"source": "planning", "roll": 0.5, "exclude": [3]});
+    assert_eq!(call(&st, "POST", "/pick", Some(body)).await.0, 200);
+    let (q, v) = fake.calls()[0].clone();
+    assert!(q.contains("media(type: ANIME,"), "{q}");
+    assert_eq!(sorted_ids(pick_arg(&q, &v, "id_in")), [1, 2]);
+    assert_eq!(pick_arg(&q, &v, "id_not_in"), None);
+}
+
+#[tokio::test]
+async fn an_empty_planning_pool_answers_without_calling_anilist() {
+    let fake = fake_anilist(|q, v| pool_reply(3, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    // Planning manga and a Watching anime: no Planning anime at all.
+    st.db.insert_or_update_media(&fields(7, "manga"), Some("planning")).unwrap();
+    st.db.insert_or_update_media(&fields(4, "anime"), Some("watching")).unwrap();
+    let nothing = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": false, "size": null});
+    assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5}))).await, (200, nothing));
+    // Every Planning anime already shown: exhausted, still no call.
+    st.db.insert_or_update_media(&fields(1, "anime"), Some("planning")).unwrap();
+    let used_up = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": true, "size": null});
+    assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5, "exclude": [1]}))).await, (200, used_up));
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_empty_pick_says_whether_the_shown_titles_used_up_the_pool() {
+    let fake = fake_anilist(|q, v| pool_reply(0, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    for (exclude, exhausted) in [(json!([5]), true), (json!([]), false)] {
+        let body = json!({"source": "not_planning", "roll": 0.5, "exclude": exclude});
+        let want = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": exhausted, "size": null});
+        assert_eq!(call(&st, "POST", "/pick", Some(body)).await, (200, want));
+    }
+}
+
+#[tokio::test]
+async fn a_pool_that_fits_on_page_one_is_counted_exactly_and_picked_in_one_request() {
+    let (body, calls) = pick_over(30, 0.5).await;
+    // No probes: past the end of a small pool, each costs AniList a full scan (notes #25).
+    assert_eq!(calls.len(), 1);
+    assert!(pick_indexes(&calls[0].0).is_empty());
+    assert_eq!((body["pool"].as_i64(), body["pool_exact"].as_bool(), body["exhausted"].as_bool(), &body["size"]), (Some(30), Some(true), Some(false), &Value::Null));
+    // §7 shape: the search result fields, plus popularity, airing status and ranked tags.
+    let result = &body["result"];
+    assert_eq!(result["anilist_id"], 1015); // floor(0.5 * 30)
+    for key in ["anilist_id", "media_type", "title", "title_english", "cover_url", "genres", "tags", "producers", "year", "season", "format", "episodes", "synopsis", "avg_score"] {
+        assert!(result.get(key).is_some(), "missing {key}");
+    }
+    assert_eq!(
+        (&result["media_type"], &result["avg_score"], &result["popularity"], &result["airing_status"], &result["start_year"]),
+        (&json!("anime"), &json!(7.5), &json!(12345), &json!("FINISHED"), &json!(2019))
+    );
+    assert_eq!(
+        result["tags_ranked"],
+        json!([
+            {"name": "Isekai", "rank": 95, "is_spoiler": false, "is_adult": false},
+            {"name": "Twist", "rank": 90, "is_spoiler": true, "is_adult": false},
+            {"name": "School", "rank": 60, "is_spoiler": false, "is_adult": false},
+            {"name": "Nudity", "rank": 40, "is_spoiler": false, "is_adult": true},
+        ])
+    );
+}
+
+/// The (lo, hi) a probe request brackets a pool of `n` into.
+fn bracket(q: &str, n: usize) -> (usize, usize) {
+    let probes = pick_indexes(q);
+    (probes.iter().filter(|&&i| i < n).max().unwrap() + 1, *probes.iter().find(|&&i| i >= n).unwrap())
+}
+
+#[tokio::test]
+async fn a_bigger_pool_is_sized_by_probes_then_picked_at_the_rolled_index() {
+    // pageInfo.total isn't a count (notes #17): after page 1, single-entry
+    // probes bracket the pool, and lo..hi holds its real size.
+    let (body, calls) = pick_over(1000, 0.01).await;
+    let (lo, hi) = bracket(&calls[1].0, 1000);
+    assert!(lo <= 1000 && 1000 <= hi);
+    assert_eq!(body["size"], json!({"lo": lo, "hi": hi, "shown": 0}));
+    assert_eq!((body["pool"].as_u64(), body["pool_exact"].as_bool()), (Some(lo as u64), Some(false)));
+    // Rolled index on page 1: nothing more to ask for.
+    assert_eq!(calls.len(), 2);
+    assert_eq!(body["result"]["anilist_id"], 1000 + (0.01 * hi as f64) as i64);
+
+    // Below lo, so it surely exists: one more request, for that entry alone.
+    let (body, calls) = pick_over(1000, 0.3).await;
+    let idx = (0.3 * hi as f64) as usize;
+    assert!(50 <= idx && idx < lo);
+    assert_eq!((calls.len(), pick_indexes(&calls[2].0)), (3, vec![idx]));
+    assert_eq!(body["result"]["anilist_id"], 1000 + idx as i64);
+
+    // Between lo and the real size: it exists, and it's the pick.
+    let (body, calls) = pick_over(1000, 0.85).await;
+    let idx = (0.85 * hi as f64) as usize;
+    assert!(lo <= idx && idx < 1000);
+    assert!(pick_indexes(&calls[2].0).contains(&idx));
+    assert_eq!(body["result"]["anilist_id"], 1000 + idx as i64);
+
+    // Past the real size: that entry is empty, so the fallback entry (always
+    // below lo) asked for in the same request is the pick.
+    let (body, calls) = pick_over(1000, 0.95).await;
+    let idx = (0.95 * hi as f64) as usize;
+    assert!(idx >= 1000);
+    let asked = pick_indexes(&calls[2].0);
+    let fallback = *asked.iter().find(|&&i| i != idx).expect("a fallback entry");
+    assert_eq!((calls.len(), asked.len()), (3, 2));
+    assert!(fallback < lo);
+    assert_eq!(body["result"]["anilist_id"], 1000 + fallback as i64);
+}
+
+#[tokio::test]
+async fn a_reroll_with_the_last_size_skips_straight_to_the_entry() {
+    let fake = fake_anilist(|q, v| pool_reply(1000, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let (_, first) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.3}))).await;
+    let (lo, hi) = (first["size"]["lo"].as_u64().unwrap() as usize, first["size"]["hi"].as_u64().unwrap() as usize);
+    assert_eq!(fake.calls().len(), 3);
+
+    // Two titles shown since the size was measured: the pool is two smaller.
+    let body = json!({"source": "not_planning", "roll": 0.6, "exclude": [1300, 1301], "size": first["size"]});
+    let (s, again) = call(&st, "POST", "/pick", Some(body)).await;
+    assert_eq!(s, 200);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 4, "one request: no page 1, no probes");
+    let idx = (0.6 * (hi - 2) as f64) as usize;
+    assert_eq!(pick_indexes(&calls[3].0), [idx]);
+    assert_eq!(sorted_ids(pick_arg(&calls[3].0, &calls[3].1, "id_not_in")), [1300, 1301]);
+    assert_eq!(again["size"], json!({"lo": lo - 2, "hi": hi - 2, "shown": 2}));
+    assert_eq!((again["pool"].as_u64(), again["result"]["anilist_id"].as_i64()), (Some(lo as u64 - 2), Some(1000 + idx as i64)));
+}
+
+#[tokio::test]
+async fn a_stale_size_finds_nothing_and_the_pool_is_sized_afresh() {
+    // The hint says ~1000, but only 40 match now.
+    let fake = fake_anilist(|q, v| pool_reply(40, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let body = json!({"source": "not_planning", "roll": 0.5, "size": {"lo": 910, "hi": 1137, "shown": 0}});
+    let (s, picked) = call(&st, "POST", "/pick", Some(body)).await;
+    assert_eq!((s, fake.calls().len()), (200, 2));
+    assert_eq!((picked["pool"].as_u64(), picked["pool_exact"].as_bool(), &picked["size"]), (Some(40), Some(true), &Value::Null));
+    assert_eq!(picked["result"]["anilist_id"], 1020);
+    // A hint that can't be right (more shown than excluded) is ignored outright.
+    let body = json!({"source": "not_planning", "roll": 0.5, "size": {"lo": 910, "hi": 1137, "shown": 3}});
+    assert_eq!(call(&st, "POST", "/pick", Some(body)).await.0, 200);
+    assert_eq!(fake.calls().len(), 3);
+}
+
+#[tokio::test]
+async fn over_5000_matches_picks_from_the_oldest_or_newest_5000_within_the_paging_limit() {
+    for (roll, sort) in [(0.2, "ID"), (0.7, "ID_DESC")] {
+        // The fake 400s past AniList's 5000-entry depth, so a 200 means every page asked was in range.
+        let (body, calls) = pick_over(8000, roll).await;
+        assert_eq!((body["pool"].as_u64(), body["pool_exact"].as_bool()), (Some(5000), Some(false)), "{body}");
+        assert_eq!(body["size"], json!({"lo": 5000, "hi": 5000, "shown": 0}));
+        assert_eq!(calls.len(), 3);
+        assert_eq!((&calls[0].1["sort"], &calls[1].1["sort"], &calls[2].1["sort"]), (&json!(["ID"]), &json!(["ID"]), &json!([sort])));
+        let idx = pick_indexes(&calls[2].0)[0];
+        let id_at = |i: usize| if sort == "ID" { 1000 + i } else { 1000 + 8000 - 1 - i };
+        assert_eq!(body["result"]["anilist_id"], id_at(idx) as i64);
+    }
+    // A capped size stays capped however many have been shown: the window is still full.
+    let fake = fake_anilist(|q, v| pool_reply(8000, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let body = json!({"source": "not_planning", "roll": 0.7, "exclude": [1, 2, 3], "size": {"lo": 5000, "hi": 5000, "shown": 0}});
+    let (_, again) = call(&st, "POST", "/pick", Some(body)).await;
+    assert_eq!((fake.calls().len(), &again["size"]), (1, &json!({"lo": 5000, "hi": 5000, "shown": 3})));
+    assert_eq!(fake.calls()[0].1["sort"], json!(["ID_DESC"]));
+}
+
+#[tokio::test]
+async fn a_pick_page_that_comes_back_empty_falls_back_to_page_one() {
+    // The pool shrinks to 40 between the probes and the pick.
+    let requests = Arc::new(Mutex::new(0));
+    let seen = requests.clone();
+    let fake = fake_anilist(move |q, v| {
+        *seen.lock().unwrap() += 1;
+        pool_reply(if *seen.lock().unwrap() <= 2 { 1000 } else { 40 }, q, v)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.3}))).await;
+    assert_eq!((s, *requests.lock().unwrap()), (200, 3));
+    assert!(pick_indexes(&fake.calls()[2].0)[0] >= 50);
+    assert_eq!(body["result"]["anilist_id"], 1015); // page 1, at floor(0.3 * 50)
+}
+
+#[tokio::test]
+async fn pick_rejects_bad_input_with_422_before_calling_anilist() {
+    let st = offline_state().await;
+    login(&st);
+    let with = |filters: Value| json!({"source": "planning", "roll": 0.5, "filters": filters});
+    let bad = [
+        json!({"source": "watching", "roll": 0.5}),
+        json!({"source": "planning"}),
+        json!({"source": "planning", "roll": 1.0}),
+        json!({"source": "planning", "roll": -0.1}),
+        json!({"source": "planning", "roll": 0.5, "exclude": ["9"]}),
+        with(json!({"formats": ["MANGA"]})),
+        with(json!({"statuses": ["CANCELLED"]})),
+        with(json!({"season": "spring"})),
+        with(json!({"score_min": 10.5})),
+        with(json!({"score_min": 0.5})),
+        with(json!({"popularity_min": 5000, "popularity_max": 100})),
+        with(json!({"episodes_min": -1})),
+        with(json!({"year_min": 2020, "year_max": 2010})),
+        with(json!({"year_min": 20})),
+        with(json!({"genres_in": "Action"})),
+        with(json!({"genre": "Action"})),
+        json!({"source": "planning", "roll": 0.5, "size": "big"}),
+        json!({"source": "planning", "roll": 0.5, "size": {"lo": 100, "hi": 125}}),
+    ];
+    for body in bad {
+        let (s, b) = call(&st, "POST", "/pick", Some(body.clone())).await;
+        assert_eq!(s, 422, "{body} -> {b}");
+    }
+    // The fake AniList here only 500s: a valid pick with no Planning anime never reaches it.
+    let ok = json!({"source": "planning", "roll": 0.0, "filters": {"score_min": 10, "year_min": 1990, "year_max": 1990, "formats": ["TV_SHORT"], "season": "FALL", "statuses": ["NOT_YET_RELEASED"]}});
+    assert_eq!(call(&st, "POST", "/pick", Some(ok)).await.0, 200);
+}
+
+#[tokio::test]
+async fn pick_options_come_from_one_anilist_request_and_stay_cached() {
+    let fake = fake_anilist(|_, _| {
+        let tags = json!([
+            {"name": "School", "category": "Setting-Scene", "isGeneralSpoiler": false, "isAdult": false},
+            {"name": "Twist Ending", "category": "Plot", "isGeneralSpoiler": true, "isAdult": false},
+            {"name": "Nudity", "category": "Sexual Content", "isGeneralSpoiler": false, "isAdult": true},
+        ]);
+        (200, json!({"data": {"GenreCollection": ["Action", "Hentai"], "MediaTagCollection": tags}}), None)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let want = json!({
+        "genres": ["Action", "Hentai"],
+        "tags": [
+            {"name": "School", "category": "Setting-Scene", "is_spoiler": false, "is_adult": false},
+            {"name": "Twist Ending", "category": "Plot", "is_spoiler": true, "is_adult": false},
+            {"name": "Nudity", "category": "Sexual Content", "is_spoiler": false, "is_adult": true},
+        ],
+    });
+    assert_eq!(call(&st, "GET", "/pick/options", None).await, (200, want.clone()));
+    assert_eq!(call(&st, "GET", "/pick/options", None).await, (200, want));
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.contains("GenreCollection") && calls[0].0.contains("MediaTagCollection"));
+}
+
+#[tokio::test]
+async fn pick_routes_require_login() {
+    let st = offline_state().await;
+    assert_eq!(call(&st, "GET", "/pick/options", None).await.0, 401);
+    assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5}))).await.0, 401);
+}
