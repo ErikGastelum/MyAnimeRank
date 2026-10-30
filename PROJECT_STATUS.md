@@ -29,7 +29,7 @@ and Pick an anime).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (108), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (109), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -89,8 +89,8 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 108 Rust tests (107 in `tests/backend.rs`, 1 in `config.rs`).
-  Pick an anime's 23 run against a fake AniList that pages like the real
+- **Tests:** 109 Rust tests (108 in `tests/backend.rs`, 1 in `config.rs`).
+  Pick an anime's 24 run against a fake AniList that pages like the real
   one (5000-entry limit included) and, for the prequel check (FR-71), has
   relations and per-id lookups; its queries were also run against the live
   API, logged out (`docs/anilist-api-notes.md` #17-#26, Re:Zero's chain
@@ -247,7 +247,11 @@ Roughly by priority:
     entries (the picker says so). The first pick on a new set of filters
     that matches more than 50 titles costs two to three requests, and up to
     ~5 s with tag filters (probes past the end of the matches are full scans
-    on AniList's side); rerolls after that are one request. The prequel
-    check (FR-71) can add up to 3 more page requests when pages hold nothing
-    you can start, and up to 5 lookups to find a next-up: 11 requests is the
-    worst case for one pick, against AniList's 30 a minute.
+    on AniList's side); rerolls after that are one request. A pick never
+    sends more than 4 requests, 429 retries included, and the prequel check
+    (FR-71) shares them: extra pages and the walk back to a next-up stop
+    when they run out, so a first pick from more than 50 matches has one
+    request left for a next-up (one entry back), and a reroll three. Reroll
+    waits 2 s after each pick, longer if a worst-case pick wouldn't fit in
+    the last minute's 30. Other AniList traffic (Discover, Feed, sync) isn't
+    paced against picks.
