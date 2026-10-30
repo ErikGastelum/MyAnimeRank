@@ -9,7 +9,7 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 
-use crate::db::{round1, MediaFields};
+use crate::db::{normalize_score, round1, FriendEntry, FriendList, MediaFields};
 
 pub const ANILIST_URL: &str = "https://graphql.anilist.co";
 pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
@@ -84,6 +84,15 @@ pub struct EntryState {
     pub repeat_count: i64,
     pub score: Option<f64>,
     pub updated_at: Option<String>,
+}
+
+/// FR-73: what looking up a friend found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FriendLookup {
+    Found(FriendList),
+    NoSuchUser,
+    /// AniList won't show this user's lists to anyone else. Carries the name.
+    Private(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -521,6 +530,71 @@ impl AniList {
         })))
     }
 
+    // -------------------------------------------------------------- friends ----
+
+    /// FR-71..73: a friend's anime and manga lists, in two requests (the user,
+    /// then both lists). Never sends the token: public data only, so nothing
+    /// here can act as, or for, anyone. Looks them up by id when known (a
+    /// refresh), since usernames can change.
+    pub async fn get_friend_list(&self, name: &str, id: Option<i64>) -> AlResult<FriendLookup> {
+        let q = "query ($id: Int, $name: String) { User(id: $id, name: $name) { id name avatar { large } } }";
+        let vars = match id {
+            Some(id) => json!({"id": id}),
+            None => json!({"name": name}),
+        };
+        let user = match self.graphql(q, Some(vars), None, 15).await {
+            Err(e) if is_private(&e) => return Ok(FriendLookup::Private(name.to_string())),
+            Err(AlError::NotFound(_)) => return Ok(FriendLookup::NoSuchUser),
+            Err(e) => return Err(e),
+            Ok(data) if data["User"].is_null() => return Ok(FriendLookup::NoSuchUser),
+            Ok(data) => data["User"].clone(),
+        };
+        let user_id = user["id"].as_i64().ok_or_else(|| unexpected("User.id missing"))?;
+        let name = str_of(&user["name"]).unwrap_or_else(|| name.to_string());
+
+        let q = format!(
+            "query ($userId: Int) {{
+               anime: MediaListCollection(userId: $userId, type: ANIME) {{ {FRIEND_LIST_FIELDS} }}
+               manga: MediaListCollection(userId: $userId, type: MANGA) {{ {FRIEND_LIST_FIELDS} }} }}"
+        );
+        let data = match self.graphql(&q, Some(json!({"userId": user_id})), None, 30).await {
+            // The lookup above found them, so a 404 here is AniList
+            // withholding their lists rather than a missing user.
+            Err(e) if is_private(&e) || matches!(e, AlError::NotFound(_)) => return Ok(FriendLookup::Private(name)),
+            Err(e) => return Err(e),
+            Ok(data) => data,
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        for list in ["anime", "manga"].iter().flat_map(|key| arr(&data[*key]["lists"])) {
+            for e in arr(&list["entries"]) {
+                let media = &e["media"];
+                let anilist_id = media["id"].as_i64().ok_or_else(|| unexpected("Media.id missing"))?;
+                // Custom lists repeat entries that are already in a status list.
+                if !seen.insert(anilist_id) {
+                    continue;
+                }
+                let media_type = to_media_type(&media["type"])?;
+                entries.push(FriendEntry {
+                    anilist_id,
+                    status: local_status_from_al(e["status"].as_str().unwrap_or_default(), &media_type),
+                    media_type,
+                    score: normalize_score(e["score"].as_f64()),
+                    title: pick_title(&media["title"]),
+                    title_english: str_of(&media["title"]["english"]),
+                    cover_url: str_of(&media["coverImage"]["large"]),
+                    genres: arr(&media["genres"]).iter().filter_map(str_of).collect(),
+                });
+            }
+        }
+        Ok(FriendLookup::Found(FriendList {
+            anilist_user_id: user_id,
+            name,
+            avatar_url: str_of(&user["avatar"]["large"]),
+            entries,
+        }))
+    }
+
     // ------------------------------------------------------------ community ----
 
     /// FR-49/FR-55: by anilist_id only, never re-derived by title.
@@ -633,8 +707,21 @@ const FAVOURITES_FIELDS: &str = "favourites {
     staff { nodes { id name { full } image { large } } }
     studios { nodes { id name } } }";
 
+/// FR-72: AniList converts each score to POINT_10_DECIMAL, whatever format
+/// the friend uses.
+const FRIEND_LIST_FIELDS: &str = "lists { entries { status score(format: POINT_10_DECIMAL)
+    media { id type title { romaji english native } coverImage { large } genres } } }";
+
 fn unexpected(msg: &str) -> AlError {
     AlError::Unexpected(msg.to_string())
+}
+
+/// AniList's "Private User" error: the user's lists aren't public.
+fn is_private(e: &AlError) -> bool {
+    match e {
+        AlError::NotFound(m) | AlError::Api { message: m, .. } => m.to_ascii_lowercase().contains("private"),
+        _ => false,
+    }
 }
 
 fn retry_after_seconds(response: &reqwest::Response) -> f64 {
