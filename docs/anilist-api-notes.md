@@ -192,3 +192,10 @@ ScoreFormat:       POINT_100, POINT_10_DECIMAL, POINT_10, POINT_5, POINT_3
 15. **AniList rate-limits aggressively, even for unauthenticated introspection queries.** Hit real `429 Too Many Requests` responses this session after roughly 15 rapid sequential single-type introspection calls. Batch multiple type/enum lookups into one query using GraphQL aliases (`Foo: __type(name:"Foo"){...} Bar: __type(name:"Bar"){...}`) instead of firing many small requests back to back.
 
 16. **`Staff.characterMedia`** (a `MediaConnection` distinct from `staffMedia`) exists per live introspection but was not tested or used this session — its exact semantics (character-derived media vs. staff's own production credits) are unconfirmed. Verify behavior before relying on it.
+
+17. **Friend lists (PRD 4.12) — UNCONFIRMED live; `graphql.anilist.co` was blocked by the network policy of the session that built this, so everything below is coded from AniList's documented schema and tested only against the fake server in `tests/backend.rs`.** Check each point against the real API before relying on it:
+    - `User(id: $id, name: $name)` with only one of the two variables set looks a user up by exact name or by id, without a token.
+    - `MediaListCollection(userId:, type:)` without a token returns another user's public list, and `score(format: POINT_10_DECIMAL)` converts each entry from whatever format that user scores in (POINT_100, POINT_10, POINT_5, POINT_3) to 0–10. 0 still means unscored.
+    - A user whose list isn't public comes back as a GraphQL error whose message contains "Private" (expected: `"Private User"`, status 404). `anilist.rs` treats that message, or any 404 on the list query after the user lookup succeeded, as private (FR-73). If AniList instead 404s a user with an *empty* list, that user would be reported as private.
+    - Custom lists repeat entries that are already in a status list; `get_friend_list()` keeps the first copy of each media id.
+    - Neither Pull nor the friend fetch passes `chunk`/`perChunk`, so a very large list relies on AniList returning every entry in one response.
