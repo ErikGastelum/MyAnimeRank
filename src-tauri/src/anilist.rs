@@ -639,6 +639,7 @@ impl AniList {
                     cover_url: str_of(&media["coverImage"]["large"]),
                     genres: arr(&media["genres"]).iter().filter_map(str_of).collect(),
                     popularity: media["popularity"].as_i64(),
+                    progress: e["progress"].as_i64(),
                 });
             }
         }
@@ -823,7 +824,7 @@ const FAVOURITES_FIELDS: &str = "favourites {
 
 /// FR-72: scores in `$format` (see get_friend_list). A bare `score` isn't
 /// reliably in any one format, so the format is always named.
-const FRIEND_LIST_FIELDS: &str = "lists { entries { status score(format: $format)
+const FRIEND_LIST_FIELDS: &str = "lists { entries { status progress score(format: $format)
     media { id type title { romaji english native } coverImage { large } genres popularity } } }";
 
 fn unexpected(msg: &str) -> AlError {
