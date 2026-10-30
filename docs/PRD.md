@@ -39,6 +39,7 @@ The app runs entirely on your machine: a Rust backend running in-process inside 
 - Browse Discover shelves, a Feed of your own/following/global activity, and Character/Staff pages with live favoriting (see 4.7–4.9).
 - Look up studios and other AniList users' public profiles from catalog Search (see 4.11).
 - Compare your list against the public AniList lists of the people you follow (or anyone you add by username): taste match, score skew, disagreements, and what each of you has completed that the other hasn't (see 4.12).
+- Pick a random anime to watch next, from the Planning list or from AniList titles not yet in the library (see 4.12).
 
 ## Non-Goals (v2 rebuild)
 
@@ -218,6 +219,14 @@ Compare your list against a friend's. Your friends are the AniList users you fol
 | FR-81 | Opening a comparison first fetches the friend's list, ahead of the queue, if it has never been fetched or is older than 24 hours, unless they're marked private (FR-73). If that fetch fails, the comparison uses the stored copy, or fails with the fetch's error when there isn't one. A private friend with no stored list can't be compared. Only one fetch of a friend's lists runs at a time: a comparison, Refresh or the queue that needs them while one is running waits for it and uses its answer, with no requests of its own (if that fetch is cut off without an answer, the waiting one fetches). |
 | FR-82 | Clicking a title in Biggest disagreements, Strongest agreements, or the shared table expands it in place; clicking it again collapses it, and only one title is expanded at a time across the whole page. Expanding keeps the table's sort and the page's scroll position. The two cards are laid out as one grid of rows, so an item growing in one column keeps the other column's rows aligned. The expanded view shows your per-criterion scores, in the rating stepper's labels and order (Story, Characters, Animation, Audio, Enjoyment for anime; Story, Characters, Art, Enjoyment for manga), as mono numbers with small bars, with your highest and lowest criterion marked, plus your overall. A rating that came from AniList (rating.source = 'anilist', §5) has no real category scores, so it shows "Rated on AniList only, no category scores" and a "Rate it now" button that opens the rating stepper for that title and comes back to the refreshed comparison; saving it pushes through the usual sync (FR-24). The view also shows the friend's overall, their status and progress, a quiet note that AniList doesn't share their category scores, and an "Open details" link to the title's detail view. Nothing in an expanded row calls AniList. |
 | FR-83 | The friend has a color of their own, `--friend` (amber, #f2a65a, with `--friend-dim` for gradients), next to your `--accent` blue: their column header and scores in the shared table, their scores in both cards and the completed lists, their overall in an expanded row, their genre bars (the same gradient style as yours), genre numbers and legend dot, and the score on a friend chip on a detail page. Delta green and red stay as they are. |
+
+## 4.12 Pick an Anime
+
+Picks one anime at random for "what should I watch next?". Like 4.7–4.11, its filtering is a live pass-through to AniList: nothing new is stored (popularity stays unstored, per Section 5), and its only writes are the existing add and status routes.
+
+| **ID** | **Requirement** |
+| --- | --- |
+| FR-70 | "Pick an anime": a button in the Anime tab's Library header, next to "Rate N unrated" (FR-68), opens a picker modal; there is no new nav tab (Section 8 keeps five). Anime only, in both sources; manga is never offered. A source toggle picks from **On Planning** (the library's Planning anime) or **Not on Planning** (AniList anime not in the library under any status). Optional, combinable filters apply to both sources: genres and tags, each include (must have all) or exclude (must have none); popularity in AniList members, as Hidden gem (<10k), Niche (10k–50k), Popular (50k–200k), Mainstream (200k+) or a custom range; minimum average score on the app's 1–10 scale; format (TV, TV Short, Movie, OVA, ONA, Special); start-year range and season; episode count (≤13, 14–49, 50+ or a custom range); airing status (Finished, Releasing, Not yet released); adult titles excluded unless turned on. The tag list hides spoiler tags unless "Show spoiler tags" is on, and lists adult tags only while adult titles are included. AniList applies every filter to its own live data for both sources (On Planning limits the same query to the Planning titles), and each pick is a random title from everything that matches, not the most popular first. AniList can't page past its first 5,000 matches, so when more than 5,000 match, the pick comes from the 5,000 oldest or the 5,000 newest AniList entries and the picker says so. Within an app session the same title is not offered twice for the same source and filters until every match has been shown; then the picker says so and starts over. With no matches it says so, suggests loosening a filter, and offers Reset filters. The result card shows cover, title, year, format, episodes, members, genres, top tags (spoiler tags only when shown), average score and synopsis, with Reroll, Add to Planning (Not on Planning results), Start Watching and Open details. Adding and Start Watching reuse POST /media and PUT /media/{id}/status, so they sync to AniList like any other change (FR-24). Reroll is disabled while a pick is running. The last-used source and filters are remembered between launches. |
 
 # 5. Data Model
 
@@ -676,6 +685,39 @@ Criteria = { story, characters, animation, audio, enjoyment }   // anime; manga 
 ```
 Response: { "scores": [ { anilist_user_id, name, avatar_url, status, score } ] }
 // FR-78: friends who have scored this title, highest score first, from the stored lists only (so friends whose lists aren't fetched yet, and hidden friends, never appear). Works for titles not in the library too.
+## GET /pick/options
+
+```
+Response: { "genres": [string], "tags": [ { name, category, is_spoiler, is_adult } ] }
+// FR-70. AniList's genre and tag lists, fetched together and cached in memory for 24 hours (its own cache, separate from FR-50's).
+```
+
+## POST /pick
+
+```
+Body: {
+  source: "planning" | "not_planning",
+  roll: number,                    // the client's Math.random(), 0 <= roll < 1
+  exclude: [anilist_id],           // titles already shown for this source + filters (FR-70)
+  filters: {                       // every field optional
+    genres_in, genres_not_in, tags_in, tags_not_in: [string],
+    popularity_min, popularity_max: number,      // AniList members, inclusive
+    score_min: number,                           // 1.0-10.0, inclusive
+    formats: ["TV"|"TV_SHORT"|"MOVIE"|"OVA"|"ONA"|"SPECIAL"],
+    year_min, year_max: number, season: "WINTER"|"SPRING"|"SUMMER"|"FALL",
+    episodes_min, episodes_max: number,          // inclusive
+    statuses: ["FINISHED"|"RELEASING"|"NOT_YET_RELEASED"],
+    include_adult: boolean                       // default false
+  }
+}
+Response: {
+  "result": { ...search result fields, popularity, airing_status,
+              tags_ranked: [ { name, rank, is_spoiler, is_adult } ] } | null,
+  "pool": number,          // matches left, at most 5000; a lower bound unless pool_exact
+  "pool_exact": boolean,
+  "exhausted": boolean     // result is null only because of `exclude`: clear it and start over
+}
+// FR-70. Anime only. 422 on invalid input. An On Planning pick with no Planning titles left makes no AniList call.
 ```
 
 # 8. Frontend Design Brief (handoff for Claude Design)
@@ -705,6 +747,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 - **Friends (FR-70, FR-79)** — a section on the Profile tab: "Sync from AniList" with last-synced time, the everyone / mutual-only setting with a tooltip, add-by-username field, one row per friend with avatar, name, source, list status, Refresh, Remove (a friend you added) or Hide (a friend from AniList), Compare, and a collapsed "Hidden (N)" list with Unhide. Not a sixth bottom-nav tab.
 - **Friend comparison (FR-74–FR-83)** — Anime/Manga toggle; overlap, taste match (with a tooltip explaining it) and skew; biggest disagreements and strongest agreements side by side; a sortable shared-titles table; rows in both cards and the table expand in place to your criteria and the friend's status (FR-82); "They've completed, you haven't" and "You've completed, they haven't" as top-10 grids with Show all; side-by-side genre averages. You in `--accent`, the friend in `--friend` (FR-83). The detail view shows friends' scores for that title.
 - **Insights (optional)** — genre breakdown, score distribution, community-score divergence.
+- **Pick an anime (FR-70)** — a modal opened from the Anime tab's header: On Planning / Not on Planning toggle, filters, and one result card with Reroll, Add to Planning, Start Watching and Open details.
 
 *Design deliverable: a single-file HTML/React mockup (or component set) using the API contract in Section 7 as the data shape, so wiring it to the real backend afterward is a drop-in, not a rewrite.*
 
@@ -722,6 +765,7 @@ The existing app has an established dark visual identity — keep it, don't rede
 | M8 (optional) | Insights dashboard. |
 | M9 | Studios & Users (4.11): /studios/search, /studios/{id}, /users/search, /users/{id}, and the Studios/Users categories in catalog Search — live pass-throughs to AniList, no schema changes. |
 | M10 | Friend Comparison (4.12): `friend` / `friend_entry` / `friend_sync` tables (additive, CREATE TABLE IF NOT EXISTS, plus the additive `friend` migration in §5), /friends endpoints, friends synced from your AniList following (FR-79), the background list queue (FR-80), the comparison view, and friends' scores on the detail view. |
+| M10 | Pick an anime (4.12): /pick/options, /pick, and the picker modal on the Anime tab — live AniList filtering, no schema changes. |
 
 # 10. Appendix: Reference App Feature Set (MyAniList)
 
