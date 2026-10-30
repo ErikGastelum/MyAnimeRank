@@ -829,86 +829,154 @@ impl AniList {
         Ok(json!({"genres": genres, "tags": tags}))
     }
 
-    /// FR-70: one random anime from everything the filters match in `pool`.
+    /// FR-70/FR-71: one random anime from everything the filters match in
+    /// `pool`, never a sequel you aren't caught up on unless `check` is None.
     ///
-    /// Page 1 comes first, alone: a pool that fits on it is counted and
-    /// picked exactly, in one request. pageInfo.total isn't a count (notes
-    /// #17), so a bigger pool is then bracketed with single-entry probes
-    /// (each probe past the end costs AniList a full scan, notes #25, which is
-    /// why small pools never send them). The pool holds `lo` to `hi` titles:
-    /// the rolled index is uniform over `hi` and kept if it exists, else a
-    /// fallback uniform over the `lo` known to exist, both asked for in one
-    /// last request. `known` is that size from an earlier pick on the same
-    /// filters, already shrunk by the titles shown since: it skips straight to
-    /// the last request. `roll` comes from the client (0 <= roll < 1), so this
-    /// stays deterministic.
-    pub async fn pick(&self, filters: &PickFilters, pool: &PickPool, roll: f64, known: Option<PickSize>) -> AlResult<Picked> {
+    /// Page 1 comes first, alone: a pool that fits on it is counted exactly
+    /// in one request. pageInfo.total isn't a count (notes #17), so a bigger
+    /// pool is then bracketed with single-entry probes (each probe past the
+    /// end costs AniList a full scan, notes #25, which is why small pools
+    /// never send them), and pick_pages() takes it from there. `known` is the
+    /// size from an earlier pick on the same filters, already shrunk by the
+    /// titles shown since: it skips straight to pick_pages(). `roll` comes
+    /// from the client (0 <= roll < 1) and seeds every draw, so this stays
+    /// deterministic.
+    pub async fn pick(&self, filters: &PickFilters, pool: &PickPool, roll: f64, known: Option<PickSize>, check: Option<&PickCheck>) -> AlResult<Picked> {
         let mut vars = pick_variables(filters, pool);
         vars["sort"] = json!(["ID"]);
+        let mut run = PickRun { vars, filters, check, draws: Draws::new(roll) };
         if let Some(size) = known.filter(|s| PICK_PAGE < s.lo && s.lo <= s.hi && s.hi <= PICK_DEPTH) {
-            if let Some(node) = self.pick_entry(&vars, size, roll, &[]).await? {
-                return Ok(Picked { result: Some(map_pick(&node)?), pool: size.lo, pool_exact: false, size: Some(size) });
+            if let Some(picked) = self.pick_pages(&mut run, size, false, None).await? {
+                return Ok(picked);
             }
-            // Nothing there: the pool shrank more than the hint knew. Size it afresh.
+            // The page it tried was empty: the pool shrank more than the hint knew. Size it afresh.
         }
 
+        let (first, more) = self.pick_fetch(&run.vars, 1).await?;
+        if first.is_empty() {
+            return Ok(Picked::nothing(0, true, None, false));
+        }
+        let (size, exact) = if more {
+            let probes = pick_probes();
+            let pages: String = probes.iter().map(|i| pick_probe(*i)).collect();
+            let data = self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(run.vars.clone()), None, 20).await?;
+            let exists = |i: &&usize| !arr(&data[format!("at{i}")]["media"]).is_empty();
+            let lo = probes.iter().take_while(exists).last().map_or(first.len(), |i| i + 1);
+            let hi = probes.iter().find(|i| !exists(i)).copied().unwrap_or(PICK_DEPTH);
+            (PickSize { lo, hi }, false)
+        } else {
+            (PickSize { lo: first.len(), hi: first.len() }, true)
+        };
+        let picked = self.pick_pages(&mut run, size, exact, Some(&first)).await?;
+        Ok(picked.unwrap_or_else(|| Picked::nothing(0, true, None, false)))
+    }
+
+    /// Fetches a random page of a pool of `size` titles whole and tries its
+    /// titles in random order: the first one the prequel check lets through
+    /// is the pick. Landing on a held-back title first walks back its chain
+    /// for a next-up (once per pick). A page with nothing usable leads to
+    /// another random page, at most PICK_RETRIES more requests; an empty one
+    /// (past the end) to `page_one`, when it's in hand. None when the first
+    /// page fetched is empty with no page 1 to fall back on: `size` was stale.
+    async fn pick_pages(&self, run: &mut PickRun<'_>, size: PickSize, exact: bool, page_one: Option<&[Value]>) -> AlResult<Option<Picked>> {
+        // Over the paging limit (notes #18): alternate the oldest and newest 5000.
+        let sort = if size.lo >= PICK_DEPTH && run.draws.next() >= 0.5 { "ID_DESC" } else { "ID" };
+        run.vars["sort"] = json!([sort]);
+        let in_hand = page_one.filter(|_| sort == "ID");
+        let (maybe, sure) = (size.hi.div_ceil(PICK_PAGE), size.lo.div_ceil(PICK_PAGE).max(1));
+        let size_hint = (!exact).then_some(size);
+        let mut page = 1 + ((run.draws.next() * maybe as f64) as usize).min(maybe - 1);
+        let (mut tried, mut extra, mut walked, mut blocked) = (Vec::new(), 0, false, false);
+        loop {
+            let fetch = page != 1 || in_hand.is_none();
+            if fetch && !tried.is_empty() {
+                if extra == PICK_RETRIES {
+                    break;
+                }
+                extra += 1;
+            }
+            tried.push(page);
+            let items = match in_hand {
+                Some(first) if !fetch => first.to_vec(),
+                _ => self.pick_fetch(&run.vars, page).await?.0,
+            };
+            if items.is_empty() && page_one.is_none() && tried.len() == 1 {
+                return Ok(None);
+            }
+            let mut order: Vec<usize> = (0..items.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, (run.draws.next() * (i + 1) as f64) as usize);
+            }
+            for node in order.into_iter().map(|i| &items[i]) {
+                let Some(check) = run.check else {
+                    return Ok(Some(Picked::found(node, None, size.lo, exact, size_hint)?));
+                };
+                let Some(prequel) = blocking_prequel(node, &check.watched) else {
+                    return Ok(Some(Picked::found(node, None, size.lo, exact, size_hint)?));
+                };
+                blocked = true;
+                if !walked {
+                    walked = true;
+                    if let Some(next) = self.next_up(node, prequel, run.filters, check).await {
+                        return Ok(Some(Picked::found(&next, Some(node), size.lo, exact, size_hint)?));
+                    }
+                }
+            }
+            let next = if items.is_empty() && in_hand.is_some() && !tried.contains(&1) {
+                Some(1)
+            } else {
+                let left: Vec<usize> = (1..=sure).filter(|p| !tried.contains(p)).collect();
+                (!left.is_empty()).then(|| left[(run.draws.next() * left.len() as f64) as usize])
+            };
+            match next {
+                Some(p) => page = p,
+                None => break,
+            }
+        }
+        Ok(Some(Picked::nothing(size.lo, exact, size_hint, blocked)))
+    }
+
+    /// One whole page of the pool, aliased `page{n}`: its titles, and whether more follow.
+    async fn pick_fetch(&self, vars: &Value, page: usize) -> AlResult<(Vec<Value>, bool)> {
         let q = format!(
-            "query ({PICK_VARS}) {{ first: Page(page: 1, perPage: {PICK_PAGE}) {{ pageInfo {{ hasNextPage }}
+            "query ({PICK_VARS}) {{ page{page}: Page(page: {page}, perPage: {PICK_PAGE}) {{ pageInfo {{ hasNextPage }}
                media({PICK_ARGS}) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }} }}"
         );
         let data = self.graphql(&q, Some(vars.clone()), None, 20).await?;
-        let first = arr(&data["first"]["media"]);
-        let at_roll = |page: &[Value]| page[((roll * page.len() as f64) as usize).min(page.len() - 1)].clone();
-        if first.is_empty() {
-            return Ok(Picked { result: None, pool: 0, pool_exact: true, size: None });
-        }
-        if data["first"]["pageInfo"]["hasNextPage"] != true {
-            return Ok(Picked { result: Some(map_pick(&at_roll(&first))?), pool: first.len(), pool_exact: true, size: None });
-        }
-
-        let probes = pick_probes();
-        let pages: String = probes.iter().map(|i| pick_page(*i, "id")).collect();
-        let data = self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(vars.clone()), None, 20).await?;
-        let exists = |i: &&usize| !arr(&data[format!("at{i}")]["media"]).is_empty();
-        let lo = probes.iter().take_while(exists).last().map_or(first.len(), |i| i + 1);
-        let hi = probes.iter().find(|i| !exists(i)).copied().unwrap_or(PICK_DEPTH);
-        let size = PickSize { lo, hi };
-        // Nothing where the probes said there was: the pool shrank in
-        // between, so fall back to page 1.
-        let node = self.pick_entry(&vars, size, roll, &first).await?.unwrap_or_else(|| at_roll(&first));
-        Ok(Picked { result: Some(map_pick(&node)?), pool: lo, pool_exact: false, size: Some(size) })
+        let found = &data[format!("page{page}")];
+        Ok((arr(&found["media"]), found["pageInfo"]["hasNextPage"] == true))
     }
 
-    /// The pool entry `roll` lands on, or its fallback when the rolled index
-    /// is past the end; None when neither exists. Entries already on `first`
-    /// (page 1, sorted by ID) aren't asked for again.
-    async fn pick_entry(&self, vars: &Value, size: PickSize, roll: f64, first: &[Value]) -> AlResult<Option<Value>> {
-        // Over the paging limit (notes #18): alternate the oldest and newest
-        // 5000, splitting roll into two independent draws.
-        let (sort, roll) = if size.lo < PICK_DEPTH {
-            ("ID", roll)
-        } else if roll < 0.5 {
-            ("ID", roll * 2.0)
-        } else {
-            ("ID_DESC", roll * 2.0 - 1.0)
-        };
-        let x = roll * size.hi as f64;
-        let idx = (x as usize).min(size.hi - 1);
-        let mut wanted = vec![idx];
-        if idx >= size.lo {
-            wanted.push((x.fract() * size.lo as f64) as usize);
+    /// FR-71: the earliest entry you haven't completed in `node`'s PREQUEL
+    /// chain, from its blocking `prequel` back, at most PICK_HOPS entries
+    /// (one request each). None when the chain runs longer, loops or can't be
+    /// read, or ends on an entry the filters rule out or already shown: the
+    /// next-up is only ever a bonus, so a failed lookup never fails the pick.
+    async fn next_up(&self, node: &Value, prequel: i64, filters: &PickFilters, check: &PickCheck) -> Option<Value> {
+        let q = format!("query ($id: Int) {{ Media(id: $id, type: ANIME) {{ {MEDIA_FIELDS} {PICK_FIELDS} }} }}");
+        let mut visited: HashSet<i64> = node["id"].as_i64().into_iter().collect();
+        let mut id = prequel;
+        for _ in 0..PICK_HOPS {
+            if !visited.insert(id) {
+                return None;
+            }
+            let entry = match self.graphql(&q, Some(json!({"id": id})), None, 15).await {
+                Ok(data) => data["Media"].clone(),
+                Err(AlError::NotFound(_)) => return None,
+                Err(e) => {
+                    log::warn!("next-up lookup for anilist_id={id} failed: {e}");
+                    return None;
+                }
+            };
+            if entry.is_null() {
+                return None;
+            }
+            match blocking_prequel(&entry, &check.watched) {
+                Some(earlier) => id = earlier,
+                None => return next_up_allowed(&entry, filters, &check.shown).then_some(entry),
+            }
         }
-        let on_first = |i: usize| (sort == "ID").then(|| first.get(i)).flatten().cloned();
-        let fetch: Vec<usize> = wanted.iter().copied().filter(|i| on_first(*i).is_none()).collect();
-        let fetched = if fetch.is_empty() {
-            Value::Null
-        } else {
-            let mut vars = vars.clone();
-            vars["sort"] = json!([sort]);
-            let pages: String = fetch.iter().map(|i| pick_page(*i, &format!("{MEDIA_FIELDS} {PICK_FIELDS}"))).collect();
-            self.graphql(&format!("query ({PICK_VARS}) {{{pages} }}"), Some(vars), None, 20).await?
-        };
-        Ok(wanted.into_iter().find_map(|i| on_first(i).or_else(|| arr(&fetched[format!("at{i}")]["media"]).into_iter().next())))
+        None
     }
 }
 
@@ -942,6 +1010,17 @@ pub struct PickFilters {
     pub statuses: Vec<String>,
     #[serde(default)]
     pub include_adult: bool,
+    /// FR-71's toggle: skip the prequel check.
+    #[serde(default)]
+    pub include_unwatched_sequels: bool,
+}
+
+/// What FR-71's prequel check needs from the library.
+pub struct PickCheck {
+    /// Anime that are Completed or Rewatching.
+    pub watched: HashSet<i64>,
+    /// Titles already shown this session, never offered again as a next-up.
+    pub shown: HashSet<i64>,
 }
 
 /// Which AniList ids a pick may land on.
@@ -959,6 +1038,57 @@ pub struct Picked {
     pub pool_exact: bool,
     /// For a pool bigger than a page: its size, for the next pick to reuse.
     pub size: Option<PickSize>,
+    /// FR-71: the held-back sequel that `result` is the next-up for.
+    pub next_up_for: Option<Value>,
+    /// No result, and titles were tried that FR-71 held back.
+    pub blocked: bool,
+}
+
+impl Picked {
+    fn found(node: &Value, via: Option<&Value>, pool: usize, pool_exact: bool, size: Option<PickSize>) -> AlResult<Self> {
+        let next_up_for = via.map(|v| {
+            json!({"anilist_id": v["id"], "title": pick_title(&v["title"]), "title_english": str_of(&v["title"]["english"])})
+        });
+        Ok(Picked { result: Some(map_pick(node)?), pool, pool_exact, size, next_up_for, blocked: false })
+    }
+
+    fn nothing(pool: usize, pool_exact: bool, size: Option<PickSize>, blocked: bool) -> Self {
+        Picked { result: None, pool, pool_exact, size, next_up_for: None, blocked }
+    }
+}
+
+/// What every request of one pick shares.
+struct PickRun<'a> {
+    vars: Value,
+    filters: &'a PickFilters,
+    check: Option<&'a PickCheck>,
+    draws: Draws,
+}
+
+/// Every random choice of one pick: the client's roll first, then a
+/// splitmix64 sequence seeded from it, so a given roll always picks the same.
+struct Draws {
+    first: Option<f64>,
+    state: u64,
+}
+
+impl Draws {
+    fn new(roll: f64) -> Self {
+        Draws { first: Some(roll), state: (roll * (1u64 << 53) as f64) as u64 }
+    }
+
+    /// The next draw, 0 <= x < 1.
+    fn next(&mut self) -> f64 {
+        if let Some(roll) = self.first.take() {
+            return roll;
+        }
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
 }
 
 /// A pool bigger than a page holds `lo` to `hi` titles (`hi` within 25% of
@@ -975,6 +1105,11 @@ pub const PICK_STATUSES: [&str; 3] = ["FINISHED", "RELEASING", "NOT_YET_RELEASED
 /// AniList won't page past its first 5000 matches (notes #18).
 pub const PICK_DEPTH: usize = 5000;
 const PICK_PAGE: usize = 50;
+/// FR-71: more pages one pick may fetch after the first has nothing usable,
+/// how far back a next-up walk may go, and the prequel formats that count.
+const PICK_RETRIES: usize = 3;
+const PICK_HOPS: usize = 5;
+const PREQUEL_FORMATS: [&str; 4] = ["TV", "TV_SHORT", "MOVIE", "ONA"];
 
 const PICK_VARS: &str = "$idIn: [Int], $idNotIn: [Int], $genreIn: [String], $genreNotIn: [String],
     $tagIn: [String], $tagNotIn: [String], $popularityGreater: Int, $popularityLesser: Int,
@@ -990,7 +1125,9 @@ const PICK_ARGS: &str = "type: ANIME, id_in: $idIn, id_not_in: $idNotIn, genre_i
     episodes_lesser: $episodesLesser, status_in: $statusIn, isAdult: $isAdult, sort: $sort";
 
 /// On top of MEDIA_FIELDS (GraphQL merges the two `tags` selections).
-const PICK_FIELDS: &str = "tags { rank isMediaSpoiler isGeneralSpoiler isAdult } popularity status startDate { year }";
+/// Relations are for FR-71's prequel check.
+const PICK_FIELDS: &str = "tags { rank isMediaSpoiler isGeneralSpoiler isAdult } popularity status startDate { year } isAdult
+    relations { edges { relationType node { id format type } } }";
 
 /// FR-70 filters as AniList variables. Only the filters that are set are
 /// sent: an explicit null for a list argument is a 500 on AniList (notes #20).
@@ -1050,9 +1187,34 @@ fn pick_probes() -> Vec<usize> {
     probes
 }
 
-/// The single pool entry at `index`, aliased `at{index}`.
-fn pick_page(index: usize, fields: &str) -> String {
-    format!(" at{index}: Page(page: {}, perPage: 1) {{ media({PICK_ARGS}) {{ {fields} }} }}", index + 1)
+/// Whether the pool has an entry at `index`, aliased `at{index}`.
+fn pick_probe(index: usize) -> String {
+    format!(" at{index}: Page(page: {}, perPage: 1) {{ media({PICK_ARGS}) {{ id }} }}", index + 1)
+}
+
+/// FR-71: the prequel holding `node` back, if any: a direct PREQUEL to an
+/// anime in a format you'd watch first (TV, TV Short, Movie, ONA) that isn't
+/// Completed or Rewatching. A series entry comes before a movie when several do.
+fn blocking_prequel(node: &Value, watched: &HashSet<i64>) -> Option<i64> {
+    arr(&node["relations"]["edges"])
+        .iter()
+        .filter(|e| e["relationType"] == "PREQUEL" && e["node"]["type"] == "ANIME")
+        .filter_map(|e| Some((e["node"]["id"].as_i64()?, e["node"]["format"].as_str()?.to_string())))
+        .filter(|(id, format)| PREQUEL_FORMATS.contains(&format.as_str()) && !watched.contains(id))
+        .min_by_key(|(_, format)| format == "MOVIE")
+        .map(|(id, _)| id)
+}
+
+/// FR-71: a next-up is offered only within the adult setting and the genre
+/// and tag filters, and never twice in a session.
+fn next_up_allowed(entry: &Value, f: &PickFilters, shown: &HashSet<i64>) -> bool {
+    let genres: Vec<String> = arr(&entry["genres"]).iter().filter_map(str_of).collect();
+    let tags: Vec<String> = arr(&entry["tags"]).iter().filter_map(|t| str_of(&t["name"])).collect();
+    let fits = |all: &[String], none: &[String], has: &[String]| all.iter().all(|x| has.contains(x)) && !none.iter().any(|x| has.contains(x));
+    !entry["id"].as_i64().is_some_and(|id| shown.contains(&id))
+        && (f.include_adult || entry["isAdult"] != true)
+        && fits(&f.genres_in, &f.genres_not_in, &genres)
+        && fits(&f.tags_in, &f.tags_not_in, &tags)
 }
 
 /// A search result (map_media) plus what the picker's card shows on top.
