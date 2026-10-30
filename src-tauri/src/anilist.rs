@@ -900,10 +900,11 @@ impl AniList {
     /// Fetches a random page of a pool of `size` titles whole and tries its
     /// titles in random order: the first one the prequel check lets through
     /// is the pick. Landing on a held-back title first walks back its chain
-    /// for a next-up (once per pick). A page with nothing usable leads to
-    /// another random page while the pick has requests left; an empty one
-    /// (past the end) to `page_one`, when it's in hand. None when the first
-    /// page fetched is empty with no page 1 to fall back on: `size` was stale.
+    /// for a next-up (once per pick). A page with nothing usable (or empty,
+    /// past the end) leads to `page_one` when it's in hand, which costs no
+    /// request, then to another random page while the pick has requests left.
+    /// None when the first page fetched is empty with no page 1 to fall back
+    /// on: `size` was stale.
     async fn pick_pages(&self, run: &mut PickRun<'_>, size: PickSize, exact: bool, page_one: Option<&[Value]>) -> AlResult<Option<Picked>> {
         // Over the paging limit (notes #18): alternate the oldest and newest 5000.
         let sort = if size.lo >= PICK_DEPTH && run.draws.next() >= 0.5 { "ID_DESC" } else { "ID" };
@@ -942,7 +943,8 @@ impl AniList {
                     }
                 }
             }
-            let next = if items.is_empty() && in_hand.is_some() && !tried.contains(&1) {
+            // Page 1 in hand costs nothing, so it's always next, even out of requests.
+            let next = if in_hand.is_some() && !tried.contains(&1) {
                 Some(1)
             } else if run.budget == 0 {
                 None
