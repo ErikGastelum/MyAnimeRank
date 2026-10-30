@@ -144,6 +144,21 @@ media: Media                    user: User
 year / month / day: Int   (all independently nullable)
 ```
 
+### MediaTag (on Media.tags) and the top-level collections
+```
+Media.tags: name, rank (Int, 0-100), isMediaSpoiler, isGeneralSpoiler, isAdult
+GenreCollection: [String]                       <- 19 genres; "Hentai" is the adult one (no flag)
+MediaTagCollection: name, category, isGeneralSpoiler, isAdult   <- 430 tags, 24 categories (2026-10-30)
+```
+
+### Page.media filter arguments used by Pick an anime (FR-70)
+```
+type, id_in, id_not_in, genre_in, genre_not_in, tag_in, tag_not_in,
+popularity_greater/_lesser, averageScore_greater, format_in,
+startDate_greater/_lesser (FuzzyDateInt), season, episodes_greater/_lesser,
+status_in, isAdult, sort      <- semantics confirmed live: see gotchas #17-#25
+```
+
 ### Enums actually used by this app (confirmed via live introspection)
 ```
 MediaType:        ANIME, MANGA
@@ -212,3 +227,20 @@ ScoreFormat:       POINT_100, POINT_10_DECIMAL, POINT_10, POINT_5, POINT_3
     - Reading followers pages for mutuals is costly: real accounts 30403 = 2 following + 1 followers pages, 76852 = 4 + 13, 95746 = 9 + 22 (31 requests, more than a minute's budget). So mutual only reads your own following list with your token and uses `User.isFollower` instead (same request count as an everyone sync).
     - **`isFollower` is relative to the logged-in viewer, and logged out it is `false`, not null** (checked live: 4 of the first 5 users 30403 follows are mutuals, and all 5 came back `false` without a token). So a `false` proves nothing on its own: the app asks `viewer: Viewer { id }` in the same request and trusts `isFollower` only when that is your id, otherwise it reads your followers pages logged out. **With a real token it is unverified** (no token in that session): check on desktop that a mutual-only sync makes only following requests and keeps the right people.
     - Checked through the app (logged-out, on a temp DB logged in as 30403, through a logging proxy): a sync imported all 56 in 2 requests with no list fetched; mutual only kept exactly the 28 in both lists (3 requests); the background queue fetched never-fetched friends in id order, one every 13–14 s (12 s spacing plus the fetch), 10 requests in its first minute; opening a comparison for the last friend in line fetched them at once (2 requests, 0.8 s); hiding a followed friend survived the next sync. No friend request carried an Authorization header.
+17. **`pageInfo.total` and `lastPage` are not counts.** While `hasNextPage` is true, AniList reports `total: 5000` (and `lastPage: 5000 / perPage`) whatever the real size. Confirmed 2026-10-30: Action+Comedy movies reported `total: 5000` on page 1, yet page 6 at `perPage: 50` was already empty. Only a page with `hasNextPage: false` carries the exact count, and a page past the end reports `total = (page - 1) * perPage`. To size a result set, probe single entries (`Page(page: n + 1, perPage: 1)` exists iff there are more than n matches), several at once with aliases.
+
+18. **Paging stops at 5,000 entries.** Any `page * perPage` past 5000 is an HTTP 400: `Page depth exceeds maximum allowed for API requests (5000 entries)`. A sort order only ever exposes its first 5,000 matches. Pick an anime alternates `sort: ID` and `ID_DESC` for result sets that big (the oldest or newest 5,000 AniList entries).
+
+19. **`genre_in` and `tag_in` mean "has all of these"; `genre_not_in` and `tag_not_in` mean "has none of these".** Confirmed on Winter 2024 TV: Action 22, Comedy 21, `genre_in: ["Action","Comedy"]` returned exactly the 5 titles with both; `tag_in: ["School","Male Protagonist"]` returned exactly the 9 with both; the `_not_in` results contained neither.
+
+20. **An explicit `null` for some list arguments is an HTTP 500** (`Internal Server Error`): confirmed for `id_in`, `id_not_in` and `format_in` (`genre_in: null` happens to work). A variable that's declared but left out of `variables` is fine, so send only the filters that are set.
+
+21. **Empty lists: `id_in: []` matches nothing** (0 results, not "no filter"); `id_not_in: []` excludes nothing.
+
+22. **A long `id_not_in` is fine:** 10,000 ids (a 70 KB request) answered in 0.5 s.
+
+23. **Range bounds.** `popularity_greater/_lesser` and `episodes_greater/_lesser` are strict (`>`/`<`), confirmed on one title at its exact value. `averageScore_greater: G` returns titles whose `averageScore` shows G or more (it behaves as `>=`); `averageScore_lesser` is `<`. `startDate_greater/_lesser` take a FuzzyDateInt (`YYYYMMDD`), and year-only dates are `YYYY0000`, so a year range Y1-Y2 is `startDate_greater: Y1*10000 - 1, startDate_lesser: Y2*10000 + 9999` either way the bound is read.
+
+24. **The rate limit is 30 requests a minute right now,** not the documented 90 (`X-RateLimit-Limit: 30`, 2026-10-30). Aliases inside one request count as one request.
+
+25. **Aliased deep probes cost depth, and sort order matters.** 25 single-entry probes spread to entry 4950 with a 2,000-id `id_not_in`: `sort: ID` 0.7 s, `ID_DESC` 2.5 s, `TITLE_ROMAJI` 3.7 s; 100 such probes with `TITLE_ROMAJI` took 14 s. Pick an anime's sizing request (page 1 plus 22 probes, `sort: ID`) took 0.95 s, and its follow-up (two single entries, `ID_DESC`) 0.46 s.
