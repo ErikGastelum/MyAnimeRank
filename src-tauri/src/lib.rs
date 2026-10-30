@@ -13,9 +13,10 @@ pub mod db;
 pub mod oauth;
 pub mod sync;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request};
@@ -32,6 +33,11 @@ pub struct AppState {
     pub cache: cache::TtlCache,
     pub oauth_port: u16,
     pub oauth_active: Mutex<bool>,
+    /// FR-70: friends whose lists are being fetched right now ("fetching").
+    pub friend_fetching: Mutex<HashSet<i64>>,
+    /// FR-80: friends the list queue skips until then, after a fetch failed
+    /// for a reason other than reaching AniList.
+    pub friend_retry_at: Mutex<HashMap<i64, Instant>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -46,6 +52,8 @@ impl AppState {
             cache: cache::TtlCache::default(),
             oauth_port: oauth::OAUTH_PORT,
             oauth_active: Mutex::new(false),
+            friend_fetching: Mutex::new(HashSet::new()),
+            friend_retry_at: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -139,7 +147,8 @@ pub fn run() {
             let state = AppState::new(db, anilist::AniList::default(), config);
             app.manage(api::router(state.clone()));
             app.manage(state.clone());
-            tauri::async_runtime::spawn(sync::retry_loop(state));
+            tauri::async_runtime::spawn(sync::retry_loop(state.clone()));
+            tauri::async_runtime::spawn(sync::friend_queue_loop(state, sync::FRIEND_QUEUE_SPACING));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![api, start_login])
@@ -169,6 +178,7 @@ pub fn serve(port: u16) {
         let config = config::Config::load(None);
         let state = AppState::new(db, anilist::AniList::default(), config);
         tokio::spawn(sync::retry_loop(state.clone()));
+        tokio::spawn(sync::friend_queue_loop(state.clone(), sync::FRIEND_QUEUE_SPACING));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.expect("bind dev port");
         log::info!("serving on http://127.0.0.1:{port}");
         axum::serve(listener, api::router(state)).await.expect("dev server");

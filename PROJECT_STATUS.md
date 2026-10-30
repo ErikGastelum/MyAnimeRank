@@ -25,7 +25,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (62), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (72), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -101,17 +101,23 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
-- **Friend Comparison (M10):** 10 more tests (61 in `tests/backend.rs`): the
+- **Friend Comparison (M10):** 20 more tests (71 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
-  byte-identical, cascade on removal, no token and no mutation on friend
-  fetches, score normalization (POINT_5/POINT_3 read in the friend's own
-  format), private/unknown/own-account refusals, an empty public list, the
-  comparison math and every PRD §7 shape. The UI was
-  driven in headless Chromium against the real router and a fake AniList.
-  Checked against the live AniList API (logged out) on a temp DB: public,
+  byte-identical, the pre-FR-79 `friend` table migrated without a value
+  changing, cascade on removal, no token and no mutation on friend fetches,
+  score normalization (POINT_5/POINT_3 read in the friend's own format),
+  private/unknown/own-account refusals, an empty public list, the comparison
+  math, friend sync (pagination, mutual only, unfollow vs manual, hide), the
+  list queue (one friend per turn, pauses for other calls and after a 429, a
+  failing friend doesn't block it, private friends wait a week), a
+  comparison fetching first, sync after login and Pull, and every PRD §7
+  shape. The UI was driven in headless Chromium against the real router.
+  Checked against the live AniList API (logged out) on temp DBs: public,
   private, unknown and empty-list users, every score format, lists of 11,905
-  and 19,944 entries, add/compare/refresh/remove, two requests per fetch.
-  Findings in `docs/anilist-api-notes.md` #17.
+  and 19,944 entries, add/compare/refresh/remove, two requests per fetch, a
+  56-follow sync, mutual only, the queue's pace, a comparison jumping the
+  queue, and the migration on a database the earlier build wrote. Findings in
+  `docs/anilist-api-notes.md` #17 and #18.
 
 ---
 
@@ -186,4 +192,9 @@ Roughly by priority:
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
     detail page); adding a private user *by name* (only by id was possible);
-    a real 429's `Retry-After`.
+    a real 429's `Retry-After`; whether AniList lists private users in a
+    following list at all.
+13. **Friend sync cost:** mutual only reads every followers page, so a popular
+    account can spend a whole minute's 30 requests on one sync (see
+    `docs/anilist-api-notes.md` #18). The queue's skip-after-failure list is
+    in memory, like the push retry queue.

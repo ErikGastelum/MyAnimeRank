@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::anilist::{self, AlError, FriendLookup};
-use crate::db::{now_iso, AnchorError, Auth, MediaFields, Scores};
+use crate::db::{self, AnchorError, Auth, MediaFields, Scores};
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
 
@@ -217,6 +217,8 @@ pub fn router(st: Shared) -> Router {
         .route("/rankings", get(get_rankings))
         .route("/profile/stats", get(profile_stats))
         .route("/friends", get(friends_list).post(friends_add))
+        .route("/friends/sync", post(friends_sync))
+        .route("/friends/settings", put(friends_settings))
         .route("/friends/{id}", delete(friends_delete))
         .route("/friends/{id}/refresh", post(friends_refresh))
         .route("/friends/{id}/compare", get(friends_compare))
@@ -401,8 +403,11 @@ async fn put_repeat(State(st): State<Shared>, Id(id): Id, Body(body): Body<Repea
 
 // --------------------------------------------------------------------- sync ----
 
+/// FR-79: a friend sync follows every Pull, in the background.
 async fn sync_pull(State(st): State<Shared>) -> ApiResult {
-    ok(sync::pull(&st).await?)
+    let result = sync::pull(&st).await?;
+    sync::sync_friends_later(&st);
+    ok(result)
 }
 
 async fn sync_pending_conflicts(State(st): State<Shared>) -> ApiResult {
@@ -592,13 +597,44 @@ async fn profile_stats(State(st): State<Shared>, Extension(auth): Extension<Auth
 }
 
 // ------------------------------------------------------------------ friends ----
-// PRD 4.12. Only add and refresh call AniList; everything else reads the
-// stored lists.
+// PRD 4.12. Add, sync, refresh and a stale comparison call AniList (never
+// with the token); everything else reads the stored lists.
 
 const OWN_ACCOUNT: &str = "That's your own AniList account";
 
+fn private_list(name: &str) -> ApiError {
+    ApiError::new(403, format!("{name}'s list is private on AniList"))
+}
+
+/// GET /friends' shape, also POST /friends/sync's.
+fn friends_json(st: &Shared) -> ApiResult {
+    let fetching = st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut friends = st.db.get_friends()?;
+    for f in friends.iter_mut().filter(|f| fetching.contains(&f.anilist_user_id)) {
+        f.list_status = "fetching".into();
+    }
+    let (mutual_only, synced_at) = st.db.friend_sync_state()?;
+    ok(json!({"friends": friends, "synced_at": synced_at, "mutual_only": mutual_only}))
+}
+
 async fn friends_list(State(st): State<Shared>) -> ApiResult {
-    ok(json!({"friends": st.db.get_friends()?}))
+    friends_json(&st)
+}
+
+/// FR-79: nothing changes unless the whole following list arrived.
+async fn friends_sync(State(st): State<Shared>) -> ApiResult {
+    sync::sync_friends(&st).await?;
+    friends_json(&st)
+}
+
+#[derive(Deserialize)]
+struct FriendSettingsIn {
+    mutual_only: bool,
+}
+
+async fn friends_settings(State(st): State<Shared>, Body(body): Body<FriendSettingsIn>) -> ApiResult {
+    st.db.set_mutual_only(body.mutual_only)?;
+    ok(json!({"mutual_only": body.mutual_only}))
 }
 
 #[derive(Deserialize)]
@@ -606,7 +642,8 @@ struct FriendIn {
     username: String,
 }
 
-/// FR-70: adding someone who's already a friend refreshes them.
+/// FR-70: adding someone who's already a friend (from AniList, hidden or
+/// manual) makes them a visible manual friend and refreshes them.
 async fn friends_add(State(st): State<Shared>, Extension(auth): Extension<Auth>, Body(body): Body<FriendIn>) -> ApiResult {
     let username = body.username.trim();
     if username.is_empty() {
@@ -615,39 +652,54 @@ async fn friends_add(State(st): State<Shared>, Extension(auth): Extension<Auth>,
     if auth.anilist_username.as_deref().is_some_and(|me| me.eq_ignore_ascii_case(username)) {
         return Err(ApiError::new(400, OWN_ACCOUNT));
     }
-    fetch_friend(&st, &auth, username, None).await
+    fetched_friend(&st, &auth, username, None).await
 }
 
+/// FR-71/FR-73: asks AniList even for a friend marked private.
 async fn friends_refresh(State(st): State<Shared>, Extension(auth): Extension<Auth>, Id(id): Id) -> ApiResult {
     let friend = st.db.get_friend(id)?.ok_or_else(|| ApiError::new(404, "friend not found"))?;
-    fetch_friend(&st, &auth, &friend.name, Some(id)).await
+    fetched_friend(&st, &auth, &friend.name, Some(id)).await
 }
 
-/// FR-71/FR-73: the lists are stored only once the whole fetch succeeded, so
-/// a failed refresh keeps the previous copy and its fetched_at.
-async fn fetch_friend(st: &Shared, auth: &Auth, name: &str, id: Option<i64>) -> ApiResult {
-    let list = match st.anilist.get_friend_list(name, id).await? {
-        FriendLookup::Found(list) => list,
-        FriendLookup::NoSuchUser => return Err(ApiError::new(404, format!("No AniList user named {name}"))),
-        FriendLookup::Private(name) => return Err(ApiError::new(403, format!("{name}'s list is private on AniList"))),
-    };
-    if list.anilist_user_id == auth.anilist_user_id {
-        return Err(ApiError::new(400, OWN_ACCOUNT));
+/// The lists are stored only once the whole fetch succeeded, so a failed
+/// refresh keeps the previous copy and its fetched_at (FR-73).
+async fn fetched_friend(st: &Shared, auth: &Auth, name: &str, id: Option<i64>) -> ApiResult {
+    match sync::fetch_friend(st, name, id).await? {
+        FriendLookup::Found(list) if list.anilist_user_id == auth.anilist_user_id => Err(ApiError::new(400, OWN_ACCOUNT)),
+        FriendLookup::Found(list) => found(st.db.get_friend(list.anilist_user_id)?.map(|f| to_json(&f)), "friend"),
+        FriendLookup::NoSuchUser => Err(ApiError::new(404, format!("No AniList user named {name}"))),
+        FriendLookup::Private(name) => Err(private_list(&name)),
     }
-    st.db.replace_friend_list(&list, &now_iso())?;
-    found(st.db.get_friend(list.anilist_user_id)?.map(|f| to_json(&f)), "friend")
 }
 
+/// FR-70: a friend from AniList is hidden rather than deleted.
 async fn friends_delete(State(st): State<Shared>, Id(id): Id) -> ApiResult {
-    if !st.db.delete_friend(id)? {
-        return Err(ApiError::new(404, "friend not found"));
-    }
-    ok(json!({"deleted": true}))
+    let hidden = st.db.delete_friend(id)?.ok_or_else(|| ApiError::new(404, "friend not found"))?;
+    ok(json!({"deleted": true, "hidden": hidden}))
 }
 
+/// FR-81: a missing or stale list is fetched first, ahead of the queue; if
+/// that fails, the stored copy is used, and without one the fetch's error
+/// is the answer.
 async fn friends_compare(State(st): State<Shared>, Id(id): Id, q: Params) -> ApiResult {
     let media_type = required(&q, "media_type")?;
     check_media_type(Some(media_type), "media_type")?;
+    let friend = st.db.get_friend(id)?.ok_or_else(|| ApiError::new(404, "friend not found"))?;
+    let refused = if friend.list_status == "private" {
+        Some(private_list(&friend.name))
+    } else if db::friend_list_is_stale(friend.fetched_at.as_deref()) {
+        match sync::fetch_friend(&st, &friend.name, Some(id)).await {
+            Ok(FriendLookup::Found(_)) => None,
+            Ok(FriendLookup::Private(name)) => Some(private_list(&name)),
+            Ok(FriendLookup::NoSuchUser) => Some(ApiError::new(404, format!("No AniList user named {}", friend.name))),
+            Err(e) => Some(e.into()),
+        }
+    } else {
+        None
+    };
+    if let Some(e) = refused.filter(|_| friend.fetched_at.is_none()) {
+        return Err(e);
+    }
     found(st.db.compare_with_friend(id, media_type)?, "friend")
 }
 
