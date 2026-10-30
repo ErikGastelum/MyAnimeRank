@@ -29,7 +29,7 @@ and Pick an anime).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (100), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (108), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -89,10 +89,12 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 100 Rust tests (99 in `tests/backend.rs`, 1 in `config.rs`).
-  Pick an anime's 15 run against a fake AniList that pages like the real
-  one (5000-entry limit included); its queries were also run against the
-  live API, logged out (`docs/anilist-api-notes.md` #17-#25).
+- **Tests:** 108 Rust tests (107 in `tests/backend.rs`, 1 in `config.rs`).
+  Pick an anime's 23 run against a fake AniList that pages like the real
+  one (5000-entry limit included) and, for the prequel check (FR-71), has
+  relations and per-id lookups; its queries were also run against the live
+  API, logged out (`docs/anilist-api-notes.md` #17-#26, Re:Zero's chain
+  included).
   Before the Python app was deleted, its 174 pytest cases were read through
   and everything not yet covered was ported: the full conflict-detection
   table, Pull imports of both media types (seeded ratings, values copied
@@ -245,4 +247,7 @@ Roughly by priority:
     entries (the picker says so). The first pick on a new set of filters
     that matches more than 50 titles costs two to three requests, and up to
     ~5 s with tag filters (probes past the end of the matches are full scans
-    on AniList's side); rerolls after that are one request.
+    on AniList's side); rerolls after that are one request. The prequel
+    check (FR-71) can add up to 3 more page requests when pages hold nothing
+    you can start, and up to 5 lookups to find a next-up: 11 requests is the
+    worst case for one pick, against AniList's 30 a minute.
