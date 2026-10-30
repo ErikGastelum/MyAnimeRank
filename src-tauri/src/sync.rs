@@ -130,6 +130,10 @@ fn pull_entry(st: &Shared, entry: &ListEntry, now: &str) -> SyncResult<Pulled> {
     if local.anilist_list_entry_id.is_none() {
         st.db.set_anilist_list_entry_id(local.id, entry.list_entry_id)?;
     }
+    // FR-77's tie-break, from this same request.
+    if let Some(popularity) = entry.media.popularity.filter(|p| local.fields.popularity != Some(*p)) {
+        st.db.set_media_popularity(local.id, popularity)?;
+    }
 
     Ok(match detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref()) {
         SyncOutcome::Conflict => {

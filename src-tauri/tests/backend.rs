@@ -1186,7 +1186,7 @@ fn friend_media(anilist_id: i64, al_type: &str) -> Value {
     json!({
         "id": anilist_id, "type": al_type,
         "title": {"romaji": format!("Title {anilist_id}"), "english": format!("English {anilist_id}"), "native": null},
-        "coverImage": {"large": format!("https://img/{anilist_id}.jpg")}, "genres": ["Action"],
+        "coverImage": {"large": format!("https://img/{anilist_id}.jpg")}, "genres": ["Action"], "popularity": anilist_id * 100,
     })
 }
 
@@ -1475,9 +1475,10 @@ async fn adding_a_friend_reads_their_public_lists_without_the_token_and_writes_n
     assert_eq!(manga, vec![(10, "manga".into(), "reading".into(), Some(1.0)), (11, "manga".into(), "rereading".into(), Some(10.0))]);
     let first = st.db.friend_entries(42, "anime").unwrap().remove(0);
     assert_eq!(
-        (first.title.as_deref(), first.title_english.as_deref(), first.cover_url.as_deref(), first.genres),
-        (Some("Title 1"), Some("English 1"), Some("https://img/1.jpg"), vec!["Action".to_string()])
+        (first.title.as_deref(), first.title_english.as_deref(), first.cover_url.as_deref(), first.genres, first.popularity),
+        (Some("Title 1"), Some("English 1"), Some("https://img/1.jpg"), vec!["Action".to_string()], Some(100))
     );
+    assert!(calls[2].0.contains("popularity")); // in the same request, not a new one
 
     // A friend's list never becomes part of your library.
     assert!(st.db.get_library(None, None, "overall").unwrap().is_empty());
@@ -1564,6 +1565,7 @@ fn their(anilist_id: i64, media_type: &str, status: &str, score: Option<f64>, ge
         title_english: None,
         cover_url: Some(format!("https://img/{anilist_id}.jpg")),
         genres: genres.iter().map(|g| g.to_string()).collect(),
+        popularity: None,
     }
 }
 
@@ -1672,6 +1674,63 @@ async fn comparison_matches_on_anilist_id_within_one_media_type() {
     assert_eq!(call(&st, "GET", "/friends/42/compare?media_type=novel", None).await.0, 400);
     assert_eq!(call(&st, "GET", "/friends/42/compare", None).await.0, 422);
     assert_eq!(call(&st, "GET", "/friends/7/compare?media_type=anime", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn completed_lists_break_score_ties_by_popularity_and_list_every_title() {
+    let st = offline_state().await;
+    login(&st);
+    // They finished these, you don't have them: (id, score, popularity).
+    let theirs = [(100, 9.0, Some(50)), (101, 9.0, Some(500)), (102, 9.0, None), (103, 10.0, Some(1)), (104, 8.0, Some(999)),
+        (105, 9.0, Some(500)), (106, 8.5, Some(7)), (107, 8.5, None), (108, 8.5, Some(70)), (109, 8.5, Some(70)), (110, 8.5, Some(3)), (111, 8.5, Some(9))];
+    let entries = theirs.iter().map(|&(id, score, pop)| {
+        let mut e = their(id, "anime", "completed", Some(score), &["Action"]);
+        e.popularity = pop;
+        e
+    }).collect();
+    st.db.replace_friend_list(&friend_list(42, "Pal", entries), "2026-01-01T00:00:00+00:00").unwrap();
+    // You finished these, they don't have them.
+    for (id, score, pop) in [(200, 9.0, None), (201, 9.0, Some(10)), (202, 9.5, Some(1)), (203, 9.0, Some(10)), (204, 8.0, Some(5000))] {
+        let mut f = fields(id, "anime");
+        f.popularity = pop;
+        let media_id = st.db.insert_or_update_media(&f, Some("completed")).unwrap();
+        st.db.upsert_rating(media_id, &scores(score)).unwrap();
+    }
+
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    // Score first, then more popular, unknown last, then id. Every title is
+    // in the response (12 here); the page shows the first 10.
+    assert_eq!(ids(&b["they_completed"]), vec![103, 101, 105, 100, 102, 108, 109, 111, 106, 110, 107, 104]);
+    assert_eq!(ids(&b["you_completed"]), vec![202, 201, 203, 200, 204]);
+}
+
+#[tokio::test]
+async fn pull_records_popularity_for_titles_already_in_the_library() {
+    let fake = fake_anilist(|q, v| {
+        let node = |id: i64, pop: i64| {
+            let mut n = list_node(id, "ANIME", 1_700_000_000, 0.0);
+            n["media"]["popularity"] = json!(pop);
+            n
+        };
+        match (q.contains("MediaListCollection"), v["type"].as_str()) {
+            (true, Some("ANIME")) => (200, collection(vec![node(1, 1234), node(5, 77)]), None),
+            (true, Some("MANGA")) => (200, collection(vec![]), None),
+            _ => (500, json!({}), None),
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    st.db.insert_or_update_media(&fields(1, "anime"), Some("completed")).unwrap();
+    assert_eq!(st.db.get_media_by_anilist_id(1).unwrap().unwrap().fields.popularity, None);
+
+    sync::pull(&st).await.unwrap();
+    let pop = |id| st.db.get_media_by_anilist_id(id).unwrap().unwrap().fields.popularity;
+    assert_eq!((pop(1), pop(5)), (Some(1234), Some(77))); // already there, and newly imported
+    assert!(fake.calls().iter().all(|(q, _)| !q.contains("Media(id")), "no extra lookups");
+    // A re-import that doesn't know the popularity keeps the stored one.
+    st.db.insert_or_update_media(&fields(1, "anime"), None).unwrap();
+    assert_eq!(pop(1), Some(1234));
 }
 
 #[tokio::test]
@@ -1852,8 +1911,10 @@ fn a_friend_table_from_before_friend_sync_is_migrated_without_changing_a_value()
     )
     .unwrap();
     let tables = ["media", "rating", "anilist_auth", "friend_entry"];
-    let before: Vec<_> = tables.iter().map(|t| dump(&conn, t)).collect();
+    let mut before: Vec<_> = tables.iter().map(|t| dump(&conn, t)).collect();
     drop(conn);
+    // friend_entry gains popularity (FR-77): every old value stays, NULL after it.
+    before[3] = before[3].iter().map(|r| format!("{r}|Null")).collect();
 
     type Row = (i64, String, Option<String>, String, String, Option<String>, Option<String>, i64, Option<String>);
     for _ in 0..2 {

@@ -638,6 +638,7 @@ impl AniList {
                     title_english: str_of(&media["title"]["english"]),
                     cover_url: str_of(&media["coverImage"]["large"]),
                     genres: arr(&media["genres"]).iter().filter_map(str_of).collect(),
+                    popularity: media["popularity"].as_i64(),
                 });
             }
         }
@@ -811,7 +812,7 @@ impl AniList {
 
 const MEDIA_FIELDS: &str = "id type title { romaji english native } coverImage { large } genres tags { name }
     studios(isMain: true) { nodes { name } } seasonYear season format episodes chapters volumes duration
-    description(asHtml: false) averageScore";
+    description(asHtml: false) averageScore popularity";
 
 const FAVOURITES_FIELDS: &str = "favourites {
     anime { nodes { id title { romaji english native } coverImage { large } } }
@@ -823,7 +824,7 @@ const FAVOURITES_FIELDS: &str = "favourites {
 /// FR-72: scores in `$format` (see get_friend_list). A bare `score` isn't
 /// reliably in any one format, so the format is always named.
 const FRIEND_LIST_FIELDS: &str = "lists { entries { status score(format: $format)
-    media { id type title { romaji english native } coverImage { large } genres } } }";
+    media { id type title { romaji english native } coverImage { large } genres popularity } } }";
 
 fn unexpected(msg: &str) -> AlError {
     AlError::Unexpected(msg.to_string())
@@ -982,6 +983,7 @@ fn map_media(node: &Value) -> AlResult<MediaFields> {
         runtime_minutes: node["duration"].as_i64(),
         synopsis: str_of(&node["description"]),
         avg_score: node["averageScore"].as_f64().map(|a| a / 10.0),
+        popularity: node["popularity"].as_i64(),
     })
 }
 
