@@ -1394,8 +1394,8 @@ pub fn friend_list_is_stale(fetched_at: Option<&str>) -> bool {
 const FINISHED: [&str; 3] = ["completed", "rewatching", "rereading"];
 /// FR-77: "rated highly".
 const HIGHLY_RATED: f64 = 8.0;
-/// FR-75: a smaller gap isn't a disagreement.
-const DISAGREEMENT_GAP: f64 = 1.0;
+/// FR-75: every gap at most this, and the two of you rarely disagree.
+const CLOSE_GAP: f64 = 0.5;
 /// FR-74: under this many shared titles a taste match is noise, so it's hidden.
 const MIN_OVERLAP_FOR_MATCH: usize = 5;
 
@@ -1453,10 +1453,12 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
     });
     let skew = (n > 0).then(|| shared.iter().map(|s| s.yours - s.theirs).sum::<f64>() / n as f64);
 
-    // Biggest gaps first; ties go to the title you both liked more.
+    // FR-75: the 5 biggest gaps however small; ties go to the title you both
+    // liked more.
     let mut order: Vec<&SharedTitle> = shared.iter().collect();
     order.sort_by(|a, b| b.gap().total_cmp(&a.gap()).then(b.mean().total_cmp(&a.mean())).then(a.anilist_id.cmp(&b.anilist_id)));
-    let disagreements: Vec<&SharedTitle> = order.iter().copied().filter(|s| s.gap() >= DISAGREEMENT_GAP).take(5).collect();
+    let disagreements: Vec<&SharedTitle> = order.iter().copied().take(5).collect();
+    let rarely_disagree = n > 0 && shared.iter().all(|s| s.gap() <= CLOSE_GAP);
     let mut rest: Vec<&SharedTitle> = order.into_iter().filter(|s| !disagreements.iter().any(|d| d.anilist_id == s.anilist_id)).collect();
     rest.sort_by(|a, b| a.gap().total_cmp(&b.gap()).then(b.mean().total_cmp(&a.mean())).then(a.anilist_id.cmp(&b.anilist_id)));
     let rows = |v: Vec<&SharedTitle>| v.into_iter().map(|s| s.row.clone()).collect::<Vec<_>>();
@@ -1500,6 +1502,7 @@ pub fn compare_lists(yours: &[Media], theirs: &[FriendEntry]) -> Value {
         "overlap": n,
         "taste_match": taste_match,
         "skew": skew,
+        "rarely_disagree": rarely_disagree,
         "disagreements": rows(disagreements),
         "agreements": rows(rest.into_iter().take(5).collect()),
         "shared": shared.iter().map(|s| s.row.clone()).collect::<Vec<_>>(),
