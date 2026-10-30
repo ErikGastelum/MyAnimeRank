@@ -17,6 +17,7 @@
   :root{
     --bg0:#060709;--bg1:#0c0d10;--s1:#131419;--s2:#181a21;--s3:#1e212a;
     --line:#262a35;--line2:#1b1e27;--accent:#34a8f0;
+    --friend:#f2a65a;--friend-dim:#6d4b28;  /* FR-83: the friend's side, about 9:1 on --s1 */
     --t1:#eef1f6;--t2:#c2c8d2;--t3:#7d8593;--t4:#474d5a;
   }
   *{box-sizing:border-box;margin:0;padding:0}
@@ -2818,7 +2819,7 @@ function friendScoresRow(it){
   if(!fs||!fs.length)return '';
   return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;">
     <span style="font-size:12px;color:var(--t4);margin-right:2px;">Friends</span>
-    ${fs.map(s=>`<div data-act="openCompare" data-arg="${s.anilist_user_id}" data-mt="${it.media_type}" title="${esc(s.name)} · ${esc(STATUS_LABEL[s.status]||s.status)} · compare lists" data-hover="border-color:var(--accent)" style="display:flex;align-items:center;gap:7px;background:var(--s1);border:1px solid var(--line);border-radius:999px;padding:3px 11px 3px 3px;cursor:pointer;">${avatarBox(s.avatar_url,s.name,22,'50%')}<span style="font-size:12px;font-weight:600;color:var(--t2);">${esc(s.name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${fmtScore(s.score)}</span></div>`).join('')}
+    ${fs.map(s=>`<div data-act="openCompare" data-arg="${s.anilist_user_id}" data-mt="${it.media_type}" title="${esc(s.name)} · ${esc(STATUS_LABEL[s.status]||s.status)} · compare lists" data-hover="border-color:var(--friend)" style="display:flex;align-items:center;gap:7px;background:var(--s1);border:1px solid var(--line);border-radius:999px;padding:3px 11px 3px 3px;cursor:pointer;">${avatarBox(s.avatar_url,s.name,22,'50%')}<span style="font-size:12px;font-weight:600;color:var(--t2);">${esc(s.name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:700;color:var(--friend);">${fmtScore(s.score)}</span></div>`).join('')}
   </div>`;
 }
 
@@ -2888,7 +2889,7 @@ function compareView(){
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px 24px;">
         <div><div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--t4);">You</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;font-weight:700;color:var(--accent);">${fmtScore(s.your_score)}</span></div>
           <div style="display:flex;flex-direction:column;gap:7px;">${mine}</div></div>
-        <div><div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--t4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;font-weight:700;color:var(--t2);">${fmtScore(s.their_score)}</span></div>
+        <div><div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--t4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;font-weight:700;color:var(--friend);">${fmtScore(s.their_score)}</span></div>
           <div style="font-size:12.5px;color:var(--t2);">${esc(STATUS_LABEL[s.their_status]||s.their_status||'')}${prog}</div>
           <div style="font-size:11.5px;color:var(--t4);margin-top:8px;line-height:1.5;">AniList only shares ${esc(name)}'s overall score, not category scores.</div></div>
       </div>
@@ -2899,7 +2900,7 @@ function compareView(){
   const pairRow=(s,list)=>{const open=isOpen(list,s);return `<div data-act="toggleCompareRow" data-arg="${list}:${s.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:10px;cursor:pointer;${open?'background:var(--s2);':''}">
     ${titleThumb(s,34,48)}
     <div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(s))}</div>
-    <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">You <span style="color:var(--accent);">${fmtScore(s.your_score)}</span> · ${esc(name)} <span style="color:var(--t2);">${fmtScore(s.their_score)}</span></div></div>
+    <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">You <span style="color:var(--accent);">${fmtScore(s.your_score)}</span> · ${esc(name)} <span style="color:var(--friend);">${fmtScore(s.their_score)}</span></div></div>
     <span style="font-family:'Overpass Mono',monospace;font-size:14px;font-weight:700;color:${deltaColor(s.delta)};flex:0 0 auto;">${fmtDelta(s.delta)}</span></div>${open?expanded(s):''}`;};
   // FR-75/FR-82: the two cards are one grid, row i of each side in the same
   // grid row, so a title expanding on one side keeps the other side aligned.
@@ -2919,48 +2920,51 @@ function compareView(){
   // FR-77: the top 10 in a wrapping grid, "Show all (N)" for the rest; each
   // card has cover, title, the 8.0+ score, and a note when the title is only
   // on a Planning list.
-  const pickGrid=(key,items,scoreKey,statusKey,planNote,msg)=>{
+  const pickGrid=(key,items,scoreKey,statusKey,planNote,msg,scoreColor)=>{
     if(!items.length)return empty(msg);
     const all=state.compareShowAll[key],shown=all?items:items.slice(0,10);
     const more=items.length>10?`<div data-act="toggleCompareAll" data-arg="${key}" data-hover="color:var(--t1)" style="display:inline-block;margin-top:12px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--accent);">${all?'Show less':`Show all (${items.length})`}</div>`:'';
     return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:16px 14px;">
     ${shown.map(it=>`<div data-act="openRelation" data-arg="${it.anilist_id}" style="min-width:0;cursor:pointer;">
       <div style="aspect-ratio:2/3;border-radius:12px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}
-        <div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:var(--accent);">${fmtScore(it[scoreKey])}</div></div>
+        <div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:${scoreColor};">${fmtScore(it[scoreKey])}</div></div>
       <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(it))}</div>
       ${it[statusKey]?`<div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${planNote}</div>`:''}
     </div>`).join('')}</div>${more}`;
   };
 
-  const themBar='color-mix(in srgb,var(--t2) 55%,transparent)';
+  const friendBar='linear-gradient(90deg,var(--friend-dim),var(--friend))';
+  // FR-78: a side with no rated titles in this genre is a dimmed "— (0)".
+  const avgNum=(avg,count,color)=>count?`<span style="color:${color};font-weight:700;">${fmtScore(avg)}</span><span style="color:var(--t4);"> (${count})</span>`:`<span style="color:var(--t4);">— (0)</span>`;
   const bar=(v,bg)=>`<div style="height:6px;border-radius:4px;background:var(--s3);overflow:hidden;margin-top:5px;"><div style="height:100%;width:${v==null?'0%':pct(v,10)};background:${bg};border-radius:4px;"></div></div>`;
   const genreRow=(g)=>`<div>
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;"><span style="font-size:13px;color:var(--t2);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(g.genre)}</span>
-    <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;white-space:nowrap;"><span style="color:var(--accent);font-weight:700;">${fmtScore(g.your_avg)}</span><span style="color:var(--t4);"> (${g.your_count}) · </span><span style="color:var(--t2);font-weight:700;">${fmtScore(g.their_avg)}</span><span style="color:var(--t4);"> (${g.their_count})</span></span></div>
-    ${bar(g.your_avg,'linear-gradient(90deg,color-mix(in srgb,var(--accent) 45%,#000),var(--accent))')}${bar(g.their_avg,themBar)}</div>`;
+    <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;white-space:nowrap;">${avgNum(g.your_avg,g.your_count,'var(--accent)')}<span style="color:var(--t4);"> · </span>${avgNum(g.their_avg,g.their_count,'var(--friend)')}</span></div>
+    ${bar(g.your_avg,'linear-gradient(90deg,color-mix(in srgb,var(--accent) 45%,#000),var(--accent))')}${bar(g.their_avg,friendBar)}</div>`;
   const swatch=(bg)=>`<span style="width:10px;height:10px;border-radius:3px;background:${bg};"></span>`;
   const genres=`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:20px;">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--t3);margin-bottom:16px;">
-      <span style="display:flex;align-items:center;gap:6px;">${swatch('var(--accent)')}You</span><span style="display:flex;align-items:center;gap:6px;">${swatch(themBar)}${esc(name)}</span>
+      <span style="display:flex;align-items:center;gap:6px;">${swatch('var(--accent)')}You</span><span style="display:flex;align-items:center;gap:6px;">${swatch('var(--friend)')}${esc(name)}</span>
       <span style="margin-left:auto;color:var(--t4);">Average score (titles rated)</span></div>
     ${C.genres.length?`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px 28px;">${C.genres.map(genreRow).join('')}</div>`:empty('No rated titles to compare yet.')}
   </div>`;
 
   const s=state.compareSort;
   const rows=C.shared.slice().sort((a,b)=>(a[s.key]-b[s.key])*s.dir||b.your_score-a.your_score||displayTitle(a).localeCompare(displayTitle(b)));
-  const col=(key,label)=>{const on=s.key===key;return `<div data-act="sortCompare" data-arg="${key}" title="Sort by ${esc(label)}" data-hover="color:var(--t1)" style="flex:0 0 78px;display:flex;justify-content:flex-end;gap:4px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;white-space:nowrap;color:${on?'var(--accent)':'var(--t3)'};"><span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>${on?(s.dir<0?'↓':'↑'):''}</div>`;};
+  // The friend's column is always theirs in amber (FR-83); the sorted one is bold.
+  const col=(key,label,color)=>{const on=s.key===key;return `<div data-act="sortCompare" data-arg="${key}" title="Sort by ${esc(label)}" data-hover="color:var(--t1)" style="flex:0 0 78px;display:flex;justify-content:flex-end;gap:4px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;white-space:nowrap;font-weight:${on?700:400};color:${color||(on?'var(--accent)':'var(--t3)')};"><span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>${on?(s.dir<0?'↓':'↑'):''}</div>`;};
   const num=(v,color)=>`<div style="flex:0 0 78px;text-align:right;font-family:'Overpass Mono',monospace;font-size:13px;font-weight:700;color:${color};">${v}</div>`;
   const table=`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:10px 10px 6px;">
-    <div style="display:flex;align-items:center;gap:12px;padding:4px 8px 10px;border-bottom:1px solid var(--line2);margin-bottom:4px;"><div style="flex:1;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">Title</div>${col('your_score','You')}${col('their_score',name)}${col('delta','Delta')}</div>
-    ${rows.length?rows.map(r=>{const open=isOpen('all',r);return `<div data-act="toggleCompareRow" data-arg="all:${r.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:9px;cursor:pointer;${open?'background:var(--s2);':''}">${titleThumb(r,28,40)}<div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(r))}</div>${num(fmtScore(r.your_score),'var(--accent)')}${num(fmtScore(r.their_score),'var(--t2)')}${num(fmtDelta(r.delta),deltaColor(r.delta))}</div>${open?expanded(r):''}`;}).join(''):empty('Nothing rated by both yet.')}
+    <div style="display:flex;align-items:center;gap:12px;padding:4px 8px 10px;border-bottom:1px solid var(--line2);margin-bottom:4px;"><div style="flex:1;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">Title</div>${col('your_score','You')}${col('their_score',name,'var(--friend)')}${col('delta','Delta')}</div>
+    ${rows.length?rows.map(r=>{const open=isOpen('all',r);return `<div data-act="toggleCompareRow" data-arg="all:${r.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:9px;cursor:pointer;${open?'background:var(--s2);':''}">${titleThumb(r,28,40)}<div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(r))}</div>${num(fmtScore(r.your_score),'var(--accent)')}${num(fmtScore(r.their_score),'var(--friend)')}${num(fmtDelta(r.delta),deltaColor(r.delta))}</div>${open?expanded(r):''}`;}).join(''):empty('Nothing rated by both yet.')}
   </div>`;
 
   return page(`${stats}
     ${pairs}
     ${h2("They've completed, you haven't",`${esc(name)} rated these 8.0 or higher. They're not in your library, or only on your Planning list.`)}
-    ${pickGrid('they',C.they_completed,'their_score','your_status','On your Planning list',"Nothing they've finished and rated 8.0+ is missing from your list.")}
+    ${pickGrid('they',C.they_completed,'their_score','your_status','On your Planning list',"Nothing they've finished and rated 8.0+ is missing from your list.",'var(--friend)')}
     ${h2("You've completed, they haven't",`You rated these 8.0 or higher. They're not on ${esc(name)}'s list, or only on their Planning list.`)}
-    ${pickGrid('you',C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`)}
+    ${pickGrid('you',C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`,'var(--accent)')}
     ${h2('Genres')}
     ${genres}
     ${h2('Every title you both rated',`${n} ${mt}. Click a column to sort, or a title to see your category scores.`)}
