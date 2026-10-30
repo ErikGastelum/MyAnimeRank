@@ -436,6 +436,7 @@ const state = {
   booting:true,              // boot(): /auth/status, then the first Pull + library load
   view:'library',            // library|discover|feed|profile|search|rating|detail|insights|person|studio|user|compare
   mediaType:'anime',
+  navTab:'anime',            // the last bottom-nav tab shown (PRD §8)
   libSearch:'', libSort:'score', libSortMenuOpen:false,
   libGenre:null, libYear:null, libGenreMenuOpen:false, libYearMenuOpen:false,
   chainLoading:false,
@@ -1618,12 +1619,21 @@ function shell(){
     case 'compare': body=compareView(); break;
     default: body=libraryView();
   }
-  return `<div style="flex:1;display:flex;flex-direction:column;min-height:0;">
+  return `<div style="flex:1;display:flex;flex-direction:column;min-height:0;min-width:0;">
     <div id="main-scroll" style="flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;background:radial-gradient(120% 80% at 50% -10%, #101218 0%, var(--bg1) 60%);">${body}</div>
     ${bottomNav()}
   </div>`;
 }
 
+// PRD §8: a page reached from a tab (search, detail, user, person, studio,
+// Insights, the stepper) keeps that tab highlighted, so remember the last
+// tab shown; a friend comparison always belongs to Profile.
+function navTab(){
+  const v=state.view;
+  if(v==='library')return state.navTab=state.mediaType;
+  if(v==='discover'||v==='feed'||v==='profile')return state.navTab=v;
+  return v==='compare'?'profile':state.navTab;
+}
 function bottomNav(){
   const items=[
     {key:'anime',label:'Anime',icon:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg>'},
@@ -1632,13 +1642,9 @@ function bottomNav(){
     {key:'feed',label:'Feed',icon:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 019 9M4 4a16 16 0 0116 16"/><circle cx="5" cy="19" r="1.5" fill="currentColor"/></svg>'},
     {key:'profile',label:'Profile',icon:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/></svg>'},
   ];
-  const active=(k)=>{
-    if(k==='anime')return state.view==='library'&&state.mediaType==='anime';
-    if(k==='manga')return state.view==='library'&&state.mediaType==='manga';
-    return state.view===k;
-  };
+  const tab=navTab();
   return `<div style="flex:0 0 66px;background:var(--bg0);border-top:1px solid var(--line2);display:flex;">
-    ${items.map(n=>{const a=active(n.key);return `<div data-act="nav" data-arg="${n.key}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;color:${a?'var(--accent)':'var(--t3)'};background:${a?'color-mix(in srgb,var(--accent) 8%,transparent)':'transparent'};transition:all .14s;">
+    ${items.map(n=>{const a=n.key===tab;return `<div data-act="nav" data-arg="${n.key}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;color:${a?'var(--accent)':'var(--t3)'};background:${a?'color-mix(in srgb,var(--accent) 8%,transparent)':'transparent'};transition:all .14s;">
       <div style="width:20px;height:20px;display:flex;align-items:center;justify-content:center;">${n.icon}</div>
       <span style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:.5px;text-transform:uppercase;">${n.label}</span>
     </div>`;}).join('')}
