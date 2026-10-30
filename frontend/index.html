@@ -138,7 +138,7 @@ async function apiFetch(path,opts={}){
   }
   if(status<200||status>=300){
     let detail='';try{detail=JSON.parse(text).detail||'';}catch(e){}
-    const err=new Error(`API ${path} failed: ${status} ${detail}`);err.status=status;throw err;
+    const err=new Error(`API ${path} failed: ${status} ${detail}`);err.status=status;err.detail=detail;throw err;
   }
   if(status===204||!text)return null;
   return JSON.parse(text);
@@ -174,6 +174,12 @@ const api={
   getCommunity:(mediaId)=>apiFetch(`/media/${mediaId}/community`),
   getCommunityByAnilist:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/community`),
   getInsights:()=>apiFetch('/insights'),
+  getFriends:()=>apiFetch('/friends'),
+  addFriend:(username)=>apiFetch('/friends',{method:'POST',body:JSON.stringify({username})}),
+  refreshFriend:(id)=>apiFetch(`/friends/${id}/refresh`,{method:'POST'}),
+  deleteFriend:(id)=>apiFetch(`/friends/${id}`,{method:'DELETE'}),
+  compareFriend:(id,mediaType)=>apiFetch(`/friends/${id}/compare?media_type=${mediaType}`),
+  getFriendScores:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/friend-scores`),
 };
 let _communityCache={};
 // it.id is a real local media_id for in-library items, or a synthetic locally-
@@ -221,6 +227,33 @@ async function loadProfileData(){
     const [stats,favs]=await Promise.all([api.getProfileStats(),api.getFavorites()]);
     _profileStats=stats;_profileFavorites=favs;
   }catch(e){ console.error('profile load failed:',e); }
+  render();
+}
+// Friends (PRD 4.12). Only adding and Refresh reach AniList; the list, the
+// comparison and the detail page's friend scores all read the stored copies.
+// _friends: null = not loaded yet, false = last fetch failed, array = loaded.
+let _friends=null;
+async function loadFriends(){
+  try{ _friends=(await api.getFriends()).friends; }
+  catch(e){ console.error('friends fetch failed:',e); _friends=false; }
+  render();
+}
+// _friendScores[anilist_id]: undefined = not asked yet, null = in flight or
+// failed (shown as nothing), array = friends who scored that title.
+let _friendScores={};
+async function loadFriendScores(anilistId){
+  _friendScores[anilistId]=null;
+  try{ _friendScores[anilistId]=(await api.getFriendScores(anilistId)).scores; }
+  catch(e){ console.error('friend scores fetch failed:',e); }
+  render();
+}
+// _compare: undefined = loading, false = failed, object = the comparison for
+// state.compare. A response for a friend/media type no longer on screen is dropped.
+let _compare;
+async function loadCompare(){
+  const c=state.compare;_compare=undefined;
+  try{ const r=await api.compareFriend(c.friendId,c.mediaType); if(state.compare===c)_compare=r; }
+  catch(e){ console.error('compare fetch failed:',e); if(state.compare===c)_compare=false; }
   render();
 }
 const DISCOVER_SECTIONS=[
@@ -383,7 +416,7 @@ function povr(url,label){ return url?`<img src="${esc(url)}" alt="${esc(label||'
 const state = {
   connected:false,
   booting:true,              // boot(): /auth/status, then the first Pull + library load
-  view:'library',            // library|discover|feed|profile|search|rating|detail|insights|person|studio|user
+  view:'library',            // library|discover|feed|profile|search|rating|detail|insights|person|studio|user|compare
   mediaType:'anime',
   libSearch:'', libSort:'score', libSortMenuOpen:false,
   libGenre:null, libYear:null, libGenreMenuOpen:false, libYearMenuOpen:false,
@@ -413,6 +446,11 @@ const state = {
   // (alphabetical) filter state -- shared across Studio/Character/Staff
   // pages since only one is ever visible at a time; reset on each open.
   workListSearch:'', workListOnMyList:false, charListSearch:'', charListOnMyList:false,
+  // friends: friendBusy is what's fetching from AniList ('add', 'user' or a
+  // friend's id), friendError {id, message} is shown next to whatever failed.
+  friendInput:'', friendBusy:null, friendError:null,
+  compare:null,              // {friendId, mediaType}
+  compareSort:{key:'your_score',dir:-1}, compareReturn:null,
 };
 function persistExpanded(){localStorage.setItem('mar_expanded',JSON.stringify(state.expanded));}
 
@@ -489,6 +527,7 @@ H.nav = (el)=>{
   else go(t);
   if(t==='discover')loadDiscoverType(state.discoverType);
   if(t==='profile'&&!_profileStats)loadProfileData();
+  if(t==='profile'&&!Array.isArray(_friends))loadFriends();
   if(t==='feed'&&!_feedCache[state.feedType])loadFeed(state.feedType);
   render();
 };
@@ -578,6 +617,8 @@ H.disconnect = async ()=>{
   try{await api.authLogout();}catch(e){}
   state.connected=false;state.profileSettingsOpen=false;
   _profileStats=null;_profileFavorites=null;_personCache={};_studioCache={};_userCache={};
+  _friends=null;_friendScores={};_compare=undefined;
+  state.compare=null;state.friendError=null;state.friendInput='';
   render();
 };
 H.pull = async ()=>{
@@ -614,7 +655,12 @@ H.openInsights = ()=>{
 H.backInsights = ()=>go('profile');
 
 /* detail */
-H.backView = ()=>{state.current=null;go(state.detailReturn||'library');};
+H.backView = ()=>{
+  state.current=null;
+  // A rating or status change on that title changes the comparison too.
+  if(state.detailReturn==='compare'&&state.compare)loadCompare();
+  go(state.detailReturn||'library');
+};
 H.toggleDetailMenu = (el,e)=>{e.stopPropagation();state.detailMenuOpen=!state.detailMenuOpen;setMenuOpen('menu-detail',state.detailMenuOpen);};
 H.retryCommunity = ()=>{
   const it=state.current&&state.current.item;if(!it)return;
@@ -1039,6 +1085,7 @@ H.toggleStudioFav = async (el,e)=>{
 let _userCache={};
 H.openUser = async (el)=>{
   state.userReturn=state.view;
+  if(state.friendError&&state.friendError.id==='user')state.friendError=null;
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
   if(!anilistId)return;
   if(_userCache[anilistId]){ state.user=_userCache[anilistId]; go('user'); return; }
@@ -1049,6 +1096,77 @@ H.openUser = async (el)=>{
   }catch(e){ console.error('open user failed:',e); }
 };
 H.backUser = ()=>{const r=state.userReturn;state.user=null;state.userReturn=null;go(r||'search');};
+
+/* friends (PRD 4.12) */
+H.friendInput = (el)=>{state.friendInput=el.value;};
+// Shown in the page next to whatever started the fetch (never alert()).
+// 400/403/404 details are written for people ("No AniList user named X",
+// "X's list is private on AniList"), shown verbatim since they can start with
+// a username; anything else is AniList being unreachable.
+function friendFailed(id,e){
+  console.error('friend fetch failed:',e);
+  let m=[400,403,404].includes(e.status)&&e.detail?e.detail:'Could not reach AniList, try again shortly.';
+  if(e.status===403)m+='. Only public lists can be compared.';
+  state.friendError={id,message:m};
+}
+// One AniList fetch at a time (add or refresh): it's the only part of this
+// feature that costs rate limit. Returns the stored friend, or null on failure.
+async function fetchFriend(key,call){
+  if(state.friendBusy)return null;
+  state.friendBusy=key;state.friendError=null;render();
+  let friend=null;
+  try{
+    friend=await call();
+    if(Array.isArray(_friends)){
+      const i=_friends.findIndex(f=>f.anilist_user_id===friend.anilist_user_id);
+      if(i>=0)_friends[i]=friend;
+      else{_friends.push(friend);_friends.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));}
+    }
+    _friendScores={};
+  }catch(e){ friendFailed(key,e); }
+  state.friendBusy=null;render();
+  return friend;
+}
+H.addFriend = async ()=>{
+  const name=state.friendInput.trim();if(!name)return;
+  if(await fetchFriend('add',()=>api.addFriend(name))){state.friendInput='';render();}
+};
+H.refreshFriend = async (el)=>{
+  const id=+el.dataset.arg;
+  const f=await fetchFriend(id,()=>api.refreshFriend(id));
+  if(f&&state.view==='compare'&&state.compare&&state.compare.friendId===id)loadCompare();
+};
+// Local only: nothing changes on AniList.
+H.removeFriend = async (el)=>{
+  const id=+el.dataset.arg;
+  try{ await api.deleteFriend(id); }
+  catch(e){ console.error('remove friend failed:',e); state.friendError={id,message:"Couldn't remove this friend."}; render(); return; }
+  if(Array.isArray(_friends))_friends=_friends.filter(f=>f.anilist_user_id!==id);
+  _friendScores={};render();
+};
+function openCompare(friendId,mediaType){
+  state.compareReturn=state.view;
+  state.compare={friendId,mediaType:mediaType||state.mediaType};
+  state.compareSort={key:'your_score',dir:-1};
+  if(state.friendError&&state.friendError.id!==friendId)state.friendError=null;
+  loadCompare();
+  go('compare');
+}
+// data-mt: the detail page's friend chips open the title's own media type.
+H.openCompare = (el)=>openCompare(+el.dataset.arg,el.dataset.mt);
+// FR-70: a user's profile adds them as a friend first if they aren't one yet.
+H.compareUser = async ()=>{
+  const u=state.user;if(!u)return;
+  if(_friends===null)await loadFriends();
+  const known=Array.isArray(_friends)&&_friends.some(f=>f.anilist_user_id===u.anilist_id);
+  const f=known?null:await fetchFriend('user',()=>api.addFriend(u.name));
+  if(known||f)openCompare(known?u.anilist_id:f.anilist_user_id);
+};
+H.backCompare = ()=>{const r=state.compareReturn;state.compare=null;_compare=undefined;go(r||'profile');};
+H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};loadCompare();render();};
+H.retryCompare = ()=>{loadCompare();render();};
+// FR-76: a new column sorts high to low; the same column again flips it.
+H.sortCompare = (el)=>{const k=el.dataset.arg,s=state.compareSort;state.compareSort={key:k,dir:s.key===k?-s.dir:-1};render();};
 
 /* ============================================================= data ops */
 function byId(id){return library.find(x=>x.id===id);}
@@ -1266,7 +1384,8 @@ function screenKey(){
   const v=state.view;
   const sub={library:state.mediaType,detail:state.current&&state.current.item.anilist_id,
     person:state.person&&state.person.favType+state.person.anilist_id,studio:state.studio&&state.studio.anilist_id,
-    user:state.user&&state.user.anilist_id,rating:state.rating&&state.rating.idx}[v];
+    user:state.user&&state.user.anilist_id,rating:state.rating&&state.rating.idx,
+    compare:state.compare&&state.compare.friendId+state.compare.mediaType}[v];
   return `${state.connected}:${v}:${sub}`;
 }
 
@@ -1421,6 +1540,7 @@ function shell(){
     case 'person': body=personView(); break;
     case 'studio': body=studioView(); break;
     case 'user': body=userView(); break;
+    case 'compare': body=compareView(); break;
     default: body=libraryView();
   }
   return `<div style="flex:1;display:flex;flex-direction:column;min-height:0;">
@@ -2011,6 +2131,7 @@ function profileView(){
       <span style="font-weight:600;font-size:14px;flex:1;">Personal Insights</span>
       <svg width="16" height="16" viewBox="0 0 24 24" style="color:var(--t3);"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
+    ${friendsSection()}
     ${shelves}
   </div>`;
 }
@@ -2333,6 +2454,7 @@ function detailView(){
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;">${STATUS[it.media_type].map(s=>`<div data-act="addStatus" data-arg="${s}" data-hover="border-color:var(--accent);color:var(--t1)" style="padding:11px 16px;border-radius:10px;cursor:pointer;font-weight:600;font-size:13px;background:var(--s1);color:var(--t2);border:1px solid var(--line);">${STATUS_LABEL[s]}</div>`).join('')}</div>
         </div>`}
+        ${friendScoresRow(it)}
 
         <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:20px;max-width:520px;">
           ${commLoading?skeletonRankingStats():comm.rankingStats.map(rs=>`<div style="background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:12px 10px;text-align:center;"><div style="font-family:'Overpass Mono',monospace;font-size:18px;font-weight:700;">${esc(rs.value)}</div><div style="font-family:'Overpass Mono',monospace;font-size:8px;letter-spacing:.4px;color:var(--t4);text-transform:uppercase;margin-top:5px;">${esc(rs.label)}</div></div>`).join('')}
@@ -2505,10 +2627,15 @@ function userView(){
   if(f.staff.length) shelves+=realShelfCover('Favorite Staff',f.staff,it=>`data-act="openPerson" data-arg="${it.anilist_id}" data-kind="staff"`);
   if(f.studios.length) shelves+=`<div style="margin-bottom:28px;"><h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">Favorite Studios</h2>
     <div style="display:flex;flex-wrap:wrap;gap:10px;">${f.studios.map(st=>`<div data-act="openStudio" data-arg="${st.anilist_id}" data-hover="border-color:var(--accent)" style="cursor:pointer;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:12px 18px;display:flex;align-items:center;"><span style="font-weight:700;font-size:14px;letter-spacing:.2px;">${esc(st.name)}</span></div>`).join('')}</div></div>`;
+  // FR-70: anyone but yourself can be compared against.
+  const self=String(state.username||'').toLowerCase()===String(u.name||'').toLowerCase();
+  const adding=state.friendBusy==='user';
   return `<div style="animation:rk-fade .25s ease;"><div style="max-width:1000px;margin:0 auto;padding:30px 38px 60px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
       <div data-act="backUser" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t2);"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back</div>
+      ${self?'':actBtn(adding?'Fetching their list…':'Compare lists','compareUser','',true,adding)}
     </div>
+    ${state.friendError&&state.friendError.id==='user'?`<div style="margin:-12px 0 18px;text-align:right;">${friendErrorNote('user')}</div>`:''}
     ${banner}
     <div style="display:flex;gap:24px;align-items:flex-end;margin-bottom:8px;${banner?'position:relative;margin-top:-50px;padding:0 20px;':''}">
       <div style="flex:0 0 100px;height:100px;border-radius:14px;position:relative;overflow:hidden;background:${cover(u.name)};display:flex;align-items:center;justify-content:center;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:28px;color:rgba(255,255,255,.85);">${esc(initials(u.name))}</span>${povr(u.avatar_url,u.name)}</div>
@@ -2523,6 +2650,168 @@ function userView(){
     </div>
     ${shelves}
   </div></div>`;
+}
+
+/* ---- friends (PRD 4.12) ---- */
+// Square avatar with initials underneath, same as the Profile header's.
+function avatarBox(url,name,size,radius){
+  return `<div style="flex:0 0 ${size}px;width:${size}px;height:${size}px;border-radius:${radius||Math.round(size/4)+'px'};position:relative;overflow:hidden;background:${cover(name)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:${Math.round(size*.36)}px;color:rgba(255,255,255,.85);">${esc(initials(name))}</span>${povr(url,name)}</div>`;
+}
+// The app's two button looks: primary (accent fill) and quiet (surface + line).
+// A busy button is inert: data-act="" matches no handler.
+function actBtn(label,act,arg,primary,busy){
+  const look=primary?'background:var(--accent);color:#04121d;font-weight:700;':'background:var(--s2);border:1px solid var(--line);color:var(--t2);font-weight:600;';
+  return `<div data-act="${busy?'':act}" data-arg="${arg}" ${busy?'':`data-hover="${primary?'filter:brightness(1.1)':'border-color:var(--accent);color:var(--t1)'}"`} style="flex:0 0 auto;padding:9px 14px;border-radius:9px;font-size:12.5px;white-space:nowrap;cursor:${busy?'default':'pointer'};${look}${busy?'opacity:.6;':''}">${esc(label)}</div>`;
+}
+function friendErrorNote(id){
+  const e=state.friendError;if(!e||e.id!==id)return '';
+  return `<div style="font-size:12.5px;color:#e57373;margin-top:8px;line-height:1.5;">${esc(e.message)}</div>`;
+}
+function titleThumb(it,w,h){
+  return `<div style="flex:0 0 ${w}px;height:${h}px;border-radius:5px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:11px;color:rgba(255,255,255,.8);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}</div>`;
+}
+function fmtDelta(d){return d==null?'—':(d>0?'+':'')+Number(d).toFixed(1);}
+function deltaColor(d){return d>0?'#6bd08a':d<0?'#e57373':'var(--t3)';}
+
+// FR-70: the Friends section on Profile.
+function friendsSection(){
+  const fr=_friends,adding=state.friendBusy==='add';
+  const note=(msg)=>`<div style="font-size:12.5px;color:var(--t4);line-height:1.6;">${msg}</div>`;
+  const rows=fr===null?note('Loading friends…')
+    :fr===false?note("Couldn't load your friends -- open Profile again to retry.")
+    :!fr.length?note("No friends yet. Add someone by their AniList username, or use Compare lists on anyone's profile. Their list has to be public.")
+    :fr.map(f=>{const busy=state.friendBusy===f.anilist_user_id;return `<div>
+      <div style="display:flex;align-items:center;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:10px 12px;">
+        <div data-act="openUser" data-arg="${f.anilist_user_id}" title="View profile" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer;">
+          ${avatarBox(f.avatar_url,f.name,38)}
+          <div style="min-width:0;"><div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(f.name)}</div>
+          <div style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:var(--t4);margin-top:3px;">${f.anime_count} anime · ${f.manga_count} manga · fetched ${esc(timeAgo(f.fetched_at))}</div></div>
+        </div>
+        ${actBtn(busy?'Refreshing…':'Refresh','refreshFriend',f.anilist_user_id,false,busy)}
+        ${actBtn('Remove','removeFriend',f.anilist_user_id,false,busy)}
+        ${actBtn('Compare','openCompare',f.anilist_user_id,true)}
+      </div>${friendErrorNote(f.anilist_user_id)}</div>`;}).join('');
+  return `<div style="margin-bottom:30px;">
+    <h2 style="font-size:16px;font-weight:700;margin-bottom:12px;">Friends</h2>
+    <div style="display:flex;gap:10px;">
+      <input id="in-friend" data-input="friendInput" data-enter="addFriend" value="${esc(state.friendInput)}" placeholder="Add a friend by AniList username" style="flex:1;min-width:0;height:40px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:0 14px;font-size:13px;color:var(--t1);outline:none;" />
+      ${actBtn(adding?'Adding…':'Add','addFriend','',true,adding)}
+    </div>
+    ${friendErrorNote('add')}
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px;">${rows}</div>
+  </div>`;
+}
+
+// FR-78: friends who scored this title, from their stored lists; nothing
+// when none have. Each chip opens that friend's comparison.
+function friendScoresRow(it){
+  const fs=_friendScores[it.anilist_id];
+  if(fs===undefined)loadFriendScores(it.anilist_id);
+  if(!fs||!fs.length)return '';
+  return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;">
+    <span style="font-size:12px;color:var(--t4);margin-right:2px;">Friends</span>
+    ${fs.map(s=>`<div data-act="openCompare" data-arg="${s.anilist_user_id}" data-mt="${it.media_type}" title="${esc(s.name)} · ${esc(STATUS_LABEL[s.status]||s.status)} · compare lists" data-hover="border-color:var(--accent)" style="display:flex;align-items:center;gap:7px;background:var(--s1);border:1px solid var(--line);border-radius:999px;padding:3px 11px 3px 3px;cursor:pointer;">${avatarBox(s.avatar_url,s.name,22,'50%')}<span style="font-size:12px;font-weight:600;color:var(--t2);">${esc(s.name)}</span><span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);">${fmtScore(s.score)}</span></div>`).join('')}
+  </div>`;
+}
+
+// FR-74: what the Taste match tooltip says.
+const TASTE_MATCH_HELP='Taste match = 100 × (1 − average gap ÷ 9). The gap is how far apart your two scores are on a title you both rated, averaged over all of them; 9 is the widest gap a 1–10 scale allows. 100% means you scored every shared title the same, 0% means 9 points apart every time. Shown once you share 5 rated titles.';
+
+// FR-74 to FR-78: you vs one friend, one media type at a time.
+function compareView(){
+  const c=state.compare;if(!c)return profileView();
+  const C=_compare;
+  const known=Array.isArray(_friends)?_friends.find(f=>f.anilist_user_id===c.friendId):null;
+  const friend=(C&&C.friend)||known||{name:'',avatar_url:null,fetched_at:null};
+  const name=friend.name,mt=c.mediaType,busy=state.friendBusy===c.friendId;
+  const seg=(t,lbl)=>{const on=mt===t;return `<div data-act="setCompareType" data-arg="${t}" style="padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px;background:${on?'var(--accent)':'transparent'};color:${on?'#04121d':'var(--t3)'};transition:all .14s;">${lbl}</div>`;};
+  const head=`<div style="display:flex;align-items:center;margin-bottom:24px;"><div data-act="backCompare" data-hover="color:var(--t1)" style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t2);"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back</div></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:14px;min-width:0;">
+        ${avatarBox(friend.avatar_url,name,56)}
+        <div style="min-width:0;"><h1 style="font-size:26px;font-weight:700;letter-spacing:-.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">You vs ${esc(name)}</h1>
+        <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">${friend.fetched_at?`Their list was fetched ${esc(timeAgo(friend.fetched_at))}`:'&nbsp;'}</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${actBtn(busy?'Refreshing…':'Refresh','refreshFriend',c.friendId,false,busy)}
+        <div style="display:flex;background:var(--s1);border:1px solid var(--line);border-radius:11px;padding:4px;gap:4px;">${seg('anime','Anime')}${seg('manga','Manga')}</div>
+      </div>
+    </div>
+    ${friendErrorNote(c.friendId)}`;
+  const page=(body)=>`<div style="padding:30px 38px 60px;max-width:1180px;margin:0 auto;animation:rk-fade .25s ease;">${head}<div style="margin-top:24px;">${body}</div></div>`;
+  const note=(msg)=>`<div style="font-size:13px;color:var(--t4);line-height:1.6;">${msg}</div>`;
+  if(C===undefined)return page(note('Comparing…'));
+  if(C===false)return page(`<div style="display:flex;align-items:center;gap:12px;">${note("Couldn't load the comparison.")}${actBtn('Retry','retryCompare','',false)}</div>`);
+  if(!C.friend[mt+'_count'])return page(note(`${esc(name)} has no ${mt} on their list${C.friend.anime_count+C.friend.manga_count?'':' -- try Refresh if that has changed'}.`));
+
+  const h2=(t,sub)=>`<h2 style="font-size:16px;font-weight:700;margin:32px 0 ${sub?4:12}px;">${t}</h2>${sub?`<div style="font-size:12px;color:var(--t4);margin-bottom:12px;">${sub}</div>`:''}`;
+  const empty=(msg)=>`<div style="font-size:12.5px;color:var(--t4);padding:10px;">${msg}</div>`;
+  const info=`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01" stroke-linecap="round"/></svg>`;
+  const stat=(label,value,sub,help,color)=>`<div ${help?`title="${esc(help)}" `:''}style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:18px;${help?'cursor:help;':''}">
+    <div style="font-size:12px;color:var(--t4);display:flex;align-items:center;gap:6px;">${label}${help?info:''}</div>
+    <div style="font-family:'Overpass Mono',monospace;font-size:28px;font-weight:700;margin-top:8px;color:${color||'var(--t1)'};">${value}</div>
+    <div style="font-size:12px;color:var(--t3);margin-top:4px;line-height:1.45;">${sub}</div></div>`;
+  const n=C.overlap,skew=C.skew,even=skew!=null&&Math.abs(skew)<0.05;
+  const stats=`<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;">
+    ${stat('Rated by both',String(n),`${mt} you've both scored`)}
+    ${stat('Taste match',C.taste_match!=null?C.taste_match+'%':'—',C.taste_match!=null?`Across those ${n} shared titles`:`Needs 5 shared titles (${n} so far)`,TASTE_MATCH_HELP,C.taste_match!=null?'var(--accent)':null)}
+    ${stat('Average skew',skew==null?'—':even?'0.0':fmtDelta(skew),skew==null?'Nothing rated by both yet':even?`You and ${esc(name)} score about the same`:`You score ${Math.abs(skew).toFixed(1)} ${skew>0?'higher':'lower'} than ${esc(name)} on average`,null,skew==null||even?null:deltaColor(skew))}
+  </div>`;
+
+  const pairRow=(s)=>`<div data-act="openRelation" data-arg="${s.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:10px;cursor:pointer;">
+    ${titleThumb(s,34,48)}
+    <div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(s))}</div>
+    <div style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">You <span style="color:var(--accent);">${fmtScore(s.your_score)}</span> · ${esc(name)} <span style="color:var(--t2);">${fmtScore(s.their_score)}</span></div></div>
+    <span style="font-family:'Overpass Mono',monospace;font-size:14px;font-weight:700;color:${deltaColor(s.delta)};flex:0 0 auto;">${fmtDelta(s.delta)}</span></div>`;
+  const pairCard=(items,msg)=>`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:6px;">${items.length?items.map(pairRow).join(''):empty(msg)}</div>`;
+  const pairs=`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;">
+    <div>${h2('Biggest disagreements')}${pairCard(C.disagreements,n?'No gaps of a point or more.':'Nothing rated by both yet.')}</div>
+    <div>${h2('Strongest agreements')}${pairCard(C.agreements,n?'Every shared title is already a disagreement.':'Nothing rated by both yet.')}</div>
+  </div>`;
+
+  // FR-77 shelves: cover, title, the 8.0+ score, and a note when the title is
+  // only on a Planning list.
+  const pickShelf=(key,items,scoreKey,statusKey,planNote,msg)=>items.length?`<div data-shelf="${key}" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:10px;">
+    ${items.map(it=>`<div data-act="openRelation" data-arg="${it.anilist_id}" style="flex:0 0 120px;width:120px;min-width:0;cursor:pointer;">
+      <div style="aspect-ratio:2/3;border-radius:12px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:24px;color:rgba(255,255,255,.78);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}
+        <div style="position:absolute;bottom:8px;right:8px;background:rgba(6,7,9,.72);border-radius:6px;padding:3px 7px;font-family:'Overpass Mono',monospace;font-size:11px;font-weight:700;color:var(--accent);">${fmtScore(it[scoreKey])}</div></div>
+      <div style="font-weight:600;font-size:12.5px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(it))}</div>
+      ${it[statusKey]?`<div style="font-family:'Overpass Mono',monospace;font-size:10px;color:var(--t4);margin-top:2px;">${planNote}</div>`:''}
+    </div>`).join('')}</div>`:empty(msg);
+
+  const themBar='color-mix(in srgb,var(--t2) 55%,transparent)';
+  const bar=(v,bg)=>`<div style="height:6px;border-radius:4px;background:var(--s3);overflow:hidden;margin-top:5px;"><div style="height:100%;width:${v==null?'0%':pct(v,10)};background:${bg};border-radius:4px;"></div></div>`;
+  const genreRow=(g)=>`<div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;"><span style="font-size:13px;color:var(--t2);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(g.genre)}</span>
+    <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;white-space:nowrap;"><span style="color:var(--accent);font-weight:700;">${fmtScore(g.your_avg)}</span><span style="color:var(--t4);"> (${g.your_count}) · </span><span style="color:var(--t2);font-weight:700;">${fmtScore(g.their_avg)}</span><span style="color:var(--t4);"> (${g.their_count})</span></span></div>
+    ${bar(g.your_avg,'linear-gradient(90deg,color-mix(in srgb,var(--accent) 45%,#000),var(--accent))')}${bar(g.their_avg,themBar)}</div>`;
+  const swatch=(bg)=>`<span style="width:10px;height:10px;border-radius:3px;background:${bg};"></span>`;
+  const genres=`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:20px;">
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--t3);margin-bottom:16px;">
+      <span style="display:flex;align-items:center;gap:6px;">${swatch('var(--accent)')}You</span><span style="display:flex;align-items:center;gap:6px;">${swatch(themBar)}${esc(name)}</span>
+      <span style="margin-left:auto;color:var(--t4);">Average score (titles rated)</span></div>
+    ${C.genres.length?`<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px 28px;">${C.genres.map(genreRow).join('')}</div>`:empty('No rated titles to compare yet.')}
+  </div>`;
+
+  const s=state.compareSort;
+  const rows=C.shared.slice().sort((a,b)=>(a[s.key]-b[s.key])*s.dir||b.your_score-a.your_score||displayTitle(a).localeCompare(displayTitle(b)));
+  const col=(key,label)=>{const on=s.key===key;return `<div data-act="sortCompare" data-arg="${key}" title="Sort by ${esc(label)}" data-hover="color:var(--t1)" style="flex:0 0 78px;display:flex;justify-content:flex-end;gap:4px;cursor:pointer;font-family:'Overpass Mono',monospace;font-size:11px;white-space:nowrap;color:${on?'var(--accent)':'var(--t3)'};"><span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>${on?(s.dir<0?'↓':'↑'):''}</div>`;};
+  const num=(v,color)=>`<div style="flex:0 0 78px;text-align:right;font-family:'Overpass Mono',monospace;font-size:13px;font-weight:700;color:${color};">${v}</div>`;
+  const table=`<div style="background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:10px 10px 6px;">
+    <div style="display:flex;align-items:center;gap:12px;padding:4px 8px 10px;border-bottom:1px solid var(--line2);margin-bottom:4px;"><div style="flex:1;font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);">Title</div>${col('your_score','You')}${col('their_score',name)}${col('delta','Delta')}</div>
+    ${rows.length?rows.map(r=>`<div data-act="openRelation" data-arg="${r.anilist_id}" data-hover="background:var(--s2)" style="display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:9px;cursor:pointer;">${titleThumb(r,28,40)}<div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayTitle(r))}</div>${num(fmtScore(r.your_score),'var(--accent)')}${num(fmtScore(r.their_score),'var(--t2)')}${num(fmtDelta(r.delta),deltaColor(r.delta))}</div>`).join(''):empty('Nothing rated by both yet.')}
+  </div>`;
+
+  return page(`${stats}
+    ${pairs}
+    ${h2("They've completed, you haven't",`${esc(name)} rated these 8.0 or higher. They're not in your library, or only on your Planning list.`)}
+    ${pickShelf('they-'+mt,C.they_completed,'their_score','your_status','On your Planning list',"Nothing they've finished and rated 8.0+ is missing from your list.")}
+    ${h2("You've completed, they haven't",`You rated these 8.0 or higher. They're not on ${esc(name)}'s list, or only on their Planning list.`)}
+    ${pickShelf('you-'+mt,C.you_completed,'your_score','their_status','On their Planning list',`${esc(name)} has everything you rated 8.0+ on their list.`)}
+    ${h2('Genres')}
+    ${genres}
+    ${h2('Every title you both rated',`${n} ${mt}. Click a column to sort.`)}
+    ${table}`);
 }
 
 /* ============================================================= events */
@@ -2549,6 +2838,15 @@ root.addEventListener('change',(e)=>{
   const el=e.target.closest('[data-change]');
   if(!el)return;
   const fn=H[el.dataset.change];
+  if(fn)fn(el,e);
+});
+// Enter in a field with data-enter runs that action (Add friend). Not while
+// an IME is composing, where Enter only confirms the typed characters.
+root.addEventListener('keydown',(e)=>{
+  if(e.key!=='Enter'||e.isComposing)return;
+  const el=e.target.closest('[data-enter]');
+  if(!el)return;
+  const fn=H[el.dataset.enter];
   if(fn)fn(el,e);
 });
 
