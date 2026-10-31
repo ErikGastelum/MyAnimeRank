@@ -242,8 +242,16 @@ async function loadProfileData(){
 // (FR-70), both from the same response.
 let _friends=null,_friendSync=null,_friendsHidden=[],_friendsPoll=null;
 function setFriends(r){_friends=r.friends;_friendsHidden=r.hidden||[];_friendSync={synced_at:r.synced_at,mutual_only:r.mutual_only};}
+// A detail page's friend chips come from the stored lists, so a friend who
+// is new, or whose list was fetched since (by the queue or a comparison),
+// makes the cached chips stale.
+const fetchedKey=(fs)=>Array.isArray(fs)?fs.map(f=>f.anilist_user_id+':'+(f.fetched_at||'')).sort().join(','):'';
 async function loadFriends(){
-  try{ setFriends(await api.getFriends()); }
+  try{
+    const before=fetchedKey(_friends);
+    setFriends(await api.getFriends());
+    if(fetchedKey(_friends)!==before)_friendScores={};
+  }
   catch(e){ console.error('friends fetch failed:',e); _friends=false; }
   render();pollFriends();
 }
