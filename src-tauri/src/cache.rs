@@ -1,5 +1,5 @@
 //! FR-50: TTL cache for Discover/Feed. Port of cache.py. A second instance
-//! holds Pick an anime's genre/tag lists (FR-70).
+//! holds Pick an anime's genre/tag lists (FR-84).
 //!
 //! Not used for Favorites (FR-40: "not cached") or any Library/sync data. It
 //! exists purely to keep Discover/Feed tab-switching inside AniList's rate limit.

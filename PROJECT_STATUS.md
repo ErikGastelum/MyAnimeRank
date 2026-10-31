@@ -4,7 +4,7 @@
 its independent audit are on `feature/friend-compare`. The port to Tauri 2 +
 Rust replaced the Python app earlier (branch `remove-python`, merged); the
 2026-10-25 Python status (cleanup and hardening, phases 1–7) is in git
-history (`bea0e17`). 2026-10-30: Pick an anime (FR-70, branch
+history (`bea0e17`). 2026-10-30: Pick an anime (FR-84, branch
 `feature/pick-an-anime`).*
 
 ---
@@ -17,8 +17,8 @@ against titles you've already scored in the same genre and media type. It's
 also an AniList client: login is required (FR-47), status, progress and
 overall score sync both ways, and Discover, Feed, Characters/Staff/Studios/
 Users, Favorites, Profile, Insights and Pick an anime are backed by AniList's
-GraphQL API. The spec is `docs/PRD.md` (v2, through M10: Friend Comparison,
-and Pick an anime).
+GraphQL API. The spec is `docs/PRD.md` (v2, through M11: M10 is Friend
+Comparison, M11 Pick an anime).
 
 | Layer | Tech |
 |---|---|
@@ -91,10 +91,10 @@ database.
   run, 80 requests in a later review), apart from error-detail wording.
 - **Tests:** 111 Rust tests (110 in `tests/backend.rs`, 1 in `config.rs`).
   Pick an anime's 26 run against a fake AniList that pages like the real
-  one (5000-entry limit included) and, for the prequel check (FR-71), has
+  one (5000-entry limit included) and, for the prequel check (FR-85), has
   relations and per-id lookups that return related entries in full; its
   queries were also run against the live API, logged out
-  (`docs/anilist-api-notes.md` #17-#28, Re:Zero's chain and query
+  (`docs/anilist-api-notes.md` #19-#30, Re:Zero's chain and query
   complexity included).
   Before the Python app was deleted, its 174 pytest cases were read through
   and everything not yet covered was ported: the full conflict-detection
@@ -250,7 +250,7 @@ Roughly by priority:
     ~5 s with tag filters (probes past the end of the matches are full scans
     on AniList's side); rerolls after that are one request. A pick never
     sends more than 4 requests, 429 retries included, and the prequel check
-    (FR-71) shares them: extra pages and the walk back to a next-up stop
+    (FR-85) shares them: extra pages and the walk back to a next-up stop
     when they run out. Each next-up lookup brings the entry's related
     entries in full, so it settles two entries: a first pick from more than
     50 matches (one request left) reaches 2 entries back, enough for Re:Zero

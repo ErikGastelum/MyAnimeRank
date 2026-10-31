@@ -30,7 +30,7 @@ pub struct AppState {
     /// FR-26 retry queue. In memory, as before (a known open item).
     pub push_queue: Mutex<BTreeSet<i64>>,
     pub cache: cache::TtlCache,
-    /// FR-70's genre/tag lists. Its own instance: a TtlCache evicts by the
+    /// FR-84's genre/tag lists. Its own instance: a TtlCache evicts by the
     /// caller's TTL, so sharing Discover's 60 s would drop a 24 h entry.
     pub pick_cache: cache::TtlCache,
     pub oauth_port: u16,
