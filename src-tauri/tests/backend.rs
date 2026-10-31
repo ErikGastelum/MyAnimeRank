@@ -2364,6 +2364,76 @@ async fn the_list_queue_takes_one_friend_per_turn_never_fetched_first_then_the_o
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_comparison_or_refresh_during_a_friends_fetch_reuses_it_instead_of_fetching_again() {
+    // Pal's lists don't come back until released.
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let h = hold.clone();
+    let fake = fake_anilist(move |q, v| {
+        if q.contains("anime:") {
+            tokio::task::block_in_place(|| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while h.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+        }
+        friend_reply(q, v, false)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    mine(&st, 1, "anime", "watching", Some(8.0), &["Action"]);
+    // A day-old copy of Pal's list: due for the queue, and for a comparison.
+    st.db.replace_friend_list(&friend_list(42, "Pal", vec![their(1, "anime", "completed", Some(5.0), &["Action"])]), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let queue = tokio::spawn({
+        let st = st.clone();
+        async move { sync::friend_queue_step(&st).await.unwrap() }
+    });
+    wait_for(|| fake.calls_containing("anime:").len() == 1).await;
+    let compare = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "GET", "/friends/42/compare?media_type=anime", None).await }
+    });
+    let refresh = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "POST", "/friends/42/refresh", None).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(friend_rows(&st).await, vec![row(42, "manual", "fetching")]);
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(queue.await.unwrap(), Some(42));
+    let (s, c) = compare.await.unwrap();
+    // Compared against the list just fetched (8.5 for title 1), not the old 5.0.
+    assert_eq!((s, &c["shared"][0]["their_score"]), (200, &json!(8.5)), "{c}");
+    let (s, r) = refresh.await.unwrap();
+    assert_eq!((s, &r["list_status"]), (200, &json!("fetched")), "{r}");
+    // One fetch in all: the user lookup and the lists, once each.
+    assert_eq!((fake.calls_containing("User(").len(), fake.calls_containing("anime:").len()), (1, 1));
+
+    // A fetch dropped half-way answers nothing: whoever waited fetches
+    // for themselves rather than waiting forever.
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    st.db.replace_friend_list(&friend_list(42, "Pal", vec![]), "2026-01-01T00:00:00+00:00").unwrap();
+    let dropped = tokio::spawn({
+        let st = st.clone();
+        async move { sync::fetch_friend(&st, "Pal", Some(42)).await.map(|_| ()) }
+    });
+    wait_for(|| fake.calls_containing("anime:").len() == 2).await;
+    let waiting = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "POST", "/friends/42/refresh", None).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    dropped.abort();
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (s, r) = waiting.await.unwrap();
+    assert_eq!((s, &r["list_status"]), (200, &json!("fetched")), "{r}");
+    assert_eq!(fake.calls_containing("anime:").len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_list_queue_waits_while_other_anilist_calls_run_and_after_a_429() {
     let graph = follows(&[100, 101], &[]);
     let fake = follow_anilist(graph.clone()).await;

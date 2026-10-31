@@ -8,7 +8,7 @@
 //! No CORS layer, deliberately: several routes write to the user's real
 //! AniList account, and nothing but the app's own page should reach them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
@@ -611,7 +611,7 @@ fn private_list(name: &str) -> ApiError {
 
 /// GET /friends' shape, also POST /friends/sync's.
 fn friends_json(st: &Shared) -> ApiResult {
-    let fetching = st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let fetching: HashSet<i64> = st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
     let mut friends = st.db.get_friends()?;
     for f in friends.iter_mut().filter(|f| fetching.contains(&f.anilist_user_id)) {
         f.list_status = "fetching".into();

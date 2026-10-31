@@ -13,7 +13,7 @@ pub mod db;
 pub mod oauth;
 pub mod sync;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -32,8 +32,10 @@ pub struct AppState {
     pub cache: cache::TtlCache,
     pub oauth_port: u16,
     pub oauth_active: Mutex<bool>,
-    /// FR-70: friends whose lists are being fetched right now ("fetching").
-    pub friend_fetching: Mutex<HashSet<i64>>,
+    /// FR-70: friends whose lists are being fetched right now ("fetching"),
+    /// each with the channel that fetch answers on, so a second caller waits
+    /// for it instead of fetching again (FR-80/FR-81).
+    pub friend_fetching: Mutex<HashMap<i64, sync::FetchAnswer>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -48,7 +50,7 @@ impl AppState {
             cache: cache::TtlCache::default(),
             oauth_port: oauth::OAUTH_PORT,
             oauth_active: Mutex::new(false),
-            friend_fetching: Mutex::new(HashSet::new()),
+            friend_fetching: Mutex::new(HashMap::new()),
         })
     }
 }
