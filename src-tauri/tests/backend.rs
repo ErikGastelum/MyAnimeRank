@@ -604,6 +604,25 @@ async fn import_takes_media_type_from_anilist_not_the_client() {
 }
 
 #[tokio::test]
+async fn import_stores_anilists_popularity_not_the_clients() {
+    // PRD §5: popularity comes from AniList at import, the same request that
+    // checks media_type, so a title added from Search can break FR-77 ties.
+    let fake = fake_anilist(|_, _| {
+        let mut node = media_node(7, "ANIME");
+        node["popularity"] = json!(4321);
+        (200, json!({"data": {"Media": node}}), None)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let (s, b) = call(&st, "POST", "/media", Some(json!({"anilist_id": 7, "media_type": "anime", "title": "x", "popularity": 1}))).await;
+    assert_eq!(s, 200);
+    let m = st.db.get_media_by_id(b["id"].as_i64().unwrap()).unwrap().unwrap();
+    assert_eq!(m.fields.popularity, Some(4321));
+    assert_eq!(fake.calls().len(), 1, "no extra request for it");
+}
+
+#[tokio::test]
 async fn import_checks_status_against_anilists_media_type_not_the_clients() {
     let fake = fake_anilist(media_lookup).await;
     let st = state_with(&fake);
