@@ -673,10 +673,11 @@ let _pickOptions=null, _pickOptionsError=null;
 // Per app session, per source + filters: the titles already shown (so none
 // repeats until all have been) and the pool size the server measured.
 const _pickSeen={};
-// AniList allows 30 requests a minute (anilist-api-notes #26) and one pick
-// sends at most 4. So after each pick Reroll waits a short gap, and longer
-// whenever a worst-case next pick would take the last minute past 30.
-const PICK_RATE={limit:30,windowMs:60000,perPick:4,gapMs:2000};
+// AniList allows 30 requests a minute (anilist-api-notes #26), and the
+// friend-list queue may use 10 of them (FR-80), so picks get 20; one pick
+// sends at most 4. After each pick Reroll waits a short gap, and longer
+// whenever a worst-case next pick would take the last minute past 20.
+const PICK_RATE={limit:20,windowMs:60000,perPick:4,gapMs:2000};
 const _pickLog=[]; // {at, requests} for each pick started in the last minute
 let _pickDoneAt=0, _pickTimer=null;
 function pickWaitMs(){
@@ -691,7 +692,7 @@ function rerollButton(){
   const busy=state.pickBusy, wait=busy?0:pickWaitMs(), off=busy||wait>0;
   const word=state.pickResult&&state.pickResult.item?'Reroll':'Pick';
   const label=busy?'Picking…':wait>0?`${word} in ${Math.ceil(wait/1000)}s`:word;
-  return `<div id="pick-reroll" data-act="reroll"${wait>0?' title="Waiting so picks stay within AniList’s 30 requests a minute"':''} style="flex:1 1 120px;padding:12px;border-radius:11px;text-align:center;font-weight:700;font-size:13.5px;background:var(--accent);color:#04121d;box-shadow:0 6px 22px color-mix(in srgb,var(--accent) 30%,transparent);cursor:${off?'default':'pointer'};opacity:${off?'.55':'1'};pointer-events:${off?'none':'auto'};">${label}</div>`;
+  return `<div id="pick-reroll" data-act="reroll"${wait>0?' title="Waiting so picks stay within AniList’s request limit"':''} style="flex:1 1 120px;padding:12px;border-radius:11px;text-align:center;font-weight:700;font-size:13.5px;background:var(--accent);color:#04121d;box-shadow:0 6px 22px color-mix(in srgb,var(--accent) 30%,transparent);cursor:${off?'default':'pointer'};opacity:${off?'.55':'1'};pointer-events:${off?'none':'auto'};">${label}</div>`;
 }
 // Repaints just the button while it waits: a full render() every tick would
 // rebuild any input being typed in.
