@@ -29,7 +29,7 @@ Comparison, M11 Pick an anime).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (111), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (113), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -89,8 +89,8 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 111 Rust tests (110 in `tests/backend.rs`, 1 in `config.rs`).
-  Pick an anime's 26 run against a fake AniList that pages like the real
+- **Tests:** 113 Rust tests (112 in `tests/backend.rs`, 1 in `config.rs`).
+  Pick an anime's 28 run against a fake AniList that pages like the real
   one (5000-entry limit included) and, for the prequel check (FR-85), has
   relations and per-id lookups that return related entries in full; its
   queries were also run against the live API, logged out
