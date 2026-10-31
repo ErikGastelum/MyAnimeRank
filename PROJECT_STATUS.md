@@ -114,6 +114,37 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
+- **Shared AniList limiter (FR-86, `fix/rate-limit-budget`):** 13 tests
+  against the fake AniList, on windows scaled down from a minute: each
+  priority stops at its share (27/23/19), a click goes ahead of queued
+  normal and background work, a raised background request goes at once,
+  background waits while higher work is in flight, a 429 pauses every
+  request and they resume highest priority first, a Retry-After over 30 s
+  fails fast for everyone, `X-RateLimit-Remaining` below the limiter's own
+  count slows it down, the push retry round stops at a 429 and with no
+  spare budget and spaces titles, Discover is cached 10 minutes across
+  toggles and waits at normal priority while a search goes, a pick that
+  can't send its 4 now answers 429 with the wait and sends nothing, the
+  debug endpoint's shape, and a mixed load through the routes (Pull and
+  friend sync, the queue, rapid picks, Discover, searches, comparisons,
+  ratings, push retries) that never puts more than 27 in any window as
+  AniList counts them, on arrival. Ten hand mutations (budget, priority
+  order, reserves, header reading, background 429 retries, counting from
+  send instead of answer, the in-flight rule, head-of-line order, fail-fast,
+  the shared pause) each fail at least one test.
+  Headless smoke test: the real router and page (as `--serve`), real retry
+  and friend-queue loops, on a temp DB, against a fake AniList logging every
+  request, driven from two windows of the page for 130 s (Reroll whenever
+  enabled, Discover toggled every 1.5 s, a rating, status change, search
+  and comparison every 2.5 s). Busiest 60 s window: `main` 143 requests
+  (75 and 79 429s with the fake enforcing 30/min, 10 failed picks); this
+  branch 27, no 429s, no failed picks. The whole first burst (two Pulls,
+  10 Discover shelves, picks, ratings, a comparison) fits in the first 4 s,
+  after which a Reroll showed up to "Reroll in 57s": the limiter allows a
+  full 27 at once and then waits for the window. Live, logged out: the
+  app's client read `X-RateLimit-Remaining` 29, 28, 27 over three requests,
+  matching its own count. Not verified: a real 429 (`Retry-After`,
+  `X-RateLimit-Reset`), and the desktop window itself (no display here).
 - **Friend Comparison (M10):** 34 more tests (84 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, the pre-FR-79 `friend` table migrated without a value
@@ -234,7 +265,11 @@ Roughly by priority:
     use the single-entry lookup in `resolve(remote)` and pending conflicts
     instead of the whole list; Discover's 6 shelves could be one aliased
     request; opening a title's detail view fetches its community data twice
-    (a second render starts another fetch before the first returns).
+    (a second render starts another fetch before the first returns). Open
+    question: the limiter lets the whole 27 go at once, so a busy start can
+    spend it in seconds and leave clicks waiting up to a minute (seen as
+    "Reroll in 57s" in the smoke test); smoothing (say, half the budget per
+    30 s) would trade that for slower first loads.
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
     detail page, expanding rows, "Rate it now", the bottom nav highlight),
