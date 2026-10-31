@@ -1382,7 +1382,8 @@ struct Follows {
 
 /// `friend_anilist`'s users and lists, plus `Page.following` / `Page.followers`
 /// two users per page (so even a short list spans pages), the Viewer lookup
-/// behind login, Pull's own (empty) lists and Discover. As recorded live,
+/// behind login, Pull's own (empty) lists, Discover, and Pick an anime's pages
+/// (a pool of three; held with Discover's switch). As recorded live,
 /// `isFollower` is relative to whoever the token says is asking, and false
 /// for everyone when nobody is.
 async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
@@ -1409,6 +1410,9 @@ async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                 });
+            }
+            if q.contains(": Page(page: ") {
+                return pool_reply(3, q, v);
             }
             return (200, json!({"data": {"Page": {"media": []}}}), None);
         }
@@ -3500,4 +3504,57 @@ async fn page_one_in_hand_is_still_tried_after_the_requests_run_out() {
     let (s, body) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.75}))).await;
     assert_eq!((s, body["requests"].as_u64(), lookups(&fake)), (200, Some(4), vec![98]));
     assert!((1..=50).contains(&body["result"]["anilist_id"].as_i64().unwrap_or(0)), "page 1 costs nothing to try: {body}");
+}
+
+// ------------------------------------ pick an anime and the friend-list queue (FR-80) ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pick_in_flight_holds_the_friend_list_queue_back() {
+    let graph = follows(&[100, 101], &[]);
+    let fake = follow_anilist(graph.clone()).await;
+    let st = state_with(&fake);
+    login(&st);
+    call(&st, "POST", "/friends/sync", None).await;
+
+    // The pick's request is held: while it runs, the queue's turn does nothing.
+    graph.lock().unwrap().hold_discover = true;
+    let pick = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await }
+    });
+    wait_for(|| !st.anilist.is_quiet()).await;
+    assert!(!st.anilist.is_quiet());
+    let before = fake.calls().len();
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), None);
+    assert_eq!(fake.calls().len(), before);
+
+    graph.lock().unwrap().hold_discover = false;
+    let (s, picked) = pick.await.unwrap();
+    assert_eq!((s, picked["requests"].as_u64()), (200, Some(1)));
+    assert!((1000..1003).contains(&picked["result"]["anilist_id"].as_i64().unwrap()), "{picked}");
+    // Pick done: the queue takes its turn.
+    assert!(st.anilist.is_quiet());
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), Some(100));
+}
+
+#[tokio::test]
+async fn a_429_during_a_pick_pauses_the_friend_list_queue() {
+    let graph = follows(&[100], &[]);
+    let fake = follow_anilist(graph.clone()).await;
+    let st = state_with(&fake);
+    login(&st);
+    call(&st, "POST", "/friends/sync", None).await;
+    assert!(st.anilist.is_quiet());
+
+    // The pick's first request gets a 429; its retry, the second of its 4, gets through.
+    graph.lock().unwrap().throttle_next = true;
+    let (s, picked) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    assert_eq!((s, picked["requests"].as_u64()), (200, Some(2)));
+    assert!((1000..1003).contains(&picked["result"]["anilist_id"].as_i64().unwrap()), "{picked}");
+
+    // AniList asked the whole app to slow down, so the queue stays off after the pick.
+    assert!(!st.anilist.is_quiet());
+    let before = fake.calls().len();
+    assert_eq!(sync::friend_queue_step(&st).await.unwrap(), None);
+    assert_eq!(fake.calls().len(), before);
 }
