@@ -1,5 +1,6 @@
-//! FR-50: TTL cache for Discover/Feed. Port of cache.py. A second instance
-//! holds Pick an anime's genre/tag lists (FR-84).
+//! FR-50: TTL cache for Discover/Feed, and Pick an anime's genre/tag lists
+//! (FR-84). Port of cache.py. Each entry keeps the TTL it was stored with, so
+//! Feed's 60 s, Discover's 10 minutes and the pick lists' 24 hours share one.
 //!
 //! Not used for Favorites (FR-40: "not cached") or any Library/sync data. It
 //! exists purely to keep Discover/Feed tab-switching inside AniList's rate limit.
@@ -13,6 +14,7 @@ use serde_json::Value;
 
 #[derive(Default)]
 pub struct TtlCache {
+    /// key -> (expires at, value)
     store: Mutex<HashMap<String, (Instant, Value)>>,
 }
 
@@ -22,16 +24,17 @@ impl TtlCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Value, E>>,
     {
-        if let Some((at, value)) = self.lock().get(key) {
-            if at.elapsed() < ttl {
+        if let Some((expires, value)) = self.lock().get(key) {
+            if Instant::now() < *expires {
                 return Ok(value.clone());
             }
         }
         let value = fetch().await?;
         let mut store = self.lock();
         // Drop expired entries so the cache can't grow without bound.
-        store.retain(|_, (at, _)| at.elapsed() < ttl);
-        store.insert(key.to_string(), (Instant::now(), value.clone()));
+        let now = Instant::now();
+        store.retain(|_, (expires, _)| now < *expires);
+        store.insert(key.to_string(), (now + ttl, value.clone()));
         Ok(value)
     }
 

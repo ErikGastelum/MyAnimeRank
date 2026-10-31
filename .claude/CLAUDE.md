@@ -40,9 +40,10 @@ src-tauri/
   src/api.rs              every API route (same paths/JSON as PRD §7), auth gate
   src/db.rs               schema, queries, rating math, sync helpers
   src/anilist.rs          ALL GraphQL operations, via one graphql() helper
+  src/limiter.rs          the one AniList request budget (FR-86), by priority
   src/sync.rs             Pull, push, conflict handling, retry queue, friend sync + list queue
   src/oauth.rs            one-shot OAuth callback listener on fixed port 8931
-  src/cache.rs            TTL cache for Discover/Feed only
+  src/cache.rs            TTL cache for Discover/Feed and the pick lists only
   src/config.rs           AniList client ID (built in; optional overrides)
   tests/backend.rs        integration tests: in-memory DB, fake AniList server
   tauri.conf.json, capabilities/, icons/

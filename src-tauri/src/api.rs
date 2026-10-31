@@ -22,13 +22,17 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::anilist::{self, AlError, FriendLookup, PickCheck, PickFilters, PickPool, PickSize, PICK_DEPTH};
+use crate::anilist::{self, AlError, FriendLookup, PickCheck, PickFilters, PickPool, PickSize, PICK_BUDGET, PICK_DEPTH};
 use crate::db::{self, AnchorError, Auth, MediaFields, Scores};
+use crate::limiter::Priority;
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
 
 const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
-const CACHE_TTL: Duration = Duration::from_secs(60);
+/// FR-50: Discover shelves change slowly, so switching Anime/Manga or
+/// coming back to the tab refetches nothing for 10 minutes; Feed moves faster.
+pub const DISCOVER_TTL: Duration = Duration::from_secs(10 * 60);
+const FEED_TTL: Duration = Duration::from_secs(60);
 /// FR-84: AniList's genre and tag lists barely change.
 const PICK_OPTIONS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -228,6 +232,7 @@ pub fn router(st: Shared) -> Router {
         .route("/media/by-anilist/{id}/friend-scores", get(media_friend_scores))
         .route("/pick/options", get(pick_options))
         .route("/pick", post(pick))
+        .route("/debug/rate-limit", get(debug_rate_limit))
         // FR-47: nothing below is usable without a stored token.
         .route_layer(middleware::from_fn_with_state(st.clone(), require_auth));
 
@@ -434,7 +439,7 @@ async fn sync_resolve(State(st): State<Shared>, Id(id): Id, Body(body): Body<Res
 }
 
 async fn sync_push(State(st): State<Shared>, Id(id): Id) -> ApiResult {
-    match sync::push_now(&st, id, None).await {
+    match sync::push_now(&st, id, None, Priority::Interactive).await {
         Ok(v) => ok(v),
         Err(SyncError::NotFound(m)) => Err(ApiError::new(404, m)),
         Err(e) => Err(ApiError::new(502, format!("push failed, queued for retry: {e}"))),
@@ -455,7 +460,7 @@ async fn get_discover(State(st): State<Shared>, q: Params) -> ApiResult {
     let key = format!("discover:{section}:{media_type}");
     let results = st
         .cache
-        .get_or_fetch(&key, CACHE_TTL, || async { st.anilist.discover(section, media_type).await.map(|r| to_json(&r)) })
+        .get_or_fetch(&key, DISCOVER_TTL, || async { st.anilist.at(Priority::Normal).discover(section, media_type).await.map(|r| to_json(&r)) })
         .await?;
     // FR-33: annotate with local_status from the library, null if not imported.
     let mut annotated = Vec::new();
@@ -476,7 +481,7 @@ async fn get_feed(State(st): State<Shared>, Extension(auth): Extension<Auth>, q:
     let key = format!("feed:{feed_type}:{page}");
     let value = st
         .cache
-        .get_or_fetch(&key, CACHE_TTL, || st.anilist.feed(feed_type, page, auth.anilist_user_id, &auth.access_token))
+        .get_or_fetch(&key, FEED_TTL, || async { st.anilist.at(Priority::Normal).feed(feed_type, page, auth.anilist_user_id, &auth.access_token).await })
         .await?;
     ok(value)
 }
@@ -671,7 +676,7 @@ async fn friends_refresh(State(st): State<Shared>, Extension(auth): Extension<Au
 /// The lists are stored only once the whole fetch succeeded, so a failed
 /// refresh keeps the previous copy and its fetched_at (FR-73).
 async fn fetched_friend(st: &Shared, auth: &Auth, name: &str, id: Option<i64>) -> ApiResult {
-    match sync::fetch_friend(st, name, id).await? {
+    match sync::fetch_friend(st, name, id, Priority::Interactive).await? {
         FriendLookup::Found(list) if list.anilist_user_id == auth.anilist_user_id => Err(ApiError::new(400, OWN_ACCOUNT)),
         FriendLookup::Found(list) => found(st.db.get_friend(list.anilist_user_id)?.map(|f| to_json(&f)), "friend"),
         FriendLookup::NoSuchUser => Err(ApiError::new(404, format!("No AniList user named {name}"))),
@@ -710,7 +715,7 @@ async fn friends_compare(State(st): State<Shared>, Id(id): Id, q: Params) -> Api
     let refused = if friend.list_status == "private" {
         Some(private_list(&friend.name))
     } else if db::friend_list_is_stale(friend.fetched_at.as_deref()) {
-        match sync::fetch_friend(&st, &friend.name, Some(id)).await {
+        match sync::fetch_friend(&st, &friend.name, Some(id), Priority::Interactive).await {
             Ok(FriendLookup::Found(_)) => None,
             Ok(FriendLookup::Private(name)) => Some(private_list(&name)),
             Ok(FriendLookup::NoSuchUser) => Some(ApiError::new(404, format!("No AniList user named {}", friend.name))),
@@ -733,7 +738,7 @@ async fn media_friend_scores(State(st): State<Shared>, Id(anilist_id): Id) -> Ap
 // ------------------------------------------------------------ pick (FR-84) ----
 
 async fn pick_options(State(st): State<Shared>) -> ApiResult {
-    ok(st.pick_cache.get_or_fetch("pick:options", PICK_OPTIONS_TTL, || st.anilist.pick_options()).await?)
+    ok(st.cache.get_or_fetch("pick:options", PICK_OPTIONS_TTL, || st.anilist.pick_options()).await?)
 }
 
 #[derive(Deserialize)]
@@ -796,8 +801,14 @@ fn validate_pick(p: &PickIn) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn millis(d: Duration) -> u64 {
+    d.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
 /// FR-84. Anime only, from either source; nothing here writes anything.
-async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
+/// FR-86: a pick starts only when all PICK_BUDGET of its requests could go
+/// now, and every answer says how long until the next one could.
+async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> Result<Response, ApiError> {
     validate_pick(&body)?;
     let shown: HashSet<i64> = body.exclude.iter().copied().collect();
     let library = st.db.get_library(Some("anime"), None, "overall")?;
@@ -806,7 +817,8 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         let left: Vec<i64> = planning.iter().copied().filter(|id| !shown.contains(id)).collect();
         if left.is_empty() {
             // No AniList call: there's nothing to ask about.
-            return ok(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null, "next_up_for": null, "blocked": false, "requests": 0}));
+            let wait_ms = millis(st.anilist.limiter().wait_for(PICK_BUDGET));
+            return Ok(Json(json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": !planning.is_empty(), "size": null, "next_up_for": null, "blocked": false, "requests": 0, "wait_ms": wait_ms})).into_response());
         }
         PickPool::Only(left)
     } else {
@@ -823,13 +835,28 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         watched: library.iter().filter(|m| matches!(m.status.as_str(), "completed" | "rewatching")).map(|m| m.fields.anilist_id).collect(),
         shown: shown.clone(),
     });
+    let wait = st.anilist.limiter().wait_for(PICK_BUDGET);
+    if !wait.is_zero() {
+        let detail = "Waiting so AniList's request limit isn't exceeded";
+        let retry_after = [(axum::http::header::RETRY_AFTER, wait.as_secs_f64().ceil().to_string())];
+        return Ok((StatusCode::TOO_MANY_REQUESTS, retry_after, Json(json!({"detail": detail, "wait_ms": millis(wait)}))).into_response());
+    }
     let picked = st.anilist.pick(&body.filters, &pool, body.roll, known, check.as_ref()).await?;
     // Nothing, with titles already shown: the client clears `exclude` and
     // tries once more, which tells "seen them all" from "nothing usable".
     let exhausted = picked.result.is_none() && !shown.is_empty();
     let size = picked.size.map(|s| json!({"lo": s.lo, "hi": s.hi, "shown": body.exclude.len()}));
-    ok(json!({
+    Ok(Json(json!({
         "result": picked.result, "pool": picked.pool, "pool_exact": picked.pool_exact, "exhausted": exhausted,
         "size": size, "next_up_for": picked.next_up_for, "blocked": picked.blocked, "requests": picked.requests,
+        "wait_ms": millis(st.anilist.limiter().wait_for(PICK_BUDGET)),
     }))
+    .into_response())
+}
+
+// -------------------------------------------------------- debug (FR-86) ----
+
+/// The shared AniList limiter's state, for testing. Read-only.
+async fn debug_rate_limit(State(st): State<Shared>) -> ApiResult {
+    ok(st.anilist.limiter().snapshot())
 }

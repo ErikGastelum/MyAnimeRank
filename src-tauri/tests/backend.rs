@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use myanimerank_lib::anilist::{self, AlError, AniList, EntryState};
 use myanimerank_lib::config::{self, Config};
 use myanimerank_lib::db::{self, Db, FriendEntry, FriendList, MediaFields, Scores, SyncOutcome};
+use myanimerank_lib::limiter::{self, Priority};
 use myanimerank_lib::{api, oauth, sync, AppState, Shared};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -19,8 +20,10 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------- fake AniList ----
 
 type Reply = (u16, Value, Option<&'static str>);
+/// A reply with any response headers, not just Retry-After.
+type FullReply = (u16, Value, Vec<(&'static str, String)>);
 /// (query, variables, Authorization header) -> reply.
-type Handler = Arc<dyn Fn(&str, &Value, Option<&str>) -> Reply + Send + Sync>;
+type Handler = Arc<dyn Fn(&str, &Value, Option<&str>) -> FullReply + Send + Sync>;
 
 struct Fake {
     url: String,
@@ -53,6 +56,16 @@ async fn fake_anilist(handler: impl Fn(&str, &Value) -> Reply + Send + Sync + 's
 /// `fake_anilist` for a handler that answers by who's asking, as AniList
 /// does for viewer-relative fields like `isFollower`.
 async fn fake_anilist_seeing_auth(handler: impl Fn(&str, &Value, Option<&str>) -> Reply + Send + Sync + 'static) -> Fake {
+    fake_anilist_with_headers(move |q, v, auth| {
+        let (status, body, retry_after) = handler(q, v, auth);
+        (status, body, retry_after.map(|ra| vec![("Retry-After", ra.to_string())]).unwrap_or_default())
+    })
+    .await
+}
+
+/// `fake_anilist_seeing_auth` for a handler that sets its own response
+/// headers, like AniList's X-RateLimit-* ones.
+async fn fake_anilist_with_headers(handler: impl Fn(&str, &Value, Option<&str>) -> FullReply + Send + Sync + 'static) -> Fake {
     let handler: Handler = Arc::new(handler);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let auths = Arc::new(Mutex::new(Vec::new()));
@@ -71,10 +84,10 @@ async fn fake_anilist_seeing_auth(handler: impl Fn(&str, &Value, Option<&str>) -
             let query = body["query"].as_str().unwrap_or_default().to_string();
             let vars = body["variables"].clone();
             calls.lock().unwrap().push((query.clone(), vars.clone()));
-            let (status, json, retry_after) = handler(&query, &vars, auth.as_deref());
+            let (status, json, headers) = handler(&query, &vars, auth.as_deref());
             let mut resp = (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(json)).into_response();
-            if let Some(ra) = retry_after {
-                resp.headers_mut().insert("Retry-After", ra.parse().unwrap());
+            for (name, value) in headers {
+                resp.headers_mut().insert(name, value.parse().unwrap());
             }
             resp
         }
@@ -1049,7 +1062,7 @@ async fn guarded_push_sends_a_clean_local_change_in_two_requests() {
     let id = synced_then_edited(&st, 9);
     st.db.upsert_rating(id, &scores(7.5)).unwrap();
 
-    let out = sync::push_now_guarded(&st, id).await.unwrap();
+    let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
     assert_eq!(out["score_format_drift"], false);
     assert_eq!(
         fake.calls_containing("SaveMediaListEntry"),
@@ -1078,7 +1091,7 @@ async fn guarded_push_creates_the_entry_when_not_on_the_list_and_never_sends_a_n
     login(&st);
     let id = st.db.insert_or_update_media(&fields(9, "anime"), Some("watching")).unwrap();
 
-    let out = sync::push_now_guarded(&st, id).await.unwrap();
+    let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
     assert_eq!(out["score_format_drift"], false);
     let saves = fake.calls_containing("SaveMediaListEntry");
     assert_eq!(saves.len(), 1);
@@ -1108,7 +1121,7 @@ async fn guarded_push_refuses_on_conflict_and_never_writes_to_anilist() {
     st.db.update_status(id, "paused").unwrap();
     st.push_queue.lock().unwrap().insert(id);
 
-    let out = sync::push_now_guarded(&st, id).await.unwrap();
+    let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
     assert_eq!(out["conflict"], true);
     assert!(fake.calls_containing("SaveMediaListEntry").is_empty());
     assert!(st.db.get_media_by_id(id).unwrap().unwrap().pending_conflict);
@@ -1125,7 +1138,7 @@ async fn guarded_push_rechecks_score_format_from_the_entry_lookup() {
     login(&st);
     let id = synced_then_edited(&st, 9);
 
-    let out = sync::push_now_guarded(&st, id).await.unwrap();
+    let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
     assert_eq!(out, json!({"synced_at": null, "score_format_drift": true}));
     assert!(fake.calls_containing("SaveMediaListEntry").is_empty());
     assert_eq!(st.db.get_auth().unwrap().unwrap().score_format.as_deref(), Some("POINT_100"));
@@ -1155,7 +1168,7 @@ async fn offline_push_is_queued_for_retry() {
     let st = offline_state().await;
     login(&st);
     let id = st.db.insert_or_update_media(&fields(9, "anime"), None).unwrap();
-    assert!(sync::push_now_guarded(&st, id).await.is_err());
+    assert!(sync::push_now_guarded(&st, id, Priority::Interactive).await.is_err());
     assert!(st.push_queue.lock().unwrap().contains(&id));
 }
 
@@ -1387,7 +1400,11 @@ struct Follows {
 /// `isFollower` is relative to whoever the token says is asking, and false
 /// for everyone when nobody is.
 async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
-    fake_anilist_seeing_auth(move |q, v, auth| {
+    fake_anilist_seeing_auth(move |q, v, auth| follow_reply(&graph, q, v, auth)).await
+}
+
+fn follow_reply(graph: &Mutex<Follows>, q: &str, v: &Value, auth: Option<&str>) -> Reply {
+    {
         let mut g = graph.lock().unwrap();
         if std::mem::take(&mut g.throttle_next) {
             return (429, json!({}), Some("0.01"));
@@ -1451,8 +1468,7 @@ async fn follow_anilist(graph: Arc<Mutex<Follows>>) -> Fake {
         }
         drop(g);
         friend_reply(q, v, false)
-    })
-    .await
+    }
 }
 
 #[test]
@@ -2422,7 +2438,7 @@ async fn a_comparison_or_refresh_during_a_friends_fetch_reuses_it_instead_of_fet
     st.db.replace_friend_list(&friend_list(42, "Pal", vec![]), "2026-01-01T00:00:00+00:00").unwrap();
     let dropped = tokio::spawn({
         let st = st.clone();
-        async move { sync::fetch_friend(&st, "Pal", Some(42)).await.map(|_| ()) }
+        async move { sync::fetch_friend(&st, "Pal", Some(42), Priority::Background).await.map(|_| ()) }
     });
     wait_for(|| fake.calls_containing("anime:").len() == 2).await;
     let waiting = tokio::spawn({
@@ -2922,11 +2938,11 @@ async fn an_empty_planning_pool_answers_without_calling_anilist() {
     // Planning manga and a Watching anime: no Planning anime at all.
     st.db.insert_or_update_media(&fields(7, "manga"), Some("planning")).unwrap();
     st.db.insert_or_update_media(&fields(4, "anime"), Some("watching")).unwrap();
-    let nothing = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": false, "size": null, "next_up_for": null, "blocked": false, "requests": 0});
+    let nothing = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": false, "size": null, "next_up_for": null, "blocked": false, "requests": 0, "wait_ms": 0});
     assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5}))).await, (200, nothing));
     // Every Planning anime already shown: exhausted, still no call.
     st.db.insert_or_update_media(&fields(1, "anime"), Some("planning")).unwrap();
-    let used_up = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": true, "size": null, "next_up_for": null, "blocked": false, "requests": 0});
+    let used_up = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": true, "size": null, "next_up_for": null, "blocked": false, "requests": 0, "wait_ms": 0});
     assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5, "exclude": [1]}))).await, (200, used_up));
     assert!(fake.calls().is_empty());
 }
@@ -2938,7 +2954,7 @@ async fn an_empty_pick_says_whether_the_shown_titles_used_up_the_pool() {
     login(&st);
     for (exclude, exhausted) in [(json!([5]), true), (json!([]), false)] {
         let body = json!({"source": "not_planning", "roll": 0.5, "exclude": exclude});
-        let want = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": exhausted, "size": null, "next_up_for": null, "blocked": false, "requests": 1});
+        let want = json!({"result": null, "pool": 0, "pool_exact": true, "exhausted": exhausted, "size": null, "next_up_for": null, "blocked": false, "requests": 1, "wait_ms": 0});
         assert_eq!(call(&st, "POST", "/pick", Some(body)).await, (200, want));
     }
 }
@@ -3557,4 +3573,453 @@ async fn a_429_during_a_pick_pauses_the_friend_list_queue() {
     let before = fake.calls().len();
     assert_eq!(sync::friend_queue_step(&st).await.unwrap(), None);
     assert_eq!(fake.calls().len(), before);
+}
+
+// ------------------------------------------- the shared AniList limiter (FR-86) ----
+
+/// A logged-in state whose limiter counts over `window` instead of a minute,
+/// so a test sees it slide; the budget and each priority's share are the real ones.
+fn state_windowed(fake: &Fake, window: Duration) -> Shared {
+    let st = AppState::new(Db::open_in_memory().unwrap(), AniList::with_window(&fake.url, window), Config { client_id: "1".into() });
+    login(&st);
+    st
+}
+
+/// Answers every query these tests send with nothing in it: searches,
+/// Discover, Pull's lists, a following page.
+async fn empty_anilist() -> Fake {
+    fake_anilist(|_, _| (200, json!({"data": {"Page": {"media": [], "studios": []}, "MediaListCollection": {"lists": []}}}), None)).await
+}
+
+/// One request at `al`'s priority, told apart by its search text `tag`.
+fn send(al: &AniList, tag: &str) -> tokio::task::JoinHandle<()> {
+    let (al, tag) = (al.clone(), tag.to_string());
+    tokio::spawn(async move {
+        al.search_studios(&tag).await.unwrap();
+    })
+}
+
+/// Sends `n` requests one after another, `gap` apart.
+async fn fill(al: &AniList, n: usize, gap: Duration) {
+    for i in 0..n {
+        send(al, &format!("fill{i}")).await.unwrap();
+        tokio::time::sleep(gap).await;
+    }
+}
+
+/// The search texts of the requests from `from` on, in the order they arrived.
+fn tags(fake: &Fake, from: usize) -> Vec<String> {
+    fake.calls()[from..].iter().map(|(_, v)| v["q"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+/// The most requests that arrived within any `span`.
+fn busiest(times: &[Instant], span: Duration) -> usize {
+    let mut times = times.to_vec();
+    times.sort();
+    (0..times.len()).map(|i| times[i..].iter().take_while(|t| **t - times[i] < span).count()).max().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn the_budget_stays_under_anilists_thirty_and_each_priority_stops_at_its_share() {
+    assert_eq!(limiter::ANILIST_LIMIT, 30);
+    const { assert!(limiter::BUDGET < limiter::ANILIST_LIMIT, "the budget must leave AniList's limit some margin") };
+    assert!(limiter::WINDOW >= Duration::from_secs(60));
+    // A normal request always leaves room for one worst-case pick (FR-84).
+    const { assert!(limiter::NORMAL_RESERVE >= anilist::PICK_BUDGET) };
+    assert!(Priority::Interactive > Priority::Normal && Priority::Normal > Priority::Background);
+    assert_eq!((Priority::Interactive.share(), Priority::Normal.share(), Priority::Background.share()), (27, 23, 19));
+
+    // 40 at once, at each priority: exactly its share goes out within the window.
+    for (priority, share) in [(Priority::Interactive, 27), (Priority::Normal, 23), (Priority::Background, 19)] {
+        let fake = empty_anilist().await;
+        let al = AniList::with_url(&fake.url).at(priority);
+        let all: Vec<_> = (0..40).map(|i| send(&al, &format!("r{i}"))).collect();
+        wait_for(|| fake.calls().len() >= share).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(fake.calls().len(), share, "{priority:?}");
+        let snap = al.limiter().snapshot();
+        assert_eq!((snap["used"].as_u64(), snap["remaining"].as_u64()), (Some(share as u64), Some(27 - share as u64)), "{snap}");
+        all.iter().for_each(|h| h.abort());
+    }
+}
+
+#[tokio::test]
+async fn interactive_requests_go_ahead_of_queued_normal_and_background_ones() {
+    let fake = empty_anilist().await;
+    let window = Duration::from_millis(1600);
+    let al = AniList::with_window(&fake.url, window);
+    // A full window, sent 40 ms apart so its slots free one at a time.
+    fill(&al, 27, Duration::from_millis(40)).await;
+    // Background work queues first, then normal, then a click.
+    let mut queued = Vec::new();
+    for (priority, tag) in [(Priority::Background, "bg1"), (Priority::Background, "bg2"), (Priority::Normal, "n1"), (Priority::Normal, "n2"), (Priority::Interactive, "click")] {
+        queued.push(send(&al.at(priority), tag));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let snap = al.limiter().snapshot();
+    assert_eq!(snap["queued"], json!({"interactive": 1, "normal": 2, "background": 2}), "{snap}");
+    assert_eq!(fake.calls().len(), 27);
+    for h in queued {
+        h.await.unwrap();
+    }
+    assert_eq!(tags(&fake, 27), ["click", "n1", "n2", "bg1", "bg2"]);
+    let times = fake.times();
+    assert!(times[27] - times[0] >= window - Duration::from_millis(50), "nothing went out before the window slid");
+}
+
+#[tokio::test]
+async fn raising_a_waiting_background_request_sends_it_at_once() {
+    // FR-81: a comparison joining the queue's fetch raises it.
+    let fake = empty_anilist().await;
+    let al = AniList::with_url(&fake.url);
+    fill(&al, 19, Duration::ZERO).await;
+    let queue_fetch = al.at(Priority::Background);
+    let waiting = send(&queue_fetch, "friend");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fake.calls().len(), 19, "no spare budget for background work");
+    al.limiter().raise(queue_fetch.lane(), Priority::Interactive);
+    waiting.await.unwrap();
+    assert_eq!(tags(&fake, 19), ["friend"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_request_waits_while_higher_priority_work_is_in_flight() {
+    // "slow" takes 400 ms to answer; budget is plentiful throughout.
+    let fake = fake_anilist(|_, v| {
+        if v["q"] == "slow" {
+            tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(400)));
+        }
+        (200, json!({"data": {"Page": {"studios": []}}}), None)
+    })
+    .await;
+    let al = AniList::with_url(&fake.url);
+    let slow = send(&al.at(Priority::Normal), "slow");
+    wait_for(|| fake.calls().len() == 1).await;
+    let background = send(&al.at(Priority::Background), "bg");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fake.calls().len(), 1, "background went while a normal request was out");
+    assert_eq!(al.limiter().snapshot()["queued"]["background"], json!(1));
+    slow.await.unwrap();
+    background.await.unwrap();
+    assert_eq!(tags(&fake, 0), ["slow", "bg"]);
+}
+
+#[tokio::test]
+async fn a_429_pauses_every_request_and_they_resume_highest_priority_first() {
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fake = fake_anilist(move |_, v| {
+        if v["q"] == "unlucky" && first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return (429, json!({"errors": [{"message": "Too Many Requests.", "status": 429}]}), Some("0.5"));
+        }
+        (200, json!({"data": {"Page": {"studios": []}}}), None)
+    })
+    .await;
+    let window = Duration::from_millis(1500);
+    let al = AniList::with_window(&fake.url, window);
+    // Background work is already waiting behind a normal request in flight.
+    let unlucky = send(&al.at(Priority::Normal), "unlucky");
+    wait_for(|| fake.calls().len() == 1).await;
+    let mut queued = Vec::new();
+    for (priority, tag) in [(Priority::Background, "bg"), (Priority::Normal, "normal"), (Priority::Interactive, "click")] {
+        queued.push(send(&al.at(priority), tag));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert!(al.limiter().snapshot()["paused_ms"].as_u64().unwrap() > 300);
+    unlucky.await.unwrap();
+    for h in queued {
+        h.await.unwrap();
+    }
+    let times = fake.times();
+    let order = tags(&fake, 1);
+    // Nothing at all while paused; then the click first, background last
+    // (and only once a window has passed since the 429, FR-80).
+    assert!(times[1] - times[0] >= Duration::from_millis(480), "sent {:?} into the pause", times[1] - times[0]);
+    assert_eq!(order[0], "click", "{order:?}");
+    assert_eq!(order[3], "bg", "{order:?}");
+    assert!(times[4] - times[0] >= window - Duration::from_millis(50));
+    // The 429'd request was retried once (it's normal, not background).
+    assert_eq!(order.iter().filter(|t| *t == "unlucky").count(), 1);
+}
+
+#[tokio::test]
+async fn a_long_retry_after_fails_fast_for_everyone_instead_of_waiting() {
+    let fake = fake_anilist(|_, v| {
+        if v["q"] == "first" {
+            return (429, json!({}), Some("120"));
+        }
+        (200, json!({"data": {"Page": {"studios": []}}}), None)
+    })
+    .await;
+    let al = AniList::with_url(&fake.url);
+    assert!(al.search_studios("first").await.unwrap_err().is_network());
+    let started = Instant::now();
+    // Any priority: refused at once, without sending.
+    for priority in [Priority::Interactive, Priority::Normal, Priority::Background] {
+        assert!(al.at(priority).search_studios("later").await.unwrap_err().is_network());
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(fake.calls().len(), 1);
+    assert!(!al.is_quiet());
+}
+
+#[tokio::test]
+async fn the_limiter_slows_down_when_anilist_has_counted_more_than_it_has() {
+    // AniList says only 5 are left on the first answer (another client, an
+    // earlier run), one fewer on each after.
+    for with_headers in [true, false] {
+        let seen = Arc::new(Mutex::new(0usize));
+        let fake = fake_anilist_with_headers(move |_, _, _| {
+            let mut n = seen.lock().unwrap();
+            *n += 1;
+            let headers = if with_headers {
+                vec![("X-RateLimit-Limit", "30".to_string()), ("X-RateLimit-Remaining", (5usize.saturating_sub(*n - 1)).to_string())]
+            } else {
+                vec![]
+            };
+            (200, json!({"data": {"Page": {"studios": []}}}), headers)
+        })
+        .await;
+        let window = Duration::from_millis(1200);
+        let al = AniList::with_window(&fake.url, window);
+        for i in 0..4 {
+            al.search_studios(&format!("r{i}")).await.unwrap();
+        }
+        let t = fake.times();
+        // 25 counted after the first answer: two more fit under 27, the
+        // fourth waits for the window to slide.
+        assert!(t[2] - t[0] < Duration::from_millis(400), "with_headers {with_headers}");
+        if with_headers {
+            assert!(t[3] - t[0] >= window - Duration::from_millis(50), "the fourth went after {:?}", t[3] - t[0]);
+            assert_eq!(al.limiter().snapshot()["anilist_remaining"], json!(2));
+        } else {
+            assert!(t[3] - t[0] < Duration::from_millis(400));
+            assert_eq!(al.limiter().snapshot()["anilist_remaining"], Value::Null);
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_push_retry_loop_stops_at_a_429_and_when_there_is_no_spare_budget() {
+    // Every request is a 429: the first retry gets one, isn't retried
+    // (background), and the round stops there.
+    let fake = fake_anilist(|_, _| (429, json!({}), Some("0.05"))).await;
+    let st = state_windowed(&fake, Duration::from_secs(1));
+    let ids: Vec<i64> = (20..23).map(|anilist_id| synced_then_edited(&st, anilist_id)).collect();
+    st.push_queue.lock().unwrap().extend(&ids);
+    assert_eq!(sync::retry_pushes(&st, Duration::from_millis(10)).await, 1);
+    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(st.push_queue.lock().unwrap().iter().copied().collect::<Vec<_>>(), ids);
+
+    // AniList answers, but the last minute leaves background work nothing.
+    let fake = fake_anilist(|q, _| if q.contains("MediaList(userId") { on_list("POINT_10_DECIMAL", 1_700_000_000) } else { save_ok() }).await;
+    let window = Duration::from_millis(1000);
+    let st = state_windowed(&fake, window);
+    let ids: Vec<i64> = (20..23).map(|anilist_id| synced_then_edited(&st, anilist_id)).collect();
+    st.push_queue.lock().unwrap().extend(&ids);
+    fill(&st.anilist, 18, Duration::ZERO).await;
+    assert_eq!(sync::retry_pushes(&st, Duration::from_millis(10)).await, 0);
+    assert_eq!(fake.calls().len(), 18);
+
+    // Once it slides, one round retries every title, spaced, two requests each.
+    tokio::time::sleep(window).await;
+    let spacing = Duration::from_millis(150);
+    assert_eq!(sync::retry_pushes(&st, spacing).await, 3);
+    assert_eq!(fake.calls_containing("SaveMediaListEntry").len(), 3);
+    assert_eq!(fake.calls().len(), 18 + 6);
+    let t = fake.times();
+    assert!(t[20] - t[19] >= spacing && t[22] - t[21] >= spacing, "retries {:?} and {:?} apart", t[20] - t[19], t[22] - t[21]);
+    assert!(st.push_queue.lock().unwrap().is_empty());
+}
+
+const SHELVES: [&str; 6] = ["trending", "current_season", "upcoming_season", "top_ranked", "top_ranked_movies", "popular"];
+
+#[tokio::test]
+async fn discover_shelves_are_cached_ten_minutes_so_switching_anime_and_manga_refetches_nothing() {
+    assert!(api::DISCOVER_TTL >= Duration::from_secs(10 * 60));
+    let fake = empty_anilist().await;
+    let st = state_with(&fake);
+    login(&st);
+    for _ in 0..3 {
+        for media_type in ["anime", "manga"] {
+            for section in SHELVES {
+                let (s, b) = call(&st, "GET", &format!("/discover?section={section}&media_type={media_type}"), None).await;
+                assert_eq!((s, &b["count"]), (200, &json!(0)));
+            }
+        }
+    }
+    assert_eq!(fake.calls().len(), 12);
+    // A feed entry stored meanwhile (60 s) doesn't evict the shelves.
+    call(&st, "GET", "/feed?type=global", None).await;
+    call(&st, "GET", "/discover?section=trending&media_type=anime", None).await;
+    assert_eq!(fake.calls().len(), 13);
+}
+
+#[tokio::test]
+async fn discover_and_pull_wait_at_normal_priority_while_a_search_goes() {
+    let fake = empty_anilist().await;
+    let window = Duration::from_millis(1500);
+    let st = state_windowed(&fake, window);
+    fill(&st.anilist, 23, Duration::ZERO).await;
+    let shelf = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "GET", "/discover?section=trending&media_type=anime", None).await.0 }
+    });
+    let pull = tokio::spawn({
+        let st = st.clone();
+        async move { call(&st, "POST", "/sync/pull", None).await.0 }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(st.anilist.limiter().snapshot()["queued"]["normal"], json!(2));
+    let started = Instant::now();
+    assert_eq!(call(&st, "GET", "/search?q=x&type=anime", None).await.0, 200);
+    assert!(started.elapsed() < Duration::from_millis(500), "the search waited behind normal work");
+    assert_eq!(fake.calls().len(), 24);
+    assert_eq!((shelf.await.unwrap(), pull.await.unwrap()), (200, 200));
+    assert!(fake.times()[24] - fake.times()[0] >= window - Duration::from_millis(50));
+}
+
+#[tokio::test]
+async fn a_pick_that_cant_send_its_four_requests_now_answers_with_the_wait_and_sends_nothing() {
+    let fake = fake_anilist(|q, v| pool_reply(1000, q, v)).await;
+    let window = Duration::from_millis(1500);
+    let st = state_windowed(&fake, window);
+    fill(&st.anilist, 24, Duration::ZERO).await;
+
+    let (s, b) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    assert_eq!(s, 429, "{b}");
+    let wait = b["wait_ms"].as_u64().unwrap();
+    assert!((1..=1500).contains(&wait), "{b}");
+    assert_eq!(fake.calls().len(), 24);
+
+    tokio::time::sleep(Duration::from_millis(wait)).await;
+    let (s, b) = call(&st, "POST", "/pick", Some(json!({"source": "not_planning", "roll": 0.5}))).await;
+    assert_eq!(s, 200, "{b}");
+    let requests = b["requests"].as_u64().unwrap();
+    assert!((1..=anilist::PICK_BUDGET as u64).contains(&requests), "{b}");
+    assert_eq!(fake.calls().len() as u64, 24 + requests);
+    assert!(b["wait_ms"].is_u64(), "{b}");
+    assert!(b["result"]["anilist_id"].is_i64(), "{b}");
+}
+
+#[tokio::test]
+async fn the_debug_endpoint_reports_the_limiters_state_behind_the_login_gate() {
+    let fake = empty_anilist().await;
+    let st = state_with(&fake);
+    assert_eq!(call(&st, "GET", "/debug/rate-limit", None).await.0, 401);
+    login(&st);
+    fill(&st.anilist, 3, Duration::ZERO).await;
+    let (s, b) = call(&st, "GET", "/debug/rate-limit", None).await;
+    assert_eq!(s, 200);
+    let idle = json!({"interactive": 0, "normal": 0, "background": 0});
+    assert_eq!(
+        b,
+        json!({"budget": 27, "window_seconds": 60.0, "used": 3, "remaining": 24, "queued": idle, "in_flight": idle,
+               "paused_ms": 0, "background_paused_ms": 0, "anilist_remaining": null, "sent": 3})
+    );
+}
+
+/// Everything at once, through the routes, on a window scaled down from a
+/// minute: startup Pull and its friend sync, the friend-list queue, rapid
+/// picks, Discover on both media types, searches, comparisons, ratings and
+/// push retries. In no window does more than the budget arrive at AniList.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_whole_app_stays_within_the_budget_in_every_window_under_a_mixed_load() {
+    let window = Duration::from_millis(2000);
+    let scaled = move |real: Duration| real * window.as_millis() as u32 / 60_000;
+    let graph = follows(&(100..130).collect::<Vec<i64>>(), &[]);
+    let fake = fake_anilist_seeing_auth(move |q, v, auth| {
+        if q.contains("SaveMediaListEntry") {
+            return save_ok();
+        }
+        if q.contains("MediaList(userId: $userId, mediaId") {
+            return on_list("POINT_10_DECIMAL", 1_700_000_000);
+        }
+        if q.contains("media(search") {
+            return (200, json!({"data": {"Page": {"media": []}}}), None);
+        }
+        follow_reply(&graph, q, v, auth)
+    })
+    .await;
+    let st = state_windowed(&fake, window);
+    let rated: Vec<i64> = (20..23).map(|anilist_id| synced_then_edited(&st, anilist_id)).collect();
+    let retried: Vec<i64> = (30..38).map(|anilist_id| synced_then_edited(&st, anilist_id)).collect();
+    st.push_queue.lock().unwrap().extend(&retried);
+
+    let mut work = Vec::new();
+    let spawn = |work: &mut Vec<tokio::task::JoinHandle<()>>, f: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>| work.push(tokio::spawn(f));
+    // Startup: the Pull, then (from it) the friend sync.
+    let s = st.clone();
+    spawn(&mut work, Box::pin(async move { assert_eq!(call(&s, "POST", "/sync/pull", None).await.0, 200) }));
+    let queue = tokio::spawn(sync::friend_queue_loop(st.clone(), scaled(sync::FRIEND_QUEUE_SPACING)));
+    // Rapid picks: again as soon as allowed.
+    let s = st.clone();
+    spawn(&mut work, Box::pin(async move {
+        for i in 0..20 {
+            let (status, b) = call(&s, "POST", "/pick", Some(json!({"source": "not_planning", "roll": (i as f64) / 20.0}))).await;
+            match status {
+                200 => assert!(b["requests"].as_u64().unwrap() <= anilist::PICK_BUDGET as u64),
+                429 => tokio::time::sleep(Duration::from_millis(b["wait_ms"].as_u64().unwrap())).await,
+                _ => panic!("{status} {b}"),
+            }
+        }
+    }));
+    // Discover, both media types, every shelf at once, twice.
+    for media_type in ["anime", "manga"] {
+        for section in SHELVES {
+            let s = st.clone();
+            spawn(&mut work, Box::pin(async move {
+                for _ in 0..2 {
+                    assert_eq!(call(&s, "GET", &format!("/discover?section={section}&media_type={media_type}"), None).await.0, 200);
+                }
+            }));
+        }
+    }
+    // Searches, comparisons, ratings (each pushes at once).
+    for i in 0..10 {
+        let s = st.clone();
+        spawn(&mut work, Box::pin(async move { assert_eq!(call(&s, "GET", &format!("/search?q=s{i}&type=anime"), None).await.0, 200) }));
+    }
+    for id in &rated {
+        let (s, id) = (st.clone(), *id);
+        spawn(&mut work, Box::pin(async move {
+            let scores = json!({"story": 8.0, "characters": 8.0, "animation": 8.0, "audio": 8.0, "enjoyment": 8.0});
+            assert_eq!(call(&s, "PUT", &format!("/media/{id}/rating"), Some(scores)).await.0, 200);
+        }));
+    }
+    let s = st.clone();
+    spawn(&mut work, Box::pin(async move {
+        // The friend sync runs at normal priority, so it can take a while here.
+        while s.db.get_friends().map(|f| f.len() < 30).unwrap_or(true) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for id in [129, 128, 127] {
+            assert_eq!(call(&s, "GET", &format!("/friends/{id}/compare?media_type=anime"), None).await.0, 200);
+        }
+    }));
+    // Push retries, round after round: background work, so it gets through
+    // as the rest of the load lets it.
+    let s = st.clone();
+    spawn(&mut work, Box::pin(async move {
+        for _ in 0..20 {
+            if s.push_queue.lock().unwrap().is_empty() {
+                break;
+            }
+            sync::retry_pushes(&s, scaled(sync::PUSH_RETRY_SPACING)).await;
+            tokio::time::sleep(window / 2).await;
+        }
+    }));
+    for w in work {
+        w.await.unwrap();
+    }
+    tokio::time::sleep(window).await;
+    queue.abort();
+
+    let times = fake.times();
+    // Enough traffic to fill several windows, so the limit was really tested.
+    assert!(times.len() >= 70, "only {} requests", times.len());
+    // Counted as AniList counts them, on arrival, over the full window.
+    assert!(busiest(&times, window) <= limiter::BUDGET, "busiest {}", busiest(&times, window));
+    assert!(st.push_queue.lock().unwrap().is_empty(), "every retried push went through");
+    let fetched = st.db.get_friends().unwrap().iter().filter(|f| f.fetched_at.is_some()).count();
+    assert!(fetched >= 3, "the friend-list queue ran too: {fetched} fetched");
 }
