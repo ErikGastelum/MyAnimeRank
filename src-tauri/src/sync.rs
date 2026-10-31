@@ -344,7 +344,8 @@ pub async fn sync_friends(st: &Shared) -> SyncResult<()> {
     Ok(())
 }
 
-/// FR-79 after login or a Pull: in the background, and a failure is only logged.
+/// FR-79 after a Pull (login included: the page Pulls right after it), in the
+/// background, and a failure is only logged.
 pub fn sync_friends_later(st: &Shared) {
     let st = st.clone();
     tokio::spawn(async move {
