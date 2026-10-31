@@ -436,7 +436,7 @@ const state = {
   booting:true,              // boot(): /auth/status, then the first Pull + library load
   view:'library',            // library|discover|feed|profile|search|rating|detail|insights|person|studio|user|compare
   mediaType:'anime',
-  navTab:'anime',            // the last bottom-nav tab shown (PRD §8)
+  navTab:'anime',            // the bottom-nav tab lit now; each Back target keeps its own (PRD §8)
   libSearch:'', libSort:'score', libSortMenuOpen:false,
   libGenre:null, libYear:null, libGenreMenuOpen:false, libYearMenuOpen:false,
   chainLoading:false,
@@ -684,7 +684,7 @@ H.backView = ()=>{
   // A rating or status change on that title changes the comparison too, so
   // it reloads, behind the one on screen, at the scroll position you left.
   if(state.detailReturn==='compare'&&state.compare){backToCompare();return;}
-  go(state.detailReturn||'library');
+  backTo(state.detailReturn||'library',state.detailReturnTab);
 };
 function backToCompare(){
   loadCompare(true);go('compare');
@@ -853,9 +853,9 @@ H.cancelRating = ()=>{
   // older state.current is still around from a detail page opened earlier.
   if(state.rating&&state.rating.queue){state.rating=null;go('library');return;}
   if(state.rating&&state.rating.backTo==='compare'&&state.compare){state.rating=null;backToCompare();return;}
-  const returnView=state.rating&&state.rating.returnView;
+  const returnView=state.rating&&state.rating.returnView,returnTab=state.rating&&state.rating.returnTab;
   state.rating=null;
-  if(state.current){openDetail(state.current);state.detailReturn=returnView;}
+  if(state.current){openDetail(state.current);state.detailReturn=returnView;state.detailReturnTab=returnTab;}
   else{go('library');}
 };
 // Fast path, same reasoning as setMenuOpen: Track/Dial are both already in the DOM
@@ -940,7 +940,7 @@ function finishChain(){
   if(r.backTo==='compare'&&state.compare){state.rating=null;backToCompare();return;}
   state.rating=null;
   openDetail({source:'lib',item:byId(lastId)});
-  state.detailReturn=returnView;
+  state.detailReturn=returnView;state.detailReturnTab=r.returnTab;
 }
 // FR-44 skip: leaves no library row (an unseen prequel/sequel shouldn't get a
 // permanent unrated entry) -- just advances past this chain position.
@@ -1043,7 +1043,7 @@ H.openPerson = async (el)=>{
   if(state.view==='person'&&state.person){
     state.personStack.push(state.person);
   }else{
-    state.personReturn=state.view;
+    state.personReturn=state.view;state.personReturnTab=navTab();
     state.personStack=[];
   }
   state.workListSearch='';state.workListOnMyList=false;state.charListSearch='';state.charListOnMyList=false;
@@ -1060,7 +1060,7 @@ H.revealSpoiler = (el,e)=>{
 };
 H.backPerson = ()=>{
   if(state.personStack.length){ state.person=state.personStack.pop(); render(); return; }
-  const r=state.personReturn;state.person=null;state.personReturn=null;go(r||(state.current?'detail':'library'));
+  const r=state.personReturn;state.person=null;state.personReturn=null;backTo(r||(state.current?'detail':'library'),state.personReturnTab);
 };
 // Mirrors H.toggleFav's real toggle exactly (optimistic flip, real API call,
 // _profileFavorites sync, rollback on failure) -- previously this only ever
@@ -1084,7 +1084,7 @@ H.togglePersonFav = async (el,e)=>{
 
 let _studioCache={};
 H.openStudio = async (el)=>{
-  state.studioReturn=state.view;
+  state.studioReturn=state.view;state.studioReturnTab=navTab();
   state.workListSearch='';state.workListOnMyList=false;
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
   if(!anilistId)return;
@@ -1096,7 +1096,7 @@ H.openStudio = async (el)=>{
     go('studio');
   }catch(e){ console.error('open studio failed:',e); }
 };
-H.backStudio = ()=>{const r=state.studioReturn;state.studio=null;state.studioReturn=null;go(r||'search');};
+H.backStudio = ()=>{const r=state.studioReturn;state.studio=null;state.studioReturn=null;backTo(r||'search',state.studioReturnTab);};
 H.toggleStudioFav = async (el,e)=>{
   if(e)e.stopPropagation();
   const s=state.studio;if(!s)return;
@@ -1115,7 +1115,7 @@ H.toggleStudioFav = async (el,e)=>{
 
 let _userCache={};
 H.openUser = async (el)=>{
-  state.userReturn=state.view;
+  state.userReturn=state.view;state.userReturnTab=navTab();
   if(state.friendError&&state.friendError.id==='user')state.friendError=null;
   const anilistId=el&&el.dataset.arg&&/^\d+$/.test(el.dataset.arg)?+el.dataset.arg:null;
   if(!anilistId)return;
@@ -1126,7 +1126,7 @@ H.openUser = async (el)=>{
     go('user');
   }catch(e){ console.error('open user failed:',e); }
 };
-H.backUser = ()=>{const r=state.userReturn;state.user=null;state.userReturn=null;go(r||'search');};
+H.backUser = ()=>{const r=state.userReturn;state.user=null;state.userReturn=null;backTo(r||'search',state.userReturnTab);};
 
 /* friends (PRD 4.12) */
 H.friendInput = (el)=>{state.friendInput=el.value;};
@@ -1210,7 +1210,12 @@ H.removeFriend = async (el)=>{
 function openCompare(friendId,mediaType){
   // From a title opened out of the comparison, keep the comparison's own Back
   // target: otherwise Back would bounce between the two pages forever.
-  if(!(state.view==='detail'&&state.detailReturn==='compare'))state.compareReturn=state.view;
+  // Opened from a title, it also keeps that title and its Back target: a
+  // title opened from the comparison replaces both.
+  if(!(state.view==='detail'&&state.detailReturn==='compare')){
+    state.compareReturn=state.view;state.compareReturnTab=navTab();
+    state.compareReturnDetail=state.view==='detail'?{current:state.current,detailReturn:state.detailReturn,detailReturnTab:state.detailReturnTab}:null;
+  }
   state.compare={friendId,mediaType:mediaType||state.mediaType};
   state.compareSort={key:'your_score',dir:-1};state.compareShowAll={they:false,you:false};state.compareScroll=0;state.compareOpen=null;
   if(state.friendError&&state.friendError.id!==friendId)state.friendError=null;
@@ -1227,7 +1232,12 @@ H.compareUser = async ()=>{
   const f=known?null:await fetchFriend('user',()=>api.addFriend(u.name));
   if(known||f)openCompare(known?u.anilist_id:f.anilist_user_id);
 };
-H.backCompare = ()=>{const r=state.compareReturn||'profile';state.compare=null;_compare=undefined;go(r);if(r==='profile')loadFriends();};
+H.backCompare = ()=>{
+  const r=state.compareReturn||'profile',d=state.compareReturnDetail;state.compare=null;_compare=undefined;
+  if(r==='detail'&&d){state.current=d.current;state.detailReturn=d.detailReturn;state.detailReturnTab=d.detailReturnTab;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;}
+  backTo(r,state.compareReturnTab);
+  if(r==='profile')loadFriends();
+};
 H.setCompareType = (el)=>{state.compare={...state.compare,mediaType:el.dataset.arg};state.compareShowAll={they:false,you:false};state.compareOpen=null;loadCompare();render();};
 // FR-82: one expanded title across the whole page; the same one again closes it.
 H.toggleCompareRow = (el)=>{const k=el.dataset.arg;state.compareOpen=state.compareOpen===k?null:k;render();};
@@ -1296,7 +1306,7 @@ async function ensureFavoritesLoaded(){
 }
 function openDetail(cur){
   if(state.view==='compare'){const sc=document.getElementById('main-scroll');state.compareScroll=sc?sc.scrollTop:0;}
-  if(state.view&&state.view!=='detail')state.detailReturn=state.view;
+  if(state.view&&state.view!=='detail'){state.detailReturn=state.view;state.detailReturnTab=navTab();}
   state.current=cur;state.detailMenuOpen=false;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;
   if(_profileFavorites){
     cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
@@ -1325,10 +1335,11 @@ function openRating(ids,extra){
   // already sitting in detailReturn from before Detail was opened; otherwise
   // (e.g. Discover's "Add & rate") state.view itself is the real origin.
   const returnView=state.view==='detail'?(state.detailReturn||'library'):state.view;
+  const returnTab=state.view==='detail'?state.detailReturnTab:navTab();
   // ids[0] is always a real local id -- Rate Series only ever starts from an
   // in-library title's own Detail page; only interior/tail hops discovered by
   // walkChain() can be {pending:true} not-yet-imported markers.
-  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,lastRealId:ids[0],...extra};
+  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,returnTab:returnTab,lastRealId:ids[0],...extra};
   go('rating');
 }
 function curRatingItem(){const r=state.rating;return byId(r.ids[r.idx]);}
@@ -1626,14 +1637,18 @@ function shell(){
 }
 
 // PRD §8: a page reached from a tab (search, detail, user, person, studio,
-// Insights, the stepper) keeps that tab highlighted, so remember the last
-// tab shown; a friend comparison always belongs to Profile.
+// Insights, the stepper) keeps that tab highlighted, so remember the tab lit
+// now; a friend comparison, and anything opened from it, belongs to Profile.
+// Each Back target stores the tab lit when you left it, and backTo() puts it
+// back.
 function navTab(){
   const v=state.view;
   if(v==='library')return state.navTab=state.mediaType;
   if(v==='discover'||v==='feed'||v==='profile')return state.navTab=v;
-  return v==='compare'?'profile':state.navTab;
+  if(v==='compare')return state.navTab='profile';
+  return state.navTab;
 }
+function backTo(view,tab){if(tab)state.navTab=tab;go(view);}
 function bottomNav(){
   const items=[
     {key:'anime',label:'Anime',icon:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg>'},
