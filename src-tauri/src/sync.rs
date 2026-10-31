@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use serde_json::{json, Value};
 
 use crate::anilist::{AlError, FriendLookup, ListEntry};
@@ -358,37 +360,79 @@ pub fn sync_friends_later(st: &Shared) {
 /// FR-71/FR-73: fetches one friend's lists without the token and stores
 /// them. `id` is set for someone who's already a friend (Refresh, the queue,
 /// a comparison): they show as "fetching" meanwhile, keep their source, and
-/// are marked private if AniList says so. Without it, it's an add by
+/// are marked private if AniList says so. Only one such fetch per friend
+/// runs at a time: a caller arriving during one waits for it and gets its
+/// answer, without a request of its own. Without `id`, it's an add by
 /// username: stored as a manual friend. Your own account is never stored.
 pub async fn fetch_friend(st: &Shared, name: &str, id: Option<i64>) -> SyncResult<FriendLookup> {
     let auth = auth(st)?;
-    let _fetching = id.map(|id| Fetching::new(st, id));
-    let lookup = st.anilist.get_friend_list(name, id).await?;
-    match (&lookup, id) {
-        (FriendLookup::Found(list), _) if list.anilist_user_id == auth.anilist_user_id => {}
-        (FriendLookup::Found(list), None) => st.db.replace_friend_list(list, &now_iso())?,
-        (FriendLookup::Found(list), Some(_)) => {
+    let fetching = match id {
+        Some(id) => match Fetching::join(st, id).await {
+            Joined::Running(fetching) => Some(fetching),
+            Joined::Answered(answer) => return Ok(answer?),
+        },
+        None => None,
+    };
+    let answer = st.anilist.get_friend_list(name, id).await;
+    match (&answer, id) {
+        (Ok(FriendLookup::Found(list)), _) if list.anilist_user_id == auth.anilist_user_id => {}
+        (Ok(FriendLookup::Found(list)), None) => st.db.replace_friend_list(list, &now_iso())?,
+        (Ok(FriendLookup::Found(list)), Some(_)) => {
             st.db.store_friend_list(list, &now_iso())?;
         }
-        (FriendLookup::Private(_), Some(id)) => st.db.mark_friend_private(id, &now_iso())?,
+        (Ok(FriendLookup::Private(_)), Some(id)) => st.db.mark_friend_private(id, &now_iso())?,
         _ => {}
     }
-    Ok(lookup)
+    // Stored first, so whoever waited reads the new list.
+    if let Some(fetching) = &fetching {
+        fetching.answer.send_replace(Some(answer.clone()));
+    }
+    Ok(answer?)
 }
 
-/// A friend shows as "fetching" (GET /friends) until this is dropped.
-struct Fetching<'a>(&'a Shared, i64);
+/// Where a running friend fetch's answer arrives: None until it's in.
+pub type FetchAnswer = watch::Receiver<Option<Result<FriendLookup, AlError>>>;
+
+/// A friend shows as "fetching" (GET /friends) until this is dropped, and
+/// anyone fetching them meanwhile gets this fetch's answer.
+struct Fetching<'a> {
+    st: &'a Shared,
+    id: i64,
+    answer: watch::Sender<Option<Result<FriendLookup, AlError>>>,
+}
+
+enum Joined<'a> {
+    Running(Fetching<'a>),
+    Answered(Result<FriendLookup, AlError>),
+}
 
 impl<'a> Fetching<'a> {
-    fn new(st: &'a Shared, id: i64) -> Self {
-        st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
-        Fetching(st, id)
+    /// Starts fetching `id`, or, if that's already running, waits for its
+    /// answer. One dropped half-way answers nothing, so this one runs then.
+    async fn join(st: &'a Shared, id: i64) -> Joined<'a> {
+        loop {
+            let mut running = {
+                let mut all = st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner());
+                match all.get(&id) {
+                    Some(running) => running.clone(),
+                    None => {
+                        let (answer, running) = watch::channel(None);
+                        all.insert(id, running);
+                        return Joined::Running(Fetching { st, id, answer });
+                    }
+                }
+            };
+            let answer = running.wait_for(Option::is_some).await.ok().and_then(|answer| answer.clone());
+            if let Some(answer) = answer {
+                return Joined::Answered(answer);
+            }
+        }
     }
 }
 
 impl Drop for Fetching<'_> {
     fn drop(&mut self) {
-        self.0.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+        self.st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
     }
 }
 
