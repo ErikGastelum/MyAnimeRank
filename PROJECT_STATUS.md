@@ -256,8 +256,10 @@ Roughly by priority:
     50 matches (one request left) reaches 2 entries back, enough for Re:Zero
     S3 -> "Next up: S2" with only S1 seen, and a reroll up to 6. Reroll waits
     2 s after each pick, longer if a worst-case pick wouldn't fit in the
-    last minute's 30. Other AniList traffic (Discover, Feed, sync) isn't
-    paced against picks.
+    last minute's 20: AniList allows 30, and the friend-list queue (FR-80)
+    may use 10. Every pick request counts as in flight for that queue and
+    any 429 pauses it (one path, `graphql_within()`). Other AniList traffic
+    (Discover, Feed, sync) isn't paced against picks.
 16. **Switch Reroll's pacing to the shared limiter.** `fix/rate-limit-budget`
     is adding an app-wide AniList request budget. Once it merges, the
     client-side cooldown in `frontend/index.html` (`PICK_RATE`,
