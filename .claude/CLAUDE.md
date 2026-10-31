@@ -122,7 +122,7 @@ In scope per the PRD (don't remove these as "unspecified"): AniList OAuth
 login with a mandatory login gate (FR-47), Pull + automatic push sync with
 conflict resolution (4.6), Discover, Feed, Characters/Staff/Favorites,
 Profile, Insights, M9 Studios & Users search/profiles (4.11), M10 Friend
-Comparison (4.12), and M10 Pick an anime (4.12, FR-70, with FR-71's prequel
+Comparison (4.12), and M11 Pick an anime (4.13, FR-84, with FR-85's prequel
 check).
 
 Non-goals (do not implement without an explicit go-ahead):

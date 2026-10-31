@@ -29,7 +29,7 @@ use crate::{oauth, Shared};
 
 const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
 const CACHE_TTL: Duration = Duration::from_secs(60);
-/// FR-70: AniList's genre and tag lists barely change.
+/// FR-84: AniList's genre and tag lists barely change.
 const PICK_OPTIONS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ------------------------------------------------------------------- errors ----
@@ -730,7 +730,7 @@ async fn media_friend_scores(State(st): State<Shared>, Id(anilist_id): Id) -> Ap
     ok(json!({"scores": st.db.friend_scores(anilist_id)?}))
 }
 
-// ------------------------------------------------------------ pick (FR-70) ----
+// ------------------------------------------------------------ pick (FR-84) ----
 
 async fn pick_options(State(st): State<Shared>) -> ApiResult {
     ok(st.pick_cache.get_or_fetch("pick:options", PICK_OPTIONS_TTL, || st.anilist.pick_options()).await?)
@@ -796,7 +796,7 @@ fn validate_pick(p: &PickIn) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// FR-70. Anime only, from either source; nothing here writes anything.
+/// FR-84. Anime only, from either source; nothing here writes anything.
 async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
     validate_pick(&body)?;
     let shown: HashSet<i64> = body.exclude.iter().copied().collect();
@@ -818,7 +818,7 @@ async fn pick(State(st): State<Shared>, Body(body): Body<PickIn>) -> ApiResult {
         let since = if s.lo >= PICK_DEPTH { 0 } else { body.exclude.len() - s.shown };
         PickSize { lo: s.lo.saturating_sub(since), hi: s.hi.saturating_sub(since) }
     });
-    // FR-71: a prequel counts as seen when it's Completed or Rewatching.
+    // FR-85: a prequel counts as seen when it's Completed or Rewatching.
     let check = (!body.filters.include_unwatched_sequels).then(|| PickCheck {
         watched: library.iter().filter(|m| matches!(m.status.as_str(), "completed" | "rewatching")).map(|m| m.fields.anilist_id).collect(),
         shown: shown.clone(),

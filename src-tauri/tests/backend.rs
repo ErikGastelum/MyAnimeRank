@@ -2741,7 +2741,7 @@ fn client_id_comes_from_the_env_var_then_local_config_toml_then_the_builtin() {
     assert_eq!(Config::from_sources(None, Some(&toml)).client_id, config::BUILTIN_CLIENT_ID);
 }
 
-// ------------------------------------------------------- pick an anime (FR-70) ----
+// ------------------------------------------------------- pick an anime (FR-84) ----
 
 /// One pool title: ids are 1000 + its index in ID order, whichever way the
 /// query sorts.
@@ -2762,7 +2762,7 @@ fn pick_node(index: usize, n: usize, sort: &str) -> Value {
 
 /// AniList's Page.media over `n` matches, `item(i)` being the i-th in sort
 /// order: answers every aliased `Page(page:, perPage:)` in the query, with
-/// AniList's 5000-entry paging limit (anilist-api-notes #18).
+/// AniList's 5000-entry paging limit (anilist-api-notes #20).
 fn page_reply(q: &str, n: usize, item: impl Fn(usize) -> Value) -> Reply {
     let mut data = serde_json::Map::new();
     for (at, marker) in q.match_indices(": Page(page: ") {
@@ -2781,7 +2781,7 @@ fn page_reply(q: &str, n: usize, item: impl Fn(usize) -> Value) -> Reply {
     (200, json!({"data": data}), None)
 }
 
-/// A pool of `n` titles with no relations (so none is held back by FR-71).
+/// A pool of `n` titles with no relations (so none is held back by FR-85).
 fn pool_reply(n: usize, q: &str, v: &Value) -> Reply {
     let sort = v["sort"][0].as_str().unwrap_or("ID");
     page_reply(q, n, |i| pick_node(i, n, sort))
@@ -2793,7 +2793,7 @@ fn fetched_pages(q: &str) -> Vec<usize> {
 }
 
 /// The variable a pick query binds to AniList argument `arg`, or None when
-/// the request leaves it out (an explicit null can 500 on AniList, notes #20).
+/// the request leaves it out (an explicit null can 500 on AniList, notes #22).
 fn pick_arg(q: &str, v: &Value, arg: &str) -> Option<Value> {
     let needle = format!(" {arg}: $");
     let at = q.find(&needle).unwrap_or_else(|| panic!("{arg} is not in the query"));
@@ -2942,7 +2942,7 @@ async fn an_empty_pick_says_whether_the_shown_titles_used_up_the_pool() {
 #[tokio::test]
 async fn a_pool_that_fits_on_page_one_is_counted_exactly_and_picked_in_one_request() {
     let (body, calls) = pick_over(30, 0.5).await;
-    // No probes: past the end of a small pool, each costs AniList a full scan (notes #25).
+    // No probes: past the end of a small pool, each costs AniList a full scan (notes #27).
     assert_eq!(calls.len(), 1);
     assert!(pick_indexes(&calls[0].0).is_empty());
     assert_eq!((body["pool"].as_i64(), body["pool_exact"].as_bool(), body["exhausted"].as_bool(), &body["size"]), (Some(30), Some(true), Some(false), &Value::Null));
@@ -2982,7 +2982,7 @@ fn bracket(q: &str, n: usize) -> (usize, usize) {
 
 #[tokio::test]
 async fn a_bigger_pool_is_sized_by_probes_then_picked_from_a_random_page() {
-    // pageInfo.total isn't a count (notes #17): after page 1, single-entry
+    // pageInfo.total isn't a count (notes #19): after page 1, single-entry
     // probes bracket the pool, and lo..hi holds its real size.
     for roll in [0.01, 0.3, 0.85, 0.99] {
         let (body, calls) = pick_over(1000, roll).await;
@@ -3166,7 +3166,7 @@ async fn pick_routes_require_login() {
     assert_eq!(call(&st, "POST", "/pick", Some(json!({"source": "planning", "roll": 0.5}))).await.0, 401);
 }
 
-// -------------------------------------- pick: sequels you're not caught up on (FR-71) ----
+// -------------------------------------- pick: sequels you're not caught up on (FR-85) ----
 
 /// An anime with `relations`: (relationType, related id, its format, its type).
 fn related(id: i64, relations: &[(&str, i64, &str, &str)]) -> Value {
@@ -3196,7 +3196,7 @@ fn three_seasons() -> Vec<Value> {
 /// are in `pool` (minus id_not_in, within id_in, by id), and `Media(id:)`
 /// finds any catalog entry, or 404s like AniList does. A lookup that asks for
 /// its related entries in full gets them, with their own relations, as far
-/// as the catalog has them (anilist-api-notes #27).
+/// as the catalog has them (anilist-api-notes #29).
 fn catalog_reply(catalog: &[Value], pool: &[i64], q: &str, v: &Value) -> Reply {
     if q.contains("Media(id: $id") {
         let Some(found) = catalog.iter().find(|m| m["id"] == v["id"]) else {
@@ -3400,7 +3400,7 @@ async fn retrying_other_pages_stops_when_the_request_budget_is_spent() {
     assert_eq!(pages.iter().collect::<std::collections::HashSet<_>>().len(), 3, "never the same page twice");
 }
 
-// ----------------------------------------------- pick: AniList's 30 a minute (notes #24) ----
+// ----------------------------------------------- pick: AniList's 30 a minute (notes #26) ----
 
 #[tokio::test]
 async fn a_pick_never_sends_more_than_four_requests_429_retries_included() {
@@ -3453,7 +3453,7 @@ async fn a_pick_never_sends_more_than_four_requests_429_retries_included() {
 
 #[tokio::test]
 async fn a_large_pool_first_pick_reaches_a_next_up_two_entries_back() {
-    // Re:Zero's shape (notes #26): every one of 1000 titles is a "3rd Season"
+    // Re:Zero's shape (notes #28): every one of 1000 titles is a "3rd Season"
     // waiting on 2nd Season Part 2 (2), which waits on 2nd Season (3), which
     // waits on the 1st Season (4).
     let chain = vec![

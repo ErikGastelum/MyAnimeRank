@@ -822,7 +822,7 @@ impl AniList {
 
     // -------------------------------------------------------- pick an anime ----
 
-    /// FR-70: the genre and tag lists for the picker's filters, in one request.
+    /// FR-84: the genre and tag lists for the picker's filters, in one request.
     pub async fn pick_options(&self) -> AlResult<Value> {
         let q = "{ GenreCollection MediaTagCollection { name category isGeneralSpoiler isAdult } }";
         let data = self.graphql(q, None, None, 15).await?;
@@ -840,14 +840,14 @@ impl AniList {
         Ok(json!({"genres": genres, "tags": tags}))
     }
 
-    /// FR-70/FR-71: one random anime from everything the filters match in
+    /// FR-84/FR-85: one random anime from everything the filters match in
     /// `pool`, never a sequel you aren't caught up on unless `check` is None,
     /// in at most PICK_BUDGET requests to AniList, 429 retries included.
     ///
     /// Page 1 comes first, alone: a pool that fits on it is counted exactly
-    /// in one request. pageInfo.total isn't a count (notes #17), so a bigger
+    /// in one request. pageInfo.total isn't a count (notes #19), so a bigger
     /// pool is then bracketed with single-entry probes (each probe past the
-    /// end costs AniList a full scan, notes #25, which is why small pools
+    /// end costs AniList a full scan, notes #27, which is why small pools
     /// never send them), and pick_pages() takes it from there. `known` is the
     /// size from an earlier pick on the same filters, already shrunk by the
     /// titles shown since: it skips straight to pick_pages(). `roll` comes
@@ -906,7 +906,7 @@ impl AniList {
     /// None when the first page fetched is empty with no page 1 to fall back
     /// on: `size` was stale.
     async fn pick_pages(&self, run: &mut PickRun<'_>, size: PickSize, exact: bool, page_one: Option<&[Value]>) -> AlResult<Option<Picked>> {
-        // Over the paging limit (notes #18): alternate the oldest and newest 5000.
+        // Over the paging limit (notes #20): alternate the oldest and newest 5000.
         let sort = if size.lo >= PICK_DEPTH && run.draws.next() >= 0.5 { "ID_DESC" } else { "ID" };
         run.vars["sort"] = json!([sort]);
         let in_hand = page_one.filter(|_| sort == "ID");
@@ -984,10 +984,10 @@ impl AniList {
         }))
     }
 
-    /// FR-71: the earliest entry you haven't completed in `node`'s PREQUEL
+    /// FR-85: the earliest entry you haven't completed in `node`'s PREQUEL
     /// chain, from its blocking `prequel` back, for as long as the pick has
     /// requests left. Each lookup brings the entry's related entries in full,
-    /// with their own relations (notes #27), so one request settles two
+    /// with their own relations (notes #29), so one request settles two
     /// entries: the one looked up and the prequel it's waiting on. None when
     /// the requests run out first, the chain loops or can't be read, or it
     /// ends on an entry the filters rule out or already shown: the next-up is
@@ -1038,7 +1038,7 @@ impl AniList {
 
 // --------------------------------------------------------- pick an anime ----
 
-/// FR-70 filters, as POST /pick's body carries them. All optional; ranges
+/// FR-84 filters, as POST /pick's body carries them. All optional; ranges
 /// are inclusive here and converted to AniList's bounds in pick_variables().
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1066,12 +1066,12 @@ pub struct PickFilters {
     pub statuses: Vec<String>,
     #[serde(default)]
     pub include_adult: bool,
-    /// FR-71's toggle: skip the prequel check.
+    /// FR-85's toggle: skip the prequel check.
     #[serde(default)]
     pub include_unwatched_sequels: bool,
 }
 
-/// What FR-71's prequel check needs from the library.
+/// What FR-85's prequel check needs from the library.
 pub struct PickCheck {
     /// Anime that are Completed or Rewatching.
     pub watched: HashSet<i64>,
@@ -1094,9 +1094,9 @@ pub struct Picked {
     pub pool_exact: bool,
     /// For a pool bigger than a page: its size, for the next pick to reuse.
     pub size: Option<PickSize>,
-    /// FR-71: the held-back sequel that `result` is the next-up for.
+    /// FR-85: the held-back sequel that `result` is the next-up for.
     pub next_up_for: Option<Value>,
-    /// No result, and titles were tried that FR-71 held back.
+    /// No result, and titles were tried that FR-85 held back.
     pub blocked: bool,
     /// AniList requests this pick sent, 429 retries included (at most PICK_BUDGET).
     pub requests: usize,
@@ -1162,14 +1162,14 @@ pub struct PickSize {
 pub const PICK_FORMATS: [&str; 6] = ["TV", "TV_SHORT", "MOVIE", "OVA", "ONA", "SPECIAL"];
 pub const PICK_STATUSES: [&str; 3] = ["FINISHED", "RELEASING", "NOT_YET_RELEASED"];
 
-/// AniList won't page past its first 5000 matches (notes #18).
+/// AniList won't page past its first 5000 matches (notes #20).
 pub const PICK_DEPTH: usize = 5000;
 const PICK_PAGE: usize = 50;
-/// AniList allows 30 requests a minute (notes #24): one pick never sends more
-/// than this many, 429 retries included. Sizing, extra pages and the FR-71
+/// AniList allows 30 requests a minute (notes #26): one pick never sends more
+/// than this many, 429 retries included. Sizing, extra pages and the FR-85
 /// walk back all share it.
 pub const PICK_BUDGET: usize = 4;
-/// FR-71: the prequel formats that count.
+/// FR-85: the prequel formats that count.
 const PREQUEL_FORMATS: [&str; 4] = ["TV", "TV_SHORT", "MOVIE", "ONA"];
 
 const PICK_VARS: &str = "$idIn: [Int], $idNotIn: [Int], $genreIn: [String], $genreNotIn: [String],
@@ -1186,12 +1186,12 @@ const PICK_ARGS: &str = "type: ANIME, id_in: $idIn, id_not_in: $idNotIn, genre_i
     episodes_lesser: $episodesLesser, status_in: $statusIn, isAdult: $isAdult, sort: $sort";
 
 /// On top of MEDIA_FIELDS (GraphQL merges the two `tags` selections).
-/// Relations are for FR-71's prequel check.
+/// Relations are for FR-85's prequel check.
 const PICK_FIELDS: &str = "tags { rank isMediaSpoiler isGeneralSpoiler isAdult } popularity status startDate { year } isAdult
     relations { edges { relationType node { id format type } } }";
 
-/// FR-70 filters as AniList variables. Only the filters that are set are
-/// sent: an explicit null for a list argument is a 500 on AniList (notes #20).
+/// FR-84 filters as AniList variables. Only the filters that are set are
+/// sent: an explicit null for a list argument is a 500 on AniList (notes #22).
 fn pick_variables(f: &PickFilters, pool: &PickPool) -> Value {
     let mut vars = Map::new();
     let (pool_key, ids) = match pool {
@@ -1211,7 +1211,7 @@ fn pick_variables(f: &PickFilters, pool: &PickPool) -> Value {
         }
     }
     // Popularity and episode bounds are strict on AniList; averageScore_greater
-    // already includes its bound; year-only start dates are YYYY0000 (notes #23).
+    // already includes its bound; year-only start dates are YYYY0000 (notes #25).
     let bounds = [
         ("popularityGreater", f.popularity_min.map(|n| n - 1)),
         ("popularityLesser", f.popularity_max.map(|n| n + 1)),
@@ -1253,7 +1253,7 @@ fn pick_probe(index: usize) -> String {
     format!(" at{index}: Page(page: {}, perPage: 1) {{ media({PICK_ARGS}) {{ id }} }}", index + 1)
 }
 
-/// FR-71: the prequel holding `node` back, if any: a direct PREQUEL to an
+/// FR-85: the prequel holding `node` back, if any: a direct PREQUEL to an
 /// anime in a format you'd watch first (TV, TV Short, Movie, ONA) that isn't
 /// Completed or Rewatching. A series entry comes before a movie when several do.
 fn blocking_prequel(node: &Value, watched: &HashSet<i64>) -> Option<i64> {
@@ -1266,7 +1266,7 @@ fn blocking_prequel(node: &Value, watched: &HashSet<i64>) -> Option<i64> {
         .map(|(id, _)| id)
 }
 
-/// FR-71: a next-up is offered only within the adult setting and the genre
+/// FR-85: a next-up is offered only within the adult setting and the genre
 /// and tag filters, and never twice in a session.
 fn next_up_allowed(entry: &Value, f: &PickFilters, shown: &HashSet<i64>) -> bool {
     let genres: Vec<String> = arr(&entry["genres"]).iter().filter_map(str_of).collect();
