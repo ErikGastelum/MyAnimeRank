@@ -1,8 +1,10 @@
 # MyAnimeRank — Project Status
 
-*Updated 2026-10-27, after the port to Tauri 2 + Rust and the removal of the
-Python app (branch `remove-python`). The 2026-10-25 Python status (cleanup and
-hardening, phases 1–7) is in git history (`bea0e17`).*
+*Updated 2026-10-31: Friend Comparison (M10) is on `main`, and the fixes from
+its independent audit are on `feature/friend-compare`. The port to Tauri 2 +
+Rust replaced the Python app earlier (branch `remove-python`, merged); the
+2026-10-25 Python status (cleanup and hardening, phases 1–7) is in git
+history (`bea0e17`).*
 
 ---
 
@@ -25,7 +27,7 @@ The spec is `docs/PRD.md` (v2, through M10: Friend Comparison).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (81), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (85), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -54,7 +56,8 @@ src-tauri/src/lib.rs      app state, Tauri setup, `api` and `start_login` comman
 src-tauri/src/api.rs      every route (same paths/JSON/status codes as PRD §7), auth gate
 src-tauri/src/db.rs       schema, migration of older DBs, rating math, queries
 src-tauri/src/anilist.rs  all GraphQL through one graphql() (errors/404/429 handling)
-src-tauri/src/sync.rs     Pull, guarded push, conflicts, in-memory retry queue
+src-tauri/src/sync.rs     Pull, guarded push, conflicts, in-memory retry queue, friend
+                          sync, the friend-list queue (one fetch per friend at a time)
 src-tauri/src/oauth.rs    one-shot callback listener on 8931 (implicit grant)
 src-tauri/src/cache.rs    60s TTL cache for Discover/Feed
 src-tauri/src/config.rs   built-in AniList client ID + optional overrides
@@ -101,7 +104,7 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
-- **Friend Comparison (M10):** 30 more tests (80 in `tests/backend.rs`): the
+- **Friend Comparison (M10):** 34 more tests (84 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, the pre-FR-79 `friend` table migrated without a value
   changing, cascade on removal, no token and no mutation on friend fetches,
@@ -112,15 +115,18 @@ database.
   list queue (one friend per turn, pauses for other calls and after a 429, a
   failing friend doesn't block it, private friends wait a week, both waits
   survive a restart), a
-  comparison fetching first, sync after login and Pull, the comparison's
-  rules (always the 5 largest gaps, "rarely disagree", completed lists tied
-  by popularity, rows carrying your criteria and whether you rated in the
-  app), Pull recording popularity, the `rating.source` migration leaving
+  comparison fetching first, a comparison or Refresh during a fetch reusing
+  it, one sync per login plus its Pull, the comparison's rules (always the 5
+  largest gaps however small, "rarely disagree" only within half a point,
+  completed lists tied by popularity, rows carrying your criteria and
+  whether you rated in the app), popularity from Search imports and Pull,
+  Pull never changing `rating.source`, the `rating.source` migration leaving
   every row intact, and every PRD §7 shape. The UI was driven in headless
   Chromium against the real router: before/after screenshots of each
   comparison change against a fake AniList, the bottom nav on every page at
-  900 and 1440 px, Back keeping scroll and open rows, and "Rate it now"
-  saving through the stepper.
+  900 and 1440 px, Back keeping scroll, open rows and the lit tab through a
+  comparison, a title's friend chips catching up after the queue fetches a
+  friend, and "Rate it now" saving through the stepper.
   Checked against the live AniList API (logged out) on temp DBs: public,
   private, unknown and empty-list users, every score format, lists of 11,905
   and 19,944 entries, add/compare/refresh/remove, two requests per fetch, a
@@ -151,11 +157,23 @@ database.
 
 ## 6. Git state
 
-- Default branch: **`main`**. `rebuild` and `tauri-port` were merged in and
-  deleted.
-- Current branch: **`remove-python`** (deletes the Python app, ports its
-  remaining test coverage, moves the PRD's stack sections to Rust). Its first
-  commit (`f611e7f`) is also on local `main`; neither branch is pushed.
+- Default branch: **`main`**, on GitHub at `26b4737`: the Rust/Tauri app
+  with Friend Comparison (M10). `rebuild`, `tauri-port` and `remove-python`
+  were merged in and deleted.
+- Current branch: **`feature/friend-compare`**, pushed and not merged yet:
+  the fixes from the independent audit of M10, on top of `main`.
+
+| Commit | What |
+|---|---|
+| `7a2fab6` | Search imports store AniList's popularity (PRD §5) |
+| `8598de6` | Tests: a sub-point disagreement; Pull keeps `rating.source` |
+| `0010746` | Each Back target keeps its lit tab; comparison pages light Profile |
+| `d4b192b` | A login syncs friends once, through its Pull (FR-79) |
+| `9d2bd6d` | Friend chips refresh once a friend's list is fetched |
+| `8ef4698` | One fetch per friend at a time; others reuse it (FR-81) |
+| `90b0a98` | A private list's status is grey, not amber |
+
+The port's own commits, all on `main`:
 
 | Commit | What |
 |---|---|
