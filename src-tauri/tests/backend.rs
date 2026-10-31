@@ -2482,20 +2482,27 @@ async fn private_friends_stay_listed_and_are_not_asked_again_for_a_week() {
 }
 
 #[tokio::test]
-async fn friends_sync_after_login_and_after_pull_without_the_token() {
+async fn a_login_and_its_pull_sync_friends_once_without_the_token() {
     let graph = follows(&[100], &[]);
     let fake = follow_anilist(graph.clone()).await;
     let st = state_with(&fake);
+    let syncs = || fake.calls().iter().filter(|(q, _)| q.contains("following(")).count();
     let (s, _, _) = oauth_call(&st, "/token?access_token=good-token&expires_in=3600").await;
     assert_eq!(s, 200);
+    // The page Pulls right after login (FR-23), and that Pull's sync is the one.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(syncs(), 0, "login on its own doesn't sync");
+    assert_eq!(call(&st, "POST", "/sync/pull", None).await.0, 200);
     wait_for(|| st.db.get_friends().unwrap().len() == 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(syncs(), 1, "one sync for a login plus its Pull");
+
     graph.lock().unwrap().following = vec![100, 101];
     assert_eq!(call(&st, "POST", "/sync/pull", None).await.0, 200);
     wait_for(|| st.db.get_friends().unwrap().len() == 2).await;
-    assert_eq!(st.db.get_friends().unwrap().len(), 2);
+    assert_eq!(syncs(), 2, "and one per later Pull");
     // Login and Pull carry the token; the friend sync never does.
     let (calls, auths) = (fake.calls(), fake.auths());
-    assert!(calls.iter().filter(|(q, _)| q.contains("following(")).count() >= 2);
     for ((q, _), auth) in calls.iter().zip(&auths) {
         assert_eq!(auth.is_some(), !q.contains("following("), "{q}");
     }
