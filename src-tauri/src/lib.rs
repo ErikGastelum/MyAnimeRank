@@ -10,6 +10,7 @@ pub mod api;
 pub mod cache;
 pub mod config;
 pub mod db;
+pub mod limiter;
 pub mod oauth;
 pub mod sync;
 
@@ -30,15 +31,12 @@ pub struct AppState {
     /// FR-26 retry queue. In memory, as before (a known open item).
     pub push_queue: Mutex<BTreeSet<i64>>,
     pub cache: cache::TtlCache,
-    /// FR-84's genre/tag lists. Its own instance: a TtlCache evicts by the
-    /// caller's TTL, so sharing Discover's 60 s would drop a 24 h entry.
-    pub pick_cache: cache::TtlCache,
     pub oauth_port: u16,
     pub oauth_active: Mutex<bool>,
     /// FR-70: friends whose lists are being fetched right now ("fetching"),
     /// each with the channel that fetch answers on, so a second caller waits
     /// for it instead of fetching again (FR-80/FR-81).
-    pub friend_fetching: Mutex<HashMap<i64, sync::FetchAnswer>>,
+    pub friend_fetching: Mutex<HashMap<i64, sync::RunningFetch>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -51,7 +49,6 @@ impl AppState {
             config,
             push_queue: Mutex::new(BTreeSet::new()),
             cache: cache::TtlCache::default(),
-            pick_cache: cache::TtlCache::default(),
             oauth_port: oauth::OAUTH_PORT,
             oauth_active: Mutex::new(false),
             friend_fetching: Mutex::new(HashMap::new()),

@@ -29,7 +29,7 @@ Comparison, M11 Pick an anime).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (113), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (126), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -58,10 +58,11 @@ src-tauri/src/lib.rs      app state, Tauri setup, `api` and `start_login` comman
 src-tauri/src/api.rs      every route (same paths/JSON/status codes as PRD §7), auth gate
 src-tauri/src/db.rs       schema, migration of older DBs, rating math, queries
 src-tauri/src/anilist.rs  all GraphQL through one graphql() (errors/404/429 handling)
+src-tauri/src/limiter.rs  the shared AniList budget: 27 per rolling 60 s, by priority (FR-86)
 src-tauri/src/sync.rs     Pull, guarded push, conflicts, in-memory retry queue, friend
                           sync, the friend-list queue (one fetch per friend at a time)
 src-tauri/src/oauth.rs    one-shot callback listener on 8931 (implicit grant)
-src-tauri/src/cache.rs    60s TTL cache for Discover/Feed
+src-tauri/src/cache.rs    TTL cache: Discover 10 min, Feed 60 s, pick lists 24 h
 src-tauri/src/config.rs   built-in AniList client ID + optional overrides
 src-tauri/tests/backend.rs  integration tests: in-memory DB, fake AniList server
 frontend/index.html       entire UI; talks to the API via Tauri, or fetch under --serve
@@ -89,7 +90,8 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 113 Rust tests (112 in `tests/backend.rs`, 1 in `config.rs`).
+- **Tests:** 126 Rust tests (125 in `tests/backend.rs`, 1 in `config.rs`);
+  the shared limiter's 13 (FR-86) are listed under its own heading below.
   Pick an anime's 28 run against a fake AniList that pages like the real
   one (5000-entry limit included) and, for the prequel check (FR-85), has
   relations and per-id lookups that return related entries in full; its

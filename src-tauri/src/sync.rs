@@ -9,13 +9,16 @@ use tokio::sync::watch;
 
 use serde_json::{json, Value};
 
-use crate::anilist::{AlError, FriendLookup, ListEntry};
+use crate::anilist::{AlError, AniList, FriendLookup, ListEntry};
 use crate::db::{detect_conflict, now_iso, Media, SyncOutcome};
+use crate::limiter::{Lane, Priority};
 use crate::Shared;
 
 const PUSH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-/// FR-80: one queue turn (one friend, two requests) at most this often:
-/// 10 requests a minute, a third of AniList's 30.
+/// FR-86: within a retry round, one title at most this often.
+pub const PUSH_RETRY_SPACING: Duration = Duration::from_secs(5);
+/// FR-80: one queue turn (one friend, two requests) at most this often: at
+/// most 10 requests a minute, on top of the shared limiter (FR-86).
 pub const FRIEND_QUEUE_SPACING: Duration = Duration::from_secs(12);
 
 #[derive(Debug)]
@@ -83,16 +86,16 @@ enum Pulled {
 }
 
 /// FR-23. One-sided changes apply automatically; both-sides-changed entries
-/// come back as conflicts and are NOT auto-resolved.
+/// come back as conflicts and are NOT auto-resolved. At normal priority (FR-86).
 pub async fn pull(st: &Shared) -> SyncResult<Value> {
     let auth = auth(st)?;
     let (mut imported, mut updated) = (0, 0);
     let mut conflicts = Vec::new();
     let now = now_iso();
+    let anilist = st.anilist.at(Priority::Normal);
 
     for media_type in ["anime", "manga"] {
-        let entries = st
-            .anilist
+        let entries = anilist
             .get_media_list_collection(&auth.access_token, auth.anilist_user_id, media_type)
             .await?;
         for entry in entries {
@@ -181,7 +184,7 @@ pub async fn resolve(st: &Shared, media_id: i64, winner: &str) -> SyncResult<Val
     st.db.set_pending_conflict(media_id, false)?;
     // Explicit user choice already made: push directly, deliberately
     // bypassing push_now_guarded()'s conflict check.
-    push_now(st, media_id, None).await?;
+    push_now(st, media_id, None, Priority::Interactive).await?;
     let refreshed = local_after(st, media_id)?;
     Ok(json!({"status": refreshed.status, "progress": refreshed.progress}))
 }
@@ -198,10 +201,10 @@ fn queue(st: &Shared) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<i6
 /// (FR-26); permanent errors are not, since retrying them never succeeds.
 /// `score_format` is one the caller already fetched fresh for this push;
 /// when None it is fetched here. Either way it's re-checked every push.
-pub async fn push_now(st: &Shared, media_id: i64, score_format: Option<String>) -> SyncResult<Value> {
+pub async fn push_now(st: &Shared, media_id: i64, score_format: Option<String>, priority: Priority) -> SyncResult<Value> {
     let auth = auth(st)?;
     let local = local(st, media_id)?;
-    match push_inner(st, &auth, &local, score_format).await {
+    match push_inner(st, &st.anilist.at(priority), &auth, &local, score_format).await {
         Err(SyncError::AniList(e)) if e.is_network() => {
             log::warn!("push failed for media_id={media_id} (network), queued for retry");
             queue(st).insert(media_id);
@@ -211,10 +214,10 @@ pub async fn push_now(st: &Shared, media_id: i64, score_format: Option<String>) 
     }
 }
 
-async fn push_inner(st: &Shared, auth: &crate::db::Auth, local: &Media, score_format: Option<String>) -> SyncResult<Value> {
+async fn push_inner(st: &Shared, anilist: &AniList, auth: &crate::db::Auth, local: &Media, score_format: Option<String>) -> SyncResult<Value> {
     let score_format = match score_format {
         Some(f) => Some(f),
-        None => st.anilist.get_viewer(&auth.access_token).await?.score_format,
+        None => anilist.get_viewer(&auth.access_token).await?.score_format,
     };
     if auth.score_format != score_format {
         st.db.update_score_format(score_format.as_deref())?;
@@ -223,8 +226,7 @@ async fn push_inner(st: &Shared, auth: &crate::db::Auth, local: &Media, score_fo
         return Ok(json!({"synced_at": null, "score_format_drift": true}));
     }
     let overall = local.rating.as_ref().map(|r| r.overall);
-    let entry_id = st
-        .anilist
+    let entry_id = anilist
         .push_list_entry(&auth.access_token, local.fields.anilist_id, &local.status, local.progress, local.repeat_count, overall)
         .await?;
     let now = now_iso();
@@ -252,11 +254,13 @@ pub async fn delete_remote_entry(st: &Shared, media_id: i64) -> SyncResult<()> {
 /// FR-58. Automatic pushes (background on local edits, and retries) must not
 /// blindly overwrite a remote change made in the same window. A local entry
 /// with NO remote counterpart is the ordinary first push, not a conflict.
-pub async fn push_now_guarded(st: &Shared, media_id: i64) -> SyncResult<Value> {
+/// Your edits push at interactive priority, retries in the background (FR-86).
+pub async fn push_now_guarded(st: &Shared, media_id: i64, priority: Priority) -> SyncResult<Value> {
     let auth = auth(st)?;
     let local = local(st, media_id)?;
     let (remote, score_format) = match st
         .anilist
+        .at(priority)
         .get_list_entry(&auth.access_token, auth.anilist_user_id, local.fields.anilist_id, &local.fields.media_type)
         .await
     {
@@ -269,7 +273,7 @@ pub async fn push_now_guarded(st: &Shared, media_id: i64) -> SyncResult<Value> {
         Err(e) => return Err(e.into()),
     };
     let Some(remote) = remote else {
-        return push_now(st, media_id, None).await;
+        return push_now(st, media_id, None, priority).await;
     };
     if detect_conflict(local.updated_at.as_deref(), remote.updated_at.as_deref(), local.last_synced_at.as_deref())
         == SyncOutcome::Conflict
@@ -280,7 +284,7 @@ pub async fn push_now_guarded(st: &Shared, media_id: i64) -> SyncResult<Value> {
         log::warn!("automatic push skipped for media_id={media_id}: conflict with remote change");
         return Ok(json!({"synced_at": null, "score_format_drift": false, "conflict": true}));
     }
-    push_now(st, media_id, score_format).await
+    push_now(st, media_id, score_format, priority).await
 }
 
 /// Background push for a local edit: never awaited by the request, so a slow
@@ -288,7 +292,7 @@ pub async fn push_now_guarded(st: &Shared, media_id: i64) -> SyncResult<Value> {
 pub fn spawn_push(st: &Shared, media_id: i64) {
     let st = st.clone();
     tokio::spawn(async move {
-        if let Err(e) = push_now_guarded(&st, media_id).await {
+        if let Err(e) = push_now_guarded(&st, media_id, Priority::Interactive).await {
             log::warn!("background push for media_id={media_id} failed: {e}");
         }
     });
@@ -298,17 +302,34 @@ pub fn spawn_push(st: &Shared, media_id: i64) {
 pub async fn retry_loop(st: Shared) {
     loop {
         tokio::time::sleep(PUSH_RETRY_INTERVAL).await;
-        if !st.db.is_connected() {
-            continue;
-        }
-        let ids: Vec<i64> = queue(&st).iter().copied().collect();
-        for media_id in ids {
-            match push_now_guarded(&st, media_id).await {
-                Ok(_) => log::info!("retry succeeded for media_id={media_id}"),
-                Err(e) => log::error!("retry failed for media_id={media_id}; still queued: {e}"),
-            }
+        if st.db.is_connected() {
+            retry_pushes(&st, PUSH_RETRY_SPACING).await;
         }
     }
+}
+
+/// One round of FR-26 retries at background priority (FR-86): one title at
+/// a time, `spacing` apart, stopping for this round as soon as background
+/// work can't go (no spare budget, or a 429 paused requests). Returns how
+/// many titles it tried.
+pub async fn retry_pushes(st: &Shared, spacing: Duration) -> usize {
+    let ids: Vec<i64> = queue(st).iter().copied().collect();
+    let mut tried = 0;
+    for media_id in ids {
+        if tried > 0 {
+            tokio::time::sleep(spacing).await;
+        }
+        if !st.anilist.is_quiet() {
+            log::info!("push retries wait for spare AniList budget; {} still queued", queue(st).len());
+            break;
+        }
+        tried += 1;
+        match push_now_guarded(st, media_id, Priority::Background).await {
+            Ok(_) => log::info!("retry succeeded for media_id={media_id}"),
+            Err(e) => log::error!("retry failed for media_id={media_id}; still queued: {e}"),
+        }
+    }
+    tried
 }
 
 /// FR-58. Same shape as Pull's conflicts, built from a live remote fetch.
@@ -337,11 +358,12 @@ pub async fn get_pending_conflicts(st: &Shared) -> SyncResult<Vec<Value>> {
 /// FR-79: imports who you follow (everyone, or mutual follows only, per the
 /// setting), and fetches no lists. Logged out, except that mutual only reads
 /// your own following list with your token (see AniList::get_following).
+/// At normal priority (FR-86).
 pub async fn sync_friends(st: &Shared) -> SyncResult<()> {
     let auth = auth(st)?;
     let (mutual_only, _) = st.db.friend_sync_state()?;
     let token = mutual_only.then_some(auth.access_token.as_str());
-    let followed = st.anilist.get_following(auth.anilist_user_id, mutual_only, token).await?;
+    let followed = st.anilist.at(Priority::Normal).get_following(auth.anilist_user_id, mutual_only, token).await?;
     st.db.sync_followed(&followed, &now_iso())?;
     Ok(())
 }
@@ -362,18 +384,20 @@ pub fn sync_friends_later(st: &Shared) {
 /// a comparison): they show as "fetching" meanwhile, keep their source, and
 /// are marked private if AniList says so. Only one such fetch per friend
 /// runs at a time: a caller arriving during one waits for it and gets its
-/// answer, without a request of its own. Without `id`, it's an add by
-/// username: stored as a manual friend. Your own account is never stored.
-pub async fn fetch_friend(st: &Shared, name: &str, id: Option<i64>) -> SyncResult<FriendLookup> {
+/// answer, without a request of its own, after raising that fetch to its
+/// own `priority` (FR-86). Without `id`, it's an add by username: stored as
+/// a manual friend. Your own account is never stored.
+pub async fn fetch_friend(st: &Shared, name: &str, id: Option<i64>, priority: Priority) -> SyncResult<FriendLookup> {
     let auth = auth(st)?;
+    let anilist = st.anilist.at(priority);
     let fetching = match id {
-        Some(id) => match Fetching::join(st, id).await {
+        Some(id) => match Fetching::join(st, id, anilist.lane()).await {
             Joined::Running(fetching) => Some(fetching),
             Joined::Answered(answer) => return Ok(answer?),
         },
         None => None,
     };
-    let answer = st.anilist.get_friend_list(name, id).await;
+    let answer = anilist.get_friend_list(name, id).await;
     match (&answer, id) {
         (Ok(FriendLookup::Found(list)), _) if list.anilist_user_id == auth.anilist_user_id => {}
         (Ok(FriendLookup::Found(list)), None) => st.db.replace_friend_list(list, &now_iso())?,
@@ -393,6 +417,14 @@ pub async fn fetch_friend(st: &Shared, name: &str, id: Option<i64>) -> SyncResul
 /// Where a running friend fetch's answer arrives: None until it's in.
 pub type FetchAnswer = watch::Receiver<Option<Result<FriendLookup, AlError>>>;
 
+/// A running friend fetch: its answer, and the lane its requests go in, for
+/// a caller who joins it to raise.
+#[derive(Clone)]
+pub struct RunningFetch {
+    answer: FetchAnswer,
+    lane: Lane,
+}
+
 /// A friend shows as "fetching" (GET /friends) until this is dropped, and
 /// anyone fetching them meanwhile gets this fetch's answer.
 struct Fetching<'a> {
@@ -407,21 +439,23 @@ enum Joined<'a> {
 }
 
 impl<'a> Fetching<'a> {
-    /// Starts fetching `id`, or, if that's already running, waits for its
-    /// answer. One dropped half-way answers nothing, so this one runs then.
-    async fn join(st: &'a Shared, id: i64) -> Joined<'a> {
+    /// Starts fetching `id` in `lane`, or, if that's already running, raises
+    /// it to `lane`'s priority and waits for its answer. One dropped half-way
+    /// answers nothing, so this one runs then.
+    async fn join(st: &'a Shared, id: i64, lane: &Lane) -> Joined<'a> {
         loop {
-            let mut running = {
+            let RunningFetch { answer: mut running, lane: theirs } = {
                 let mut all = st.friend_fetching.lock().unwrap_or_else(|e| e.into_inner());
                 match all.get(&id) {
                     Some(running) => running.clone(),
                     None => {
                         let (answer, running) = watch::channel(None);
-                        all.insert(id, running);
+                        all.insert(id, RunningFetch { answer: running, lane: lane.clone() });
                         return Joined::Running(Fetching { st, id, answer });
                     }
                 }
             };
+            st.anilist.limiter().raise(&theirs, lane.get());
             let answer = running.wait_for(Option::is_some).await.ok().and_then(|answer| answer.clone());
             if let Some(answer) = answer {
                 return Joined::Answered(answer);
@@ -446,15 +480,16 @@ pub async fn friend_queue_loop(st: Shared, spacing: Duration) {
     }
 }
 
-/// One queue turn: fetches at most one friend's lists (two requests), and
-/// only while logged in, with no other AniList call running and no 429 in
-/// the last minute. Returns whose fetch it tried.
+/// One queue turn: fetches at most one friend's lists (two requests) at
+/// background priority, and only while logged in, when background work could
+/// go at once (FR-86: nothing else waiting or running, no 429 in the last
+/// minute, spare budget). Returns whose fetch it tried.
 pub async fn friend_queue_step(st: &Shared) -> SyncResult<Option<i64>> {
     if !st.db.is_connected() || !st.anilist.is_quiet() {
         return Ok(None);
     }
     let Some((id, name)) = st.db.next_friend_to_fetch()? else { return Ok(None) };
-    let failed = match fetch_friend(st, &name, Some(id)).await {
+    let failed = match fetch_friend(st, &name, Some(id), Priority::Background).await {
         Ok(FriendLookup::NoSuchUser) => true,
         Ok(_) => false,
         // Not reaching AniList is the queue's problem, not this friend's:

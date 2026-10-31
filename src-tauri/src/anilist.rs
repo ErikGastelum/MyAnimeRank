@@ -5,28 +5,25 @@
 //! external metadata API.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields};
+use crate::limiter::{Lane, Limiter, Priority, MAX_PAUSE_WAIT};
 
 pub const ANILIST_URL: &str = "https://graphql.anilist.co";
 pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
 
-/// HTTP 429: honor Retry-After, at most this many retries per call, and never
-/// block longer than this per wait (asking for more means give up now and let
-/// the caller / push retry queue try again later).
+/// HTTP 429: every request pauses for Retry-After (FR-86); a call retries at
+/// most this many times (background calls never), and never waits longer
+/// than MAX_PAUSE_WAIT (asking for more means give up now and let the caller
+/// / push retry queue try again later).
 const MAX_429_RETRIES: usize = 2;
-const MAX_RETRY_WAIT_SECONDS: f64 = 30.0;
 const DEFAULT_RETRY_AFTER_SECONDS: f64 = 2.0;
-/// FR-80: the friend-list queue stays off this long after any 429, or for
-/// Retry-After if that's longer (up to an hour).
-const QUEUE_PAUSE_AFTER_429: Duration = Duration::from_secs(60);
 /// FR-79: 50 follows a page; more pages than this is a runaway answer.
 const MAX_FOLLOW_PAGES: i64 = 200;
 
@@ -67,30 +64,14 @@ impl From<reqwest::Error> for AlError {
 
 pub type AlResult<T> = Result<T, AlError>;
 
+/// Every clone shares one limiter (FR-86). A clone made with `at()` sends
+/// at that priority; otherwise requests are interactive.
 #[derive(Clone)]
 pub struct AniList {
     http: reqwest::Client,
     graphql_url: String,
-    /// FR-80: requests running right now, and until when a 429 keeps the
-    /// friend-list queue off. Shared by every clone.
-    in_flight: Arc<AtomicUsize>,
-    queue_paused_until: Arc<Mutex<Option<Instant>>>,
-}
-
-/// Counts a request as running until dropped, however `graphql()` returns.
-struct InFlight<'a>(&'a AtomicUsize);
-
-impl<'a> InFlight<'a> {
-    fn new(count: &'a AtomicUsize) -> Self {
-        count.fetch_add(1, Ordering::SeqCst);
-        InFlight(count)
-    }
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
+    limiter: Arc<Limiter>,
+    lane: Lane,
 }
 
 /// One AniList MediaList entry joined with its media (Pull / conflict data).
@@ -139,18 +120,37 @@ impl Default for AniList {
 
 impl AniList {
     pub fn with_url(graphql_url: &str) -> Self {
+        Self::with_window(graphql_url, crate::limiter::WINDOW)
+    }
+
+    /// Tests shorten the limiter's window (FR-86); its budget stays the same.
+    pub fn with_window(graphql_url: &str, window: Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()
             .expect("HTTP client builds with static settings");
-        AniList { http, graphql_url: graphql_url.into(), in_flight: Default::default(), queue_paused_until: Default::default() }
+        AniList { http, graphql_url: graphql_url.into(), limiter: Arc::new(Limiter::new(window)), lane: Lane::new(Priority::Interactive) }
     }
 
-    /// FR-80: the friend-list queue may take a turn: no other AniList call is
-    /// running and no 429 came in the last minute.
+    /// The same client, sending at `priority` (FR-86). Each call starts a
+    /// lane of its own, so raising it touches only this piece of work.
+    pub fn at(&self, priority: Priority) -> AniList {
+        AniList { lane: Lane::new(priority), ..self.clone() }
+    }
+
+    pub fn lane(&self) -> &Lane {
+        &self.lane
+    }
+
+    pub fn limiter(&self) -> &Limiter {
+        &self.limiter
+    }
+
+    /// FR-80/FR-26: background work may take a turn of two requests (a
+    /// friend fetch, a push retry): nothing else is waiting or running, no
+    /// 429 in the last minute, and the background share has room.
     pub fn is_quiet(&self) -> bool {
-        let paused_until = *self.queue_paused_until.lock().unwrap_or_else(|e| e.into_inner());
-        self.in_flight.load(Ordering::SeqCst) == 0 && paused_until.is_none_or(|t| Instant::now() >= t)
+        self.limiter.background_ready(2)
     }
 
     async fn graphql(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64) -> AlResult<Value> {
@@ -158,19 +158,22 @@ impl AniList {
     }
 
     /// The one path to AniList, for graphql() and every Pick an anime
-    /// request. It counts as running for the friend-list queue (FR-80) until
-    /// it returns, and any 429 pauses that queue. It sends at most `budget`
-    /// HTTP requests, 429 retries included (and never more than
-    /// MAX_429_RETRIES of those), taking each one it sends out of `budget`.
+    /// request: each request waits for its turn in the shared limiter
+    /// (FR-86), whose budget the response headers keep honest, and a 429
+    /// pauses every request. It sends at most `budget` HTTP requests, 429
+    /// retries included (and never more than MAX_429_RETRIES of those, none
+    /// at background priority), taking each one it sends out of `budget`.
     /// `budget` must be at least 1.
     async fn graphql_within(&self, query: &str, variables: Option<Value>, token: Option<&str>, timeout: u64, budget: &mut usize) -> AlResult<Value> {
-        let _running = InFlight::new(&self.in_flight);
         let mut payload = json!({ "query": query });
         if let Some(v) = variables {
             payload["variables"] = v;
         }
         let mut attempt = 0;
-        let response = loop {
+        loop {
+            let _sending = self.limiter.acquire(&self.lane).await.map_err(|left| {
+                AlError::Network(format!("AniList is rate-limiting; try again in {} s", left.as_secs().max(1)))
+            })?;
             let mut req = self
                 .http
                 .post(&self.graphql_url)
@@ -182,18 +185,19 @@ impl AniList {
             *budget -= 1;
             let response = req.send().await?;
             if response.status().as_u16() != 429 {
-                break response;
+                let header = |name: &str| response.headers().get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
+                let (limit, remaining) = (header("X-RateLimit-Limit"), header("X-RateLimit-Remaining"));
+                self.limiter.observe(limit.map(|n| n as usize), remaining.map(|n| n as usize), header("X-RateLimit-Reset"));
+                return unwrap_response(response).await;
             }
             let wait = retry_after_seconds(&response);
-            let pause = Duration::try_from_secs_f64(wait.min(3600.0)).map_or(QUEUE_PAUSE_AFTER_429, |w| w.max(QUEUE_PAUSE_AFTER_429));
-            *self.queue_paused_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + pause);
-            if attempt == MAX_429_RETRIES || wait > MAX_RETRY_WAIT_SECONDS || *budget == 0 {
-                break response; // a shorter wait would only earn another 429
+            self.limiter.pause(Duration::try_from_secs_f64(wait.min(3600.0)).unwrap_or(MAX_PAUSE_WAIT));
+            let retries = if self.lane.get() == Priority::Background { 0 } else { MAX_429_RETRIES };
+            if attempt >= retries || wait > MAX_PAUSE_WAIT.as_secs_f64() || *budget == 0 {
+                return unwrap_response(response).await; // a shorter wait would only earn another 429
             }
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
             attempt += 1;
-        };
-        unwrap_response(response).await
+        }
     }
 
     // ------------------------------------------------------ search / media ----

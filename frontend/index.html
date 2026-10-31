@@ -138,8 +138,9 @@ async function apiFetch(path,opts={}){
     status=resp.status;text=await resp.text();
   }
   if(status<200||status>=300){
-    let detail='';try{detail=JSON.parse(text).detail||'';}catch(e){}
-    const err=new Error(`API ${path} failed: ${status} ${detail}`);err.status=status;err.detail=detail;throw err;
+    let body=null;try{body=JSON.parse(text);}catch(e){}
+    const detail=(body&&body.detail)||'';
+    const err=new Error(`API ${path} failed: ${status} ${detail}`);err.status=status;err.detail=detail;err.body=body;throw err;
   }
   if(status===204||!text)return null;
   return JSON.parse(text);
@@ -293,23 +294,34 @@ const DISCOVER_SECTIONS=[
   {key:'popular',label:'Popular'},
 ];
 // _discoverCache[`${section}:${mt}`]: undefined = loading (skeleton shelf),
-// false = that section's fetch failed, array = loaded. Opening Discover (or
-// its Anime/Manga toggle) again re-fetches only the sections not loaded yet.
+// false = that section's fetch failed, array = loaded. A loaded shelf is kept
+// 10 minutes (FR-50, as long as the server caches it), so switching
+// Anime/Manga refetches nothing; opening Discover (or the toggle) after that,
+// or after a failure, fetches it again, keeping the old shelf on screen.
+const DISCOVER_FRESH_MS=10*60*1000;
 let _discoverCache={};
-const _discoverLoading=new Set();
-async function loadDiscoverType(mt){
-  const todo=DISCOVER_SECTIONS.filter(sec=>!_discoverCache[`${sec.key}:${mt}`]);
-  if(!todo.length||_discoverLoading.has(mt))return;
-  _discoverLoading.add(mt);
-  todo.forEach(sec=>{delete _discoverCache[`${sec.key}:${mt}`];});
-  await Promise.all(todo.map(async sec=>{
-    try{
-      const resp=await api.getDiscover(sec.key,mt);
-      _discoverCache[`${sec.key}:${mt}`]=resp.results;
-    }catch(e){ console.error('discover fetch failed:',sec.key,mt,e); _discoverCache[`${sec.key}:${mt}`]=false; }
-  }));
-  _discoverLoading.delete(mt);
-  render();
+const _discoverAt={};
+let _discoverLoading=false;
+const discoverDue=(key)=>!_discoverCache[key]||Date.now()-_discoverAt[key]>=DISCOVER_FRESH_MS;
+// One shelf at a time, never in parallel (AniList allows 30 requests a
+// minute, FR-86): always the next due shelf of the type on screen, in the
+// order shown, so the visible shelves come first and a toggle mid-load
+// switches to the other type's. Each call tries a shelf at most once.
+async function loadDiscoverType(){
+  if(_discoverLoading)return;
+  _discoverLoading=true;
+  const tried=new Set();
+  for(;;){
+    const mt=state.discoverType;
+    const sec=DISCOVER_SECTIONS.find(x=>!tried.has(`${x.key}:${mt}`)&&discoverDue(`${x.key}:${mt}`));
+    if(!sec||state.view!=='discover')break;
+    const key=`${sec.key}:${mt}`;tried.add(key);
+    if(_discoverCache[key]===false)delete _discoverCache[key];
+    try{ _discoverCache[key]=(await api.getDiscover(sec.key,mt)).results; _discoverAt[key]=Date.now(); }
+    catch(e){ console.error('discover fetch failed:',sec.key,mt,e); if(!_discoverCache[key])_discoverCache[key]=false; }
+    render();
+  }
+  _discoverLoading=false;
 }
 // Search results caches, one per result shape, populated by a debounced fetch
 // and read synchronously by render -- same "async fetch fills a cache, sync
@@ -590,7 +602,7 @@ H.nav = (el)=>{
   if(t==='anime'){state.view='library';state.mediaType='anime';}
   else if(t==='manga'){state.view='library';state.mediaType='manga';}
   else go(t);
-  if(t==='discover')loadDiscoverType(state.discoverType);
+  if(t==='discover')loadDiscoverType();
   if(t==='profile'&&!_profileStats)loadProfileData();
   if(t==='profile')loadFriends();
   if(t==='feed'&&!_feedCache[state.feedType])loadFeed(state.feedType);
@@ -636,7 +648,7 @@ H.openSearch = ()=>{state.view='search';state.searchType=state.mediaType;state.s
 H.openDiscoverSearch = ()=>{state.discoverSearchOpen=true;state.searchType=state.discoverType;state.dquery='';render();};
 H.closeDiscoverSearch = ()=>{state.discoverSearchOpen=false;render();};
 H.dQuery = (el)=>{state.dquery=el.value;triggerSearch('media',state.dquery,state.searchType);render();};
-H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;loadDiscoverType(state.discoverType);render();};
+H.setDiscoverType = (el)=>{state.discoverType=el.dataset.arg;loadDiscoverType();render();};
 // FR-55: real mode keys by anilist_id (data-arg), never title text. `library`
 // is already the authoritative real cache (loaded at boot, kept in sync) --
 // check it first to avoid a redundant network round-trip for anything
@@ -673,20 +685,15 @@ let _pickOptions=null, _pickOptionsError=null;
 // Per app session, per source + filters: the titles already shown (so none
 // repeats until all have been) and the pool size the server measured.
 const _pickSeen={};
-// AniList allows 30 requests a minute (anilist-api-notes #26), and the
-// friend-list queue may use 10 of them (FR-80), so picks get 20; one pick
-// sends at most 4. After each pick Reroll waits a short gap, and longer
-// whenever a worst-case next pick would take the last minute past 20.
-const PICK_RATE={limit:20,windowMs:60000,perPick:4,gapMs:2000};
-const _pickLog=[]; // {at, requests} for each pick started in the last minute
-let _pickDoneAt=0, _pickTimer=null;
+// After each pick Reroll waits at least PICK_GAP_MS, and longer when the
+// backend's shared AniList limiter (FR-86) says a worst-case pick (4
+// requests) won't fit yet: every pick answer carries that wait (wait_ms), and
+// a pick that can't run yet is refused with it (429) without sending anything.
+const PICK_GAP_MS=2000;
+let _pickDoneAt=0, _pickReadyAt=0, _pickTimer=null;
 function pickWaitMs(){
   const now=Date.now();
-  while(_pickLog.length&&now-_pickLog[0].at>=PICK_RATE.windowMs)_pickLog.shift();
-  let wait=Math.max(0,_pickDoneAt+PICK_RATE.gapMs-now);
-  let over=_pickLog.reduce((n,x)=>n+x.requests,0)+PICK_RATE.perPick-PICK_RATE.limit;
-  for(const x of _pickLog){ if(over<=0)break; wait=Math.max(wait,x.at+PICK_RATE.windowMs-now); over-=x.requests; }
-  return wait;
+  return Math.max(0,_pickDoneAt+PICK_GAP_MS-now,_pickReadyAt-now);
 }
 function rerollButton(){
   const busy=state.pickBusy, wait=busy?0:pickWaitMs(), off=busy||wait>0;
@@ -741,12 +748,10 @@ async function runPick(){
   const problem=backwards?`${backwards[1]} can’t be more than ${backwards[2]}.`
     :filters.score_min!=null&&(filters.score_min<1||filters.score_min>10)?'The minimum score has to be between 1 and 10.':null;
   if(problem){state.pickError=problem;render();return;}
-  // Logged as a worst case until the server says what it sent.
-  const logged={at:Date.now(),requests:PICK_RATE.perPick};_pickLog.push(logged);
   state.pickBusy=true;state.pickError=null;render();
   try{
     const resp=await ask();
-    logged.requests=resp.requests??PICK_RATE.perPick;
+    _pickReadyAt=Date.now()+(resp.wait_ms||0);
     // Nothing left but titles already shown: one click is one pick, so say
     // so and let the next pick start over.
     const usedUp=!resp.result&&resp.exhausted?seen.ids.length:0;
@@ -758,8 +763,12 @@ async function runPick(){
     state.pickResult={item:resp.result,total,exact:resp.pool_exact,capped:!resp.pool_exact&&resp.pool>=5000,source:p.source,usedUp,fresh:true,
       nextUpFor:resp.next_up_for,blocked:resp.blocked};
   }catch(e){
-    console.error('pick failed:',e);
-    state.pickError=pickErrorText(e,'Something went wrong picking a title. Try again.');
+    // Not yet: nothing was sent; the button counts down the limiter's wait.
+    if(e&&e.status===429&&e.body&&e.body.wait_ms!=null)_pickReadyAt=Date.now()+e.body.wait_ms;
+    else{
+      console.error('pick failed:',e);
+      state.pickError=pickErrorText(e,'Something went wrong picking a title. Try again.');
+    }
   }
   _pickDoneAt=Date.now();
   state.pickBusy=false;render();
