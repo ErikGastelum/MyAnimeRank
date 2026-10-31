@@ -2799,7 +2799,7 @@ function friendsSection(){
         <div data-act="openUser" data-arg="${f.anilist_user_id}" title="View profile" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer;">
           ${avatarBox(f.avatar_url,f.name,38)}
           <div style="min-width:0;"><div style="display:flex;align-items:baseline;gap:8px;min-width:0;"><span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(f.name)}</span><span style="flex:0 0 auto;font-size:11px;color:var(--t4);">${fromAl?'From AniList':'Added by you'}</span></div>
-          <div style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:${noList?'#e5a973':'var(--t4)'};margin-top:3px;">${esc(friendStatus(f))}</div></div>
+          <div style="font-family:'Overpass Mono',monospace;font-size:10.5px;color:${noList?'var(--t3)':'var(--t4)'};margin-top:3px;">${esc(friendStatus(f))}</div></div>
         </div>
         ${actBtn(busy?'Refreshing…':'Refresh','refreshFriend',f.anilist_user_id,false,busy)}
         ${actBtn(fromAl?'Hide':'Remove','removeFriend',f.anilist_user_id,false,busy,fromAl?HIDE_HELP:'')}
