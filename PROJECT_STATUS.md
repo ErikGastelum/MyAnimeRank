@@ -220,14 +220,19 @@ Roughly by priority:
    `rating.animation`, no `ON DELETE CASCADE`.
 9. **Hero tint CSS** is invalid and silently dropped; fixing it changes the look.
 10. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
-11. **Request volume** (AniList's limit is now 30 req/min): debounce rapid +1
-    progress clicks; use the single-entry lookup in `resolve(remote)` and
-    pending conflicts instead of the whole list. Discover fires its 6 shelves
-    in parallel per media type (12 with the toggle), and the push retry loop
-    retries every queued title each 30 s without stopping at a 429, so a long
-    queue can keep the account rate-limited. Opening a title's detail view
-    fetches its community data twice (a second render starts another fetch
-    before the first returns), on `main` too.
+11. **Request volume** (AniList's limit is 30 req/min): every request now
+    goes through one shared limiter (FR-86, `src-tauri/src/limiter.rs`): at
+    most 27 in any rolling 60 s, interactive > normal > background, a 429
+    pauses everything and resumes in priority order, and it slows down when
+    `X-RateLimit-Remaining` is lower than its own count. Discover loads its
+    shelves one at a time and caches them 10 minutes; the push retry loop
+    runs at background priority, one title per 5 s, and stops a round at a
+    429 or when there's no spare budget. Still open, though now they only
+    cost budget rather than risk a 429: debounce rapid +1 progress clicks;
+    use the single-entry lookup in `resolve(remote)` and pending conflicts
+    instead of the whole list; Discover's 6 shelves could be one aliased
+    request; opening a title's detail view fetches its community data twice
+    (a second render starts another fetch before the first returns).
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
     detail page, expanding rows, "Rate it now", the bottom nav highlight),
@@ -254,15 +259,13 @@ Roughly by priority:
     when they run out. Each next-up lookup brings the entry's related
     entries in full, so it settles two entries: a first pick from more than
     50 matches (one request left) reaches 2 entries back, enough for Re:Zero
-    S3 -> "Next up: S2" with only S1 seen, and a reroll up to 6. Reroll waits
-    2 s after each pick, longer if a worst-case pick wouldn't fit in the
-    last minute's 20: AniList allows 30, and the friend-list queue (FR-80)
-    may use 10. Every pick request counts as in flight for that queue and
-    any 429 pauses it (one path, `graphql_within()`). Other AniList traffic
-    (Discover, Feed, sync) isn't paced against picks.
-16. **Switch Reroll's pacing to the shared limiter.** `fix/rate-limit-budget`
-    is adding an app-wide AniList request budget. Once it merges, the
-    client-side cooldown in `frontend/index.html` (`PICK_RATE`,
-    `pickWaitMs()`) should take its wait from that shared limiter instead
-    of counting only picks, so Discover, Feed and sync traffic count too.
-    Keep the 4-request cap per pick (`PICK_BUDGET` in `anilist.rs`).
+    S3 -> "Next up: S2" with only S1 seen, and a reroll up to 6. Picks go
+    through the shared limiter at interactive priority (FR-86); a pick
+    starts only when its 4 requests could all go now, else it answers 429
+    with the wait. Reroll waits 2 s after each pick, longer when the
+    backend's `wait_ms` says so.
+16. **Reroll's pacing uses the shared limiter** (`fix/rate-limit-budget`).
+    The client-side counting (`PICK_RATE`, the 20-a-minute log) is gone:
+    `POST /pick` returns `wait_ms`, or 429 with `wait_ms` when a pick can't
+    run yet, so Discover, Feed and sync traffic count too. The 4-request cap
+    per pick (`PICK_BUDGET` in `anilist.rs`) and the 2 s minimum gap stay.
