@@ -852,6 +852,38 @@ async fn pull_imports_both_media_types_and_seeds_ratings_from_anilist_scores() {
 }
 
 #[tokio::test]
+async fn a_pull_that_only_changes_the_overall_keeps_the_ratings_source() {
+    // (updatedAt, title 1's score, title 2's score) on the AniList list.
+    let remote = Arc::new(Mutex::new((1_700_000_000_i64, 8.5, 8.5)));
+    let r = remote.clone();
+    let fake = fake_anilist(move |q, v| {
+        let (ts, one, two) = *r.lock().unwrap();
+        match (q.contains("MediaListCollection"), v["type"].as_str()) {
+            (true, Some("ANIME")) => (200, collection(vec![list_node(1, "ANIME", ts, one), list_node(2, "ANIME", ts, two)]), None),
+            (true, _) => (200, collection(vec![]), None),
+            _ => (500, json!({}), None),
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    // Title 2 was rated in the stepper and is in sync; title 1 comes from Pull.
+    let two = st.db.insert_or_update_media(&fields(2, "anime"), Some("watching")).unwrap();
+    st.db.upsert_rating(two, &Scores { story: 9.0, characters: 8.0, animation: 7.0, audio: 8.5, enjoyment: 9.5 }).unwrap();
+    st.db.set_last_synced(two, &myanimerank_lib::db::now_iso()).unwrap();
+    sync::pull(&st).await.unwrap();
+    let rating = |anilist_id| st.db.get_media_by_anilist_id(anilist_id).unwrap().unwrap().rating.unwrap();
+    assert_eq!((rating(1).source.as_str(), rating(2).source.as_str()), ("anilist", "app"));
+
+    // Both scores change on AniList later; Pull overwrites the overall only.
+    *remote.lock().unwrap() = (1_900_000_000, 6.0, 7.0);
+    assert_eq!(sync::pull(&st).await.unwrap(), json!({"imported": 0, "updated": 2, "conflicts": []}));
+    let (one, two) = (rating(1), rating(2));
+    assert_eq!((one.overall, one.source.as_str(), one.story, one.enjoyment), (6.0, "anilist", 8.5, 8.5));
+    assert_eq!((two.overall, two.source.as_str(), two.story, two.animation, two.enjoyment), (7.0, "app", 9.0, Some(7.0), 9.5));
+}
+
+#[tokio::test]
 async fn pull_imports_anilist_values_as_is_without_auto_completing() {
     // A rewatch sitting at the final episode imports as-is: FR-53's
     // auto-complete is for local edits, not for rewriting AniList's data.
@@ -1887,6 +1919,31 @@ async fn disagreements_are_always_the_five_largest_gaps_and_close_friends_rarely
 
     let (_, none) = call(&st, "GET", "/friends/43/compare?media_type=anime", None).await;
     assert_eq!((&none["overlap"], ids(&none["disagreements"]), ids(&none["agreements"]), &none["rarely_disagree"]), (&json!(0), vec![], vec![], &json!(false)));
+}
+
+#[tokio::test]
+async fn a_gap_under_a_point_is_a_disagreement_and_one_past_half_a_point_ends_rarely_disagree() {
+    let st = offline_state().await;
+    login(&st);
+    // Half-point gaps from awkward decimals (7.1/6.6, 8.3/7.8) and exact
+    // matches, plus title 9's 0.8: under the old 1.0 rule, not a disagreement.
+    let pairs = [(1, 7.1, 6.6), (2, 8.3, 7.8), (3, 6.0, 6.0), (4, 9.0, 9.5), (5, 7.5, 7.5), (6, 6.5, 6.5), (9, 8.0, 7.2)];
+    let mut with_9 = Vec::new();
+    for (id, yours, theirs) in pairs {
+        mine(&st, id, "anime", "completed", Some(yours), &["Action"]);
+        with_9.push(their(id, "anime", "completed", Some(theirs), &["Action"]));
+    }
+    let without_9 = with_9.iter().filter(|e| e.anilist_id != 9).cloned().collect();
+    st.db.replace_friend_list(&friend_list(42, "Pal", with_9), "2026-01-01T00:00:00+00:00").unwrap();
+    st.db.replace_friend_list(&friend_list(43, "Amy", without_9), "2026-01-01T00:00:00+00:00").unwrap();
+
+    let (_, b) = call(&st, "GET", "/friends/42/compare?media_type=anime", None).await;
+    assert_eq!((ids(&b["disagreements"]), ids(&b["agreements"])), (vec![9, 4, 2, 1, 5], vec![6, 3]));
+    assert_eq!(b["rarely_disagree"], json!(false), "0.8 is past half a point");
+
+    let (_, b) = call(&st, "GET", "/friends/43/compare?media_type=anime", None).await;
+    assert_eq!((ids(&b["disagreements"]), ids(&b["agreements"])), (vec![4, 2, 1, 5, 6], vec![3]));
+    assert_eq!(b["rarely_disagree"], json!(true), "every gap is 0.5 or less");
 }
 
 #[tokio::test]
