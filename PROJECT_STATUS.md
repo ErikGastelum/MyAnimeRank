@@ -29,7 +29,7 @@ Comparison, M11 Pick an anime).
 | DB | SQLite via rusqlite (bundled), same schema as the Python app |
 | Frontend | single vanilla HTML/JS file, no build step |
 | Login | AniList implicit grant, built-in client ID, no secret |
-| Tests / lint | `cargo test` (113), `cargo clippy --all-targets` (clean) |
+| Tests / lint | `cargo test` (126), `cargo clippy --all-targets` (clean) |
 
 Platforms: Windows (WebView2), macOS (WebKit), Linux (WebKitGTK).
 
@@ -58,10 +58,11 @@ src-tauri/src/lib.rs      app state, Tauri setup, `api` and `start_login` comman
 src-tauri/src/api.rs      every route (same paths/JSON/status codes as PRD §7), auth gate
 src-tauri/src/db.rs       schema, migration of older DBs, rating math, queries
 src-tauri/src/anilist.rs  all GraphQL through one graphql() (errors/404/429 handling)
+src-tauri/src/limiter.rs  the shared AniList budget: 27 per rolling 60 s, by priority (FR-86)
 src-tauri/src/sync.rs     Pull, guarded push, conflicts, in-memory retry queue, friend
                           sync, the friend-list queue (one fetch per friend at a time)
 src-tauri/src/oauth.rs    one-shot callback listener on 8931 (implicit grant)
-src-tauri/src/cache.rs    60s TTL cache for Discover/Feed
+src-tauri/src/cache.rs    TTL cache: Discover 10 min, Feed 60 s, pick lists 24 h
 src-tauri/src/config.rs   built-in AniList client ID + optional overrides
 src-tauri/tests/backend.rs  integration tests: in-memory DB, fake AniList server
 frontend/index.html       entire UI; talks to the API via Tauri, or fetch under --serve
@@ -89,7 +90,8 @@ database.
   fixture database and sent the same requests, including writes and error
   cases. Responses and final database state were identical (46/46 in the first
   run, 80 requests in a later review), apart from error-detail wording.
-- **Tests:** 113 Rust tests (112 in `tests/backend.rs`, 1 in `config.rs`).
+- **Tests:** 126 Rust tests (125 in `tests/backend.rs`, 1 in `config.rs`);
+  the shared limiter's 13 (FR-86) are listed under its own heading below.
   Pick an anime's 28 run against a fake AniList that pages like the real
   one (5000-entry limit included) and, for the prequel check (FR-85), has
   relations and per-id lookups that return related entries in full; its
@@ -112,6 +114,37 @@ database.
 - **By hand:** Windows (window controls, library, login, writes, adding a
   title syncs to AniList, ~100 MB memory) and Linux (fresh user with no
   config, an existing library, login URL).
+- **Shared AniList limiter (FR-86, `fix/rate-limit-budget`):** 13 tests
+  against the fake AniList, on windows scaled down from a minute: each
+  priority stops at its share (27/23/19), a click goes ahead of queued
+  normal and background work, a raised background request goes at once,
+  background waits while higher work is in flight, a 429 pauses every
+  request and they resume highest priority first, a Retry-After over 30 s
+  fails fast for everyone, `X-RateLimit-Remaining` below the limiter's own
+  count slows it down, the push retry round stops at a 429 and with no
+  spare budget and spaces titles, Discover is cached 10 minutes across
+  toggles and waits at normal priority while a search goes, a pick that
+  can't send its 4 now answers 429 with the wait and sends nothing, the
+  debug endpoint's shape, and a mixed load through the routes (Pull and
+  friend sync, the queue, rapid picks, Discover, searches, comparisons,
+  ratings, push retries) that never puts more than 27 in any window as
+  AniList counts them, on arrival. Ten hand mutations (budget, priority
+  order, reserves, header reading, background 429 retries, counting from
+  send instead of answer, the in-flight rule, head-of-line order, fail-fast,
+  the shared pause) each fail at least one test.
+  Headless smoke test: the real router and page (as `--serve`), real retry
+  and friend-queue loops, on a temp DB, against a fake AniList logging every
+  request, driven from two windows of the page for 130 s (Reroll whenever
+  enabled, Discover toggled every 1.5 s, a rating, status change, search
+  and comparison every 2.5 s). Busiest 60 s window: `main` 143 requests
+  (75 and 79 429s with the fake enforcing 30/min, 10 failed picks); this
+  branch 27, no 429s, no failed picks. The whole first burst (two Pulls,
+  10 Discover shelves, picks, ratings, a comparison) fits in the first 4 s,
+  after which a Reroll showed up to "Reroll in 57s": the limiter allows a
+  full 27 at once and then waits for the window. Live, logged out: the
+  app's client read `X-RateLimit-Remaining` 29, 28, 27 over three requests,
+  matching its own count. Not verified: a real 429 (`Retry-After`,
+  `X-RateLimit-Reset`), and the desktop window itself (no display here).
 - **Friend Comparison (M10):** 34 more tests (84 in `tests/backend.rs`): the
   friend tables added to an existing `library.db` with its other tables
   byte-identical, the pre-FR-79 `friend` table migrated without a value
@@ -220,14 +253,23 @@ Roughly by priority:
    `rating.animation`, no `ON DELETE CASCADE`.
 9. **Hero tint CSS** is invalid and silently dropped; fixing it changes the look.
 10. **UI labels use `text-transform:uppercase`**, against the CLAUDE.md convention.
-11. **Request volume** (AniList's limit is now 30 req/min): debounce rapid +1
-    progress clicks; use the single-entry lookup in `resolve(remote)` and
-    pending conflicts instead of the whole list. Discover fires its 6 shelves
-    in parallel per media type (12 with the toggle), and the push retry loop
-    retries every queued title each 30 s without stopping at a 429, so a long
-    queue can keep the account rate-limited. Opening a title's detail view
-    fetches its community data twice (a second render starts another fetch
-    before the first returns), on `main` too.
+11. **Request volume** (AniList's limit is 30 req/min): every request now
+    goes through one shared limiter (FR-86, `src-tauri/src/limiter.rs`): at
+    most 27 in any rolling 60 s, interactive > normal > background, a 429
+    pauses everything and resumes in priority order, and it slows down when
+    `X-RateLimit-Remaining` is lower than its own count. Discover loads its
+    shelves one at a time and caches them 10 minutes; the push retry loop
+    runs at background priority, one title per 5 s, and stops a round at a
+    429 or when there's no spare budget. Still open, though now they only
+    cost budget rather than risk a 429: debounce rapid +1 progress clicks;
+    use the single-entry lookup in `resolve(remote)` and pending conflicts
+    instead of the whole list; Discover's 6 shelves could be one aliased
+    request; opening a title's detail view fetches its community data twice
+    (a second render starts another fetch before the first returns). Open
+    question: the limiter lets the whole 27 go at once, so a busy start can
+    spend it in seconds and leave clicks waiting up to a minute (seen as
+    "Reroll in 57s" in the smoke test); smoothing (say, half the budget per
+    30 s) would trade that for slower first loads.
 12. **Friend Comparison, still unverified:** the desktop window by hand
     (Friends section, Compare page, taste-match tooltip, friend chips on a
     detail page, expanding rows, "Rate it now", the bottom nav highlight),
@@ -254,15 +296,13 @@ Roughly by priority:
     when they run out. Each next-up lookup brings the entry's related
     entries in full, so it settles two entries: a first pick from more than
     50 matches (one request left) reaches 2 entries back, enough for Re:Zero
-    S3 -> "Next up: S2" with only S1 seen, and a reroll up to 6. Reroll waits
-    2 s after each pick, longer if a worst-case pick wouldn't fit in the
-    last minute's 20: AniList allows 30, and the friend-list queue (FR-80)
-    may use 10. Every pick request counts as in flight for that queue and
-    any 429 pauses it (one path, `graphql_within()`). Other AniList traffic
-    (Discover, Feed, sync) isn't paced against picks.
-16. **Switch Reroll's pacing to the shared limiter.** `fix/rate-limit-budget`
-    is adding an app-wide AniList request budget. Once it merges, the
-    client-side cooldown in `frontend/index.html` (`PICK_RATE`,
-    `pickWaitMs()`) should take its wait from that shared limiter instead
-    of counting only picks, so Discover, Feed and sync traffic count too.
-    Keep the 4-request cap per pick (`PICK_BUDGET` in `anilist.rs`).
+    S3 -> "Next up: S2" with only S1 seen, and a reroll up to 6. Picks go
+    through the shared limiter at interactive priority (FR-86); a pick
+    starts only when its 4 requests could all go now, else it answers 429
+    with the wait. Reroll waits 2 s after each pick, longer when the
+    backend's `wait_ms` says so.
+16. **Reroll's pacing uses the shared limiter** (`fix/rate-limit-budget`).
+    The client-side counting (`PICK_RATE`, the 20-a-minute log) is gone:
+    `POST /pick` returns `wait_ms`, or 429 with `wait_ms` when a pick can't
+    run yet, so Discover, Feed and sync traffic count too. The 4-request cap
+    per pick (`PICK_BUDGET` in `anilist.rs`) and the 2 s minimum gap stay.
