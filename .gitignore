@@ -1,6 +1,10 @@
-local_config.py
 library.db
 library.db.bak
 *.db.bak*
 myanimrank.db
-.claude/settings.local.json
+backups/
+local_config.toml
+
+# Private tooling config (kept on disk, not published)
+.claude/
+.codex/

@@ -3,6 +3,7 @@ name = "myanimerank"
 version = "2.0.0"
 description = "Anchored relative scoring for anime and manga, synced with AniList"
 edition = "2021"
+license = "MIT"
 publish = false
 
 [lib]

@@ -83,3 +83,7 @@ cd src-tauri
 cargo test                     # in-memory databases and a fake AniList, never the network
 cargo clippy --all-targets     # lint; kept warning-free
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
