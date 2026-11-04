@@ -4023,3 +4023,317 @@ async fn the_whole_app_stays_within_the_budget_in_every_window_under_a_mixed_loa
     let fetched = st.db.get_friends().unwrap().iter().filter(|f| f.fetched_at.is_some()).count();
     assert!(fetched >= 3, "the friend-list queue ran too: {fetched} fetched");
 }
+
+// ------------------------------------------------------- rate series (FR-44, FR-69) ----
+
+/// A Media node as the series walk asks for it. `date` is (year, month, day);
+/// `edges` are (relationType, related id, its type).
+fn series_node(id: i64, al_type: &str, format: &str, date: (Option<i64>, Option<i64>, Option<i64>), edges: &[(&str, i64, &str)]) -> Value {
+    let edges: Vec<Value> = edges.iter().map(|(rel, rid, t)| json!({"relationType": rel, "node": {"id": rid, "type": t}})).collect();
+    json!({
+        "id": id, "type": al_type, "format": format,
+        "title": {"romaji": format!("Title {id}"), "english": null, "native": null},
+        "coverImage": {"large": null},
+        "startDate": {"year": date.0, "month": date.1, "day": date.2},
+        "relations": {"edges": edges},
+    })
+}
+
+/// An anime released on the first of `month`, 2020.
+fn anime_in(id: i64, month: i64, edges: &[(&str, i64, &str)]) -> Value {
+    series_node(id, "ANIME", "TV", (Some(2020), Some(month), Some(1)), edges)
+}
+
+/// `n` anime in a line, 1 to `n`, each the SEQUEL of the one before.
+fn anime_line(n: i64) -> Vec<Value> {
+    (1..=n)
+        .map(|id| {
+            let mut edges = vec![];
+            if id > 1 {
+                edges.push(("PREQUEL", id - 1, "ANIME"));
+            }
+            if id < n {
+                edges.push(("SEQUEL", id + 1, "ANIME"));
+            }
+            anime_in(id, id, &edges)
+        })
+        .collect()
+}
+
+/// AniList over a fixed `catalog`: `Media(id:)` finds an entry and brings its
+/// related entries in full, whose own edges stop at id and type, or 404s like
+/// AniList does.
+fn series_reply(catalog: &[Value], q: &str, v: &Value) -> Reply {
+    assert!(q.contains("Media(id: $id"), "unexpected query: {q}");
+    let Some(found) = catalog.iter().find(|m| m["id"] == v["id"]) else {
+        return (404, json!({"data": {"Media": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None);
+    };
+    let mut found = found.clone();
+    for edge in found["relations"]["edges"].as_array_mut().unwrap() {
+        if let Some(full) = catalog.iter().find(|c| c["id"] == edge["node"]["id"]) {
+            edge["node"] = full.clone();
+        }
+    }
+    (200, json!({"data": {"Media": found}}), None)
+}
+
+/// A logged-in app over `catalog`, with each of `library` imported as its
+/// catalog `type` says. Returns the rows' local ids, in `library`'s order.
+async fn series_state(catalog: Vec<Value>, library: &[i64]) -> (Fake, Shared, Vec<i64>) {
+    let types: Vec<(i64, String)> = catalog.iter().map(|m| (m["id"].as_i64().unwrap(), m["type"].as_str().unwrap().to_lowercase())).collect();
+    let fake = fake_anilist(move |q, v| series_reply(&catalog, q, v)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let rows = library
+        .iter()
+        .map(|id| {
+            let media_type = &types.iter().find(|(i, _)| i == id).unwrap().1;
+            st.db.insert_or_update_media(&fields(*id, media_type), Some("completed")).unwrap()
+        })
+        .collect();
+    (fake, st, rows)
+}
+
+async fn series(st: &Shared, media_id: i64) -> Value {
+    let (status, body) = call(st, "GET", &format!("/media/{media_id}/series"), None).await;
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+fn entry_ids(series: &Value) -> Vec<i64> {
+    series["entries"].as_array().unwrap().iter().map(|e| e["anilist_id"].as_i64().unwrap()).collect()
+}
+
+/// The chain must be `want`, complete, from every library row in `rows`.
+async fn assert_chain_from_every_start(st: &Shared, rows: &[i64], want: &[i64]) {
+    for row in rows {
+        let s = series(st, *row).await;
+        assert_eq!(entry_ids(&s), want, "starting from row {row}");
+        assert_eq!(s["partial"], json!(false));
+    }
+}
+
+#[tokio::test]
+async fn series_is_the_same_ids_in_the_same_order_from_every_start() {
+    let (_fake, st, rows) = series_state(anime_line(4), &[1, 2, 3, 4]).await;
+    assert_chain_from_every_start(&st, &rows, &[1, 2, 3, 4]).await;
+}
+
+#[tokio::test]
+async fn series_follows_both_sides_of_a_fork_that_rejoins() {
+    // The Demon Slayer shape: the same arc as a movie and as a TV cut, each
+    // between the same two seasons.
+    let catalog = vec![
+        anime_in(1, 1, &[("SEQUEL", 2, "ANIME"), ("SEQUEL", 3, "ANIME")]),
+        series_node(2, "ANIME", "MOVIE", (Some(2020), Some(2), Some(1)), &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 4, "ANIME")]),
+        anime_in(3, 3, &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 4, "ANIME")]),
+        anime_in(4, 4, &[("PREQUEL", 3, "ANIME"), ("PREQUEL", 2, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[1, 2, 3, 4]).await;
+    assert_chain_from_every_start(&st, &rows, &[1, 2, 3, 4]).await;
+}
+
+#[tokio::test]
+async fn series_keeps_an_entry_one_side_of_a_fork_skips() {
+    // The Saiki K. shape: the last entry also lists the entry before the
+    // special as a prequel, so one path back from it misses the special.
+    let catalog = vec![
+        anime_in(1, 1, &[("SEQUEL", 2, "ANIME")]),
+        anime_in(2, 2, &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 3, "ANIME"), ("SEQUEL", 4, "ANIME")]),
+        series_node(3, "ANIME", "SPECIAL", (Some(2020), Some(3), Some(1)), &[("PREQUEL", 2, "ANIME"), ("SEQUEL", 4, "ANIME")]),
+        series_node(4, "ANIME", "ONA", (Some(2020), Some(4), Some(1)), &[("PREQUEL", 2, "ANIME"), ("PREQUEL", 3, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[1, 2, 3, 4]).await;
+    assert_chain_from_every_start(&st, &rows, &[1, 2, 3, 4]).await;
+}
+
+#[tokio::test]
+async fn series_entry_shape_with_a_first_entry_not_in_the_library() {
+    let catalog = vec![
+        series_node(10, "ANIME", "OVA", (Some(2019), Some(5), Some(6)), &[("SEQUEL", 11, "ANIME")]),
+        anime_in(11, 1, &[("PREQUEL", 10, "ANIME"), ("SEQUEL", 12, "ANIME")]),
+        anime_in(12, 2, &[("PREQUEL", 11, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[11, 12]).await;
+    st.db.upsert_rating(rows[0], &scores(8.0)).unwrap();
+    let s = series(&st, rows[1]).await;
+    assert_eq!(entry_ids(&s), [10, 11, 12]);
+    assert_eq!(
+        s["entries"][0],
+        json!({
+            "anilist_id": 10, "media_id": null, "media_type": "anime",
+            "title": "Title 10", "title_english": null, "cover_url": null, "format": "OVA",
+            "start_date": {"year": 2019, "month": 5, "day": 6},
+            "in_library": false, "score": null,
+        })
+    );
+    assert_eq!(s["entries"][1]["media_id"], json!(rows[0]));
+    assert_eq!(s["entries"][1]["in_library"], json!(true));
+    assert_eq!(s["entries"][1]["score"], json!(8.0));
+    assert_eq!(s["entries"][2]["in_library"], json!(true));
+    assert_eq!(s["entries"][2]["score"], Value::Null);
+    assert_eq!(s["error"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_prequel_of_the_other_media_type_is_never_in_the_chain_from_either_side() {
+    let catalog = vec![
+        anime_in(20, 1, &[("PREQUEL", 21, "MANGA"), ("ADAPTATION", 21, "MANGA"), ("ALTERNATIVE", 21, "MANGA")]),
+        series_node(21, "MANGA", "MANGA", (Some(2019), Some(1), Some(1)), &[("SEQUEL", 20, "ANIME"), ("SOURCE", 20, "ANIME"), ("SIDE_STORY", 20, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[20, 21]).await;
+    for (row, id, media_type) in [(rows[0], 20, "anime"), (rows[1], 21, "manga")] {
+        let s = series(&st, row).await;
+        assert_eq!(entry_ids(&s), [id]);
+        assert_eq!(s["entries"][0]["media_type"], json!(media_type));
+        assert_eq!(s["side_anilist_ids"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn manga_chains_walk_like_anime_chains() {
+    let manga = |id, month, edges: &[(&str, i64, &str)]| series_node(id, "MANGA", "MANGA", (Some(2020), Some(month), Some(1)), edges);
+    let catalog = vec![manga(30, 1, &[("SEQUEL", 31, "MANGA")]), manga(31, 2, &[("PREQUEL", 30, "MANGA")])];
+    let (_fake, st, rows) = series_state(catalog, &[30, 31]).await;
+    assert_chain_from_every_start(&st, &rows, &[30, 31]).await;
+}
+
+#[tokio::test]
+async fn a_failed_hop_says_partial_keeps_nothing_and_recovers() {
+    let catalog = anime_line(5);
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let down = failing.clone();
+    let fake = fake_anilist(move |q, v| {
+        if down.load(std::sync::atomic::Ordering::SeqCst) && v["id"] == json!(3) {
+            return (500, json!({"errors": [{"message": "Internal Server Error", "status": 500}]}), None);
+        }
+        series_reply(&catalog, q, v)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let row = st.db.insert_or_update_media(&fields(1, "anime"), Some("completed")).unwrap();
+
+    let s = series(&st, row).await;
+    assert_eq!(s["partial"], json!(true));
+    assert!(s["error"].is_string(), "{s}");
+    assert_eq!(entry_ids(&s), [1, 2], "what was reached before the failure");
+
+    // The failure isn't remembered: the next call walks from the start.
+    failing.store(false, std::sync::atomic::Ordering::SeqCst);
+    let before = fake.calls().len();
+    let s = series(&st, row).await;
+    assert_eq!(s["partial"], json!(false));
+    assert_eq!(s["error"], Value::Null);
+    assert_eq!(entry_ids(&s), [1, 2, 3, 4, 5]);
+    assert_eq!(fake.calls()[before].1["id"], json!(1), "starts over from the title itself");
+}
+
+#[tokio::test]
+async fn a_failed_first_lookup_is_partial_with_no_entries() {
+    let fake = fake_anilist(|_, _| (500, json!({"errors": [{"message": "down", "status": 500}]}), None)).await;
+    let st = state_with(&fake);
+    login(&st);
+    let row = st.db.insert_or_update_media(&fields(1, "anime"), Some("completed")).unwrap();
+    let s = series(&st, row).await;
+    assert_eq!(s["partial"], json!(true));
+    assert_eq!(s["entries"], json!([]));
+}
+
+#[tokio::test]
+async fn a_relation_anilist_cant_find_is_a_dead_end_not_a_failure() {
+    let catalog = vec![
+        anime_in(1, 1, &[("SEQUEL", 2, "ANIME")]),
+        anime_in(2, 2, &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 99, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[1]).await;
+    let s = series(&st, rows[0]).await;
+    assert_eq!(entry_ids(&s), [1, 2]);
+    assert_eq!(s["partial"], json!(false));
+}
+
+#[tokio::test]
+async fn series_sorts_by_full_date_with_undated_last_and_ties_by_id() {
+    let date = |y, m, d| (Some(y), m, d);
+    let all = [("SEQUEL", 1, "ANIME"), ("SEQUEL", 2, "ANIME"), ("SEQUEL", 3, "ANIME"), ("SEQUEL", 4, "ANIME"), ("SEQUEL", 5, "ANIME"), ("SEQUEL", 6, "ANIME"), ("SEQUEL", 7, "ANIME")];
+    let node = |id, d| {
+        let edges: Vec<_> = all.iter().filter(|e| e.1 != id).copied().collect();
+        series_node(id, "ANIME", "TV", d, &edges)
+    };
+    let catalog = vec![
+        node(1, (None, None, None)),
+        node(2, date(2020, None, None)),
+        node(3, date(2020, Some(3), None)),
+        node(4, date(2020, Some(3), Some(9))),
+        node(5, date(2019, Some(12), Some(31))),
+        node(6, (None, None, None)),
+        node(7, date(2020, Some(3), Some(9))),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[1, 4]).await;
+    assert_chain_from_every_start(&st, &rows, &[5, 4, 7, 3, 2, 1, 6]).await;
+}
+
+#[tokio::test]
+async fn a_relation_cycle_ends() {
+    let catalog = vec![
+        anime_in(1, 1, &[("SEQUEL", 2, "ANIME"), ("PREQUEL", 3, "ANIME")]),
+        anime_in(2, 2, &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 3, "ANIME")]),
+        anime_in(3, 3, &[("PREQUEL", 2, "ANIME"), ("SEQUEL", 1, "ANIME")]),
+    ];
+    let (fake, st, rows) = series_state(catalog, &[1, 2, 3]).await;
+    assert_chain_from_every_start(&st, &rows, &[1, 2, 3]).await;
+    assert_eq!(fake.calls().len(), 3, "one lookup per start: each brings both of the others");
+}
+
+#[tokio::test]
+async fn one_lookup_settles_two_entries_of_a_series() {
+    let (fake, st, rows) = series_state(anime_line(6), &[1]).await;
+    assert_eq!(entry_ids(&series(&st, rows[0]).await), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(fake.calls().len(), 3, "notes #29: each request also brings the next entry's relations");
+}
+
+#[tokio::test]
+async fn side_relations_come_from_every_member_and_stay_in_the_media_type() {
+    let catalog = vec![
+        // A side relation that's also a member is only a member (the 3 here).
+        anime_in(1, 1, &[("SEQUEL", 2, "ANIME"), ("SIDE_STORY", 50, "ANIME"), ("SIDE_STORY", 3, "ANIME"), ("ALTERNATIVE", 60, "MANGA")]),
+        anime_in(2, 2, &[("PREQUEL", 1, "ANIME"), ("SEQUEL", 3, "ANIME"), ("SPIN_OFF", 51, "ANIME"), ("OTHER", 52, "ANIME")]),
+        anime_in(3, 3, &[("PREQUEL", 2, "ANIME"), ("PARENT", 53, "ANIME"), ("ALTERNATIVE", 54, "ANIME"), ("SUMMARY", 55, "ANIME"), ("CHARACTER", 56, "ANIME")]),
+    ];
+    let (_fake, st, rows) = series_state(catalog, &[1, 2, 3]).await;
+    for row in rows {
+        assert_eq!(series(&st, row).await["side_anilist_ids"], json!([50, 51, 53, 54, 55]));
+    }
+}
+
+#[tokio::test]
+async fn series_needs_a_library_row_and_a_login() {
+    let fake = fake_anilist(|_, _| (500, json!({}), None)).await;
+    let st = state_with(&fake);
+    assert_eq!(call(&st, "GET", "/media/1/series", None).await.0, 401);
+    login(&st);
+    assert_eq!(call(&st, "GET", "/media/1/series", None).await.0, 404);
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn community_relations_carry_the_full_start_date_format_and_media_type() {
+    let fake = fake_anilist(|_, _| {
+        let edge = json!({"relationType": "SEQUEL", "node": {
+            "id": 2, "type": "ANIME", "format": "MOVIE", "title": {"romaji": "Two", "english": "2"},
+            "coverImage": {"large": null}, "startDate": {"year": 2021, "month": 7, "day": 4},
+        }});
+        (200, json!({"data": {"Media": {"relations": {"edges": [edge]}, "characters": {"edges": []}, "recommendations": {"nodes": []}, "rankings": []}}}), None)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let (status, body) = call(&st, "GET", "/media/by-anilist/1/community", None).await;
+    assert_eq!(status, 200);
+    let r = &body["relations"][0];
+    assert_eq!((&r["year"], &r["month"], &r["day"]), (&json!(2021), &json!(7), &json!(4)));
+    assert_eq!(r["format"], json!("MOVIE"));
+    assert_eq!(r["media_type"], json!("anime"));
+    let (query, _) = &fake.calls()[0];
+    assert!(query.contains("startDate { year month day }") && query.contains("format"), "{query}");
+}

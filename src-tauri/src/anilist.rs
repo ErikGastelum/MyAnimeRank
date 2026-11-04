@@ -4,7 +4,7 @@
 //! No MAL/Jikan calls anywhere: this is the ONLY module that talks to an
 //! external metadata API.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -731,7 +731,7 @@ impl AniList {
     /// FR-49/FR-55: by anilist_id only, never re-derived by title.
     pub async fn get_community(&self, anilist_id: i64) -> AlResult<Option<Value>> {
         let q = "query ($id: Int) { Media(id: $id) {
-            relations { edges { relationType node { id title { romaji english native } coverImage { large } type startDate { year } } } }
+            relations { edges { relationType node { id title { romaji english native } coverImage { large } type format startDate { year month day } } } }
             characters(sort: ROLE, perPage: 10) { edges { role node { id name { full } image { large } } } }
             recommendations(sort: RATING_DESC, perPage: 6) { nodes { rating mediaRecommendation { id title { romaji english native } coverImage { large } } } }
             popularity favourites trending rankings { rank type allTime } } }";
@@ -750,7 +750,10 @@ impl AniList {
                     "title": pick_title(&n["title"]),
                     "title_english": str_of(&n["title"]["english"]),
                     "cover_url": str_of(&n["coverImage"]["large"]),
+                    "format": str_of(&n["format"]),
                     "year": n["startDate"]["year"].as_i64(),
+                    "month": n["startDate"]["month"].as_i64(),
+                    "day": n["startDate"]["day"].as_i64(),
                     "media_type": str_of(&n["type"]).map(|t| t.to_lowercase()).filter(|t| !t.is_empty()),
                 })
             })
@@ -797,6 +800,49 @@ impl AniList {
             "rank_rated": rank("RATED"),
             "rank_popular": rank("POPULAR"),
         })))
+    }
+
+    // --------------------------------------------------------------- series ----
+
+    /// FR-44/FR-69: the franchise of `anilist_id`, walked over PREQUEL and
+    /// SEQUEL edges both ways, following every candidate, so it comes out the
+    /// same from every entry in it. Each lookup brings the related entries in
+    /// full with their own relations (notes #29), so one request settles
+    /// several entries. A failed request ends the walk with `error` set and
+    /// what was reached so far; a related id AniList can't find is a dead end.
+    pub async fn get_series(&self, anilist_id: i64, media_type: &str) -> Series {
+        let q = format!(
+            "query ($id: Int) {{ Media(id: $id) {{ {SERIES_FIELDS}
+               relations {{ edges {{ relationType node {{ {SERIES_FIELDS}
+                 relations {{ edges {{ relationType node {{ id type }} }} }} }} }} }} }} }}"
+        );
+        let mut walk = SeriesWalk { media_type, ..Default::default() };
+        walk.queue.push(anilist_id);
+        let mut error = None;
+        while let Some(id) = walk.queue.pop() {
+            if walk.settled.contains(&id) {
+                continue;
+            }
+            match self.graphql(&q, Some(json!({"id": id})), None, 15).await {
+                Ok(data) if !data["Media"].is_null() => walk.absorb(&data["Media"]),
+                Ok(_) | Err(AlError::NotFound(_)) => {
+                    walk.settled.insert(id);
+                }
+                Err(e) => {
+                    log::warn!("series lookup for anilist_id={id} failed: {e}");
+                    error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        if error.is_none() && !walk.entries.contains_key(&anilist_id) {
+            error = Some(format!("AniList has no entry {anilist_id}"));
+        }
+        let SeriesWalk { entries, side, .. } = walk;
+        let side_anilist_ids = side.into_iter().filter(|id| !entries.contains_key(id)).collect();
+        let mut entries: Vec<Value> = entries.into_values().collect();
+        entries.sort_by_key(series_order);
+        Series { entries, side_anilist_ids, error }
     }
 
     // -------------------------------------------------------------- profile ----
@@ -1038,6 +1084,85 @@ impl AniList {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- series ----
+
+/// GET /media/{id}/series, before the library's part of each entry.
+pub struct Series {
+    /// In FR-44's order.
+    pub entries: Vec<Value>,
+    /// FR-69: one side edge from any entry, entries themselves left out.
+    pub side_anilist_ids: Vec<i64>,
+    /// Set when a request failed, so `entries` may be short.
+    pub error: Option<String>,
+}
+
+const SERIES_FIELDS: &str = "id type format title { romaji english native } coverImage { large } startDate { year month day }";
+
+/// FR-69: the edges that put a title beside a franchise, not in its chain.
+const SERIES_SIDE_RELATIONS: [&str; 5] = ["PARENT", "SIDE_STORY", "ALTERNATIVE", "SPIN_OFF", "SUMMARY"];
+
+#[derive(Default)]
+struct SeriesWalk<'a> {
+    media_type: &'a str,
+    entries: BTreeMap<i64, Value>,
+    side: BTreeSet<i64>,
+    /// Entries whose relations have been read.
+    settled: HashSet<i64>,
+    queue: Vec<i64>,
+}
+
+impl SeriesWalk<'_> {
+    /// Takes in a looked-up entry, then any related entry that came along
+    /// with its own relations. Only the other ones wait in the queue.
+    fn absorb(&mut self, node: &Value) {
+        let Some(id) = node["id"].as_i64() else { return };
+        if !self.settled.insert(id) {
+            return;
+        }
+        self.entries.insert(id, series_entry(node));
+        for edge in arr(&node["relations"]["edges"]) {
+            let related = &edge["node"];
+            let Some(related_id) = related["id"].as_i64() else { continue };
+            if !related["type"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(self.media_type)) {
+                continue;
+            }
+            let relation = edge["relationType"].as_str().unwrap_or_default();
+            if SERIES_SIDE_RELATIONS.contains(&relation) {
+                self.side.insert(related_id);
+            } else if relation == "PREQUEL" || relation == "SEQUEL" {
+                self.queue.push(related_id);
+                if related["relations"]["edges"].is_array() {
+                    self.absorb(related);
+                }
+            }
+        }
+    }
+}
+
+fn series_entry(node: &Value) -> Value {
+    let date = &node["startDate"];
+    json!({
+        "anilist_id": node["id"].as_i64(),
+        "media_type": str_of(&node["type"]).map(|t| t.to_lowercase()),
+        "title": pick_title(&node["title"]),
+        "title_english": str_of(&node["title"]["english"]),
+        "cover_url": str_of(&node["coverImage"]["large"]),
+        "format": str_of(&node["format"]),
+        "start_date": {"year": date["year"].as_i64(), "month": date["month"].as_i64(), "day": date["day"].as_i64()},
+    })
+}
+
+/// FR-44: by start date, a missing part after the known ones and undated
+/// entries last, then by id.
+fn series_order(entry: &Value) -> (i64, i64, i64, i64) {
+    let date = &entry["start_date"];
+    let year = date["year"].as_i64();
+    let month = year.and(date["month"].as_i64());
+    let day = month.and(date["day"].as_i64());
+    let last = |part: Option<i64>| part.unwrap_or(i64::MAX);
+    (last(year), last(month), last(day), last(entry["anilist_id"].as_i64()))
 }
 
 // --------------------------------------------------------- pick an anime ----

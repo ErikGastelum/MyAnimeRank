@@ -218,6 +218,7 @@ pub fn router(st: Shared) -> Router {
         .route("/favorites", get(favorites_get))
         .route("/media/{id}/community", get(media_community))
         .route("/media/by-anilist/{id}/community", get(media_community_by_anilist))
+        .route("/media/{id}/series", get(media_series))
         .route("/library", get(get_library))
         .route("/insights", get(get_insights))
         .route("/rankings", get(get_rankings))
@@ -557,6 +558,29 @@ async fn media_community(State(st): State<Shared>, Id(id): Id) -> ApiResult {
 /// FR-52: Discover-sourced titles have no local row, only their anilist_id.
 async fn media_community_by_anilist(State(st): State<Shared>, Id(anilist_id): Id) -> ApiResult {
     found(st.anilist.get_community(anilist_id).await?, "community data")
+}
+
+/// FR-44/FR-69: walked live every call (FR-49). A failed AniList request is
+/// `partial` in a 200, with what was reached, not an error status.
+async fn media_series(State(st): State<Shared>, Id(id): Id) -> ApiResult {
+    let local = st.db.get_media_by_id(id)?.ok_or_else(|| ApiError::new(404, "media not found"))?;
+    let series = st.anilist.get_series(local.fields.anilist_id, &local.fields.media_type).await;
+    let mut entries = series.entries;
+    for entry in &mut entries {
+        let row = match entry["anilist_id"].as_i64() {
+            Some(anilist_id) => st.db.get_media_by_anilist_id(anilist_id)?,
+            None => None,
+        };
+        entry["media_id"] = json!(row.as_ref().map(|m| m.id));
+        entry["in_library"] = json!(row.is_some());
+        entry["score"] = json!(row.and_then(|m| m.rating).map(|r| r.overall));
+    }
+    ok(json!({
+        "entries": entries,
+        "side_anilist_ids": series.side_anilist_ids,
+        "partial": series.error.is_some(),
+        "error": series.error,
+    }))
 }
 
 // -------------------------------------------------- library / rankings / profile ----

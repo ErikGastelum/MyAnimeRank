@@ -175,6 +175,7 @@ const api={
   getFeed:(type)=>apiFetch(`/feed?type=${type}`),
   getCommunity:(mediaId)=>apiFetch(`/media/${mediaId}/community`),
   getCommunityByAnilist:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/community`),
+  getSeries:(mediaId)=>apiFetch(`/media/${mediaId}/series`),
   pickOptions:()=>apiFetch('/pick/options'),
   pick:(body)=>apiFetch('/pick',{method:'POST',body:JSON.stringify(body)}),
   getInsights:()=>apiFetch('/insights'),
@@ -490,6 +491,7 @@ const state = {
   libSearch:'', libSort:'score', libSortMenuOpen:false,
   libGenre:null, libYear:null, libGenreMenuOpen:false, libYearMenuOpen:false,
   chainLoading:false,
+  chainError:null,          // media id whose Rate Series came back incomplete
   expanded: JSON.parse(localStorage.getItem('mar_expanded')||'{}'),
   // search / catalog
   searchType:'anime', query:'',
@@ -952,101 +954,50 @@ H.addStatus = async (el)=>{const added=await addFromCatalog(state.current.item,e
 
 /* rating */
 H.editCurrent = ()=>{openRating([state.current.item.id]);};
-// FR-44 multi-hop: AniList relations are adjacency-only -- confirmed live
-// (Jujutsu Kaisen 0 never lists 2nd Season directly, only its immediate
-// neighbor) -- so a single-hop lookup misses most of a franchise. Walk PREQUEL
-// backward and SEQUEL forward from the opened title, fetching each newly
-// discovered title's own community data as needed (library rows don't store
-// relations themselves, only what's already been visited this session does).
-// Capped and cycle-guarded against a malformed relation graph; never crosses
-// media_type. A relation not yet in the local library used to stop that
-// direction entirely -- confirmed live against Tensura that franchises with
-// an OVA/"Part 2" entry sitting *between* numbered seasons (not just at the
-// tail) would lose everything past it. Now the walk continues through such
-// entries as {pending:true,...} chain steps (real AniList title/cover/year),
-// using the by-anilist community route -- same one Detail already uses for
-// not-yet-imported titles -- instead of requiring a local row to continue from.
-const MAX_CHAIN_HOPS=20;
-async function fetchCommunityByAnilist(anilistId,localItem){
-  const cacheKey=localItem?localItem.id:'a:'+anilistId;
-  if(_communityCache[cacheKey]!==undefined)return _communityCache[cacheKey];
-  try{
-    const resp=localItem?await api.getCommunity(localItem.id):await api.getCommunityByAnilist(anilistId);
-    _communityCache[cacheKey]=resp;return resp;
-  }catch(e){ console.error('community fetch failed during chain walk:',e); _communityCache[cacheKey]=null; return null; }
+// FR-44/FR-69: a title's franchise comes from GET /media/{id}/series. A complete
+// answer is the same from every entry in it, so it serves all of them for the
+// rest of the session. A partial one is never kept, so the next ask (Retry, or
+// the next look at the title) walks the whole series again.
+let _seriesCache={};
+async function fetchSeries(it){
+  if(_seriesCache[it.anilist_id])return _seriesCache[it.anilist_id];
+  const resp=await api.getSeries(it.id);
+  if(!resp.partial)resp.entries.forEach(e=>{_seriesCache[e.anilist_id]=resp;});
+  return resp;
 }
-async function walkChain(startItem,relType){
-  const chain=[];
-  const visited=new Set([startItem.anilist_id]);
-  let curAnilistId=startItem.anilist_id,curLocal=startItem,curMediaType=startItem.media_type;
-  for(let hop=0;hop<MAX_CHAIN_HOPS;hop++){
-    const comm=await fetchCommunityByAnilist(curAnilistId,curLocal);
-    if(!comm)break;
-    // A title can carry multiple same-type relation edges at once (e.g. a real
-    // prequel season AND an unrelated recap/special sharing the PREQUEL tag,
-    // confirmed live against Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen) -- try
-    // every candidate, prefer one already in the local library, not just
-    // whichever edge AniList happens to list first.
-    const candidates=(comm.relations||[]).filter(r=>r.type===relType && r.anilist_id && r.media_type===curMediaType && !visited.has(r.anilist_id));
-    if(!candidates.length)break;
-    let nextLocal=null,nextCand=null;
-    for(const cand of candidates){
-      const m=library.find(x=>x.anilist_id===cand.anilist_id && x.media_type===curMediaType);
-      if(m){ nextLocal=m;nextCand=cand;break; }
-    }
-    if(!nextCand)nextCand=candidates[0];
-    visited.add(nextCand.anilist_id);
-    if(nextLocal){
-      chain.push(nextLocal.id);
-      curAnilistId=nextLocal.anilist_id;curLocal=nextLocal;curMediaType=nextLocal.media_type;
-    }else{
-      chain.push({pending:true,anilist_id:nextCand.anilist_id,title:nextCand.title,title_english:nextCand.title_english,cover_url:nextCand.cover_url,year:nextCand.year,media_type:curMediaType});
-      curAnilistId=nextCand.anilist_id;curLocal=null;
-    }
-  }
-  return chain;
-}
-// FR-69: a title's franchise among library rows, for the "Same Series"
-// calibration scope -- PREQUEL/SEQUEL walked multi-hop by walkChain() (same
-// hop cap, cycle guard and media_type filter as Rate Series) plus one hop of
-// the edges below from the title itself. Relations come through
-// fetchCommunityByAnilist(), so titles already in _communityCache this
-// session cost no request. _seriesIds[id]: undefined = not loaded, null =
-// loading, array = library ids (the title itself excluded).
-const SERIES_ONE_HOP=['PARENT','SIDE_STORY','ALTERNATIVE','SPIN_OFF','SUMMARY'];
+// FR-69: the "Same Series" calibration scope, as AniList ids (the title itself
+// excluded) so a title added mid-chain counts as soon as it's in the library.
+// _seriesIds[id]: undefined = not loaded, or the last try came back incomplete,
+// null = loading, array = loaded.
 let _seriesIds={};
 async function loadSeries(it){
   if(_seriesIds[it.id]!==undefined)return;
   _seriesIds[it.id]=null;
-  // The title's own relations first, so both walks start from the cache
-  // instead of each requesting it.
-  const comm=await fetchCommunityByAnilist(it.anilist_id,it);
-  const [prequels,sequels]=await Promise.all([walkChain(it,'PREQUEL'),walkChain(it,'SEQUEL')]);
-  const ids=new Set([...prequels,...sequels].filter(x=>typeof x!=='object'));
-  ((comm&&comm.relations)||[]).filter(r=>SERIES_ONE_HOP.includes(r.type)&&r.media_type===it.media_type).forEach(r=>{
-    const m=library.find(x=>x.anilist_id===r.anilist_id&&x.media_type===it.media_type);
-    if(m)ids.add(m.id);
-  });
-  ids.delete(it.id);
-  _seriesIds[it.id]=[...ids];
+  let s=null;
+  try{ s=await fetchSeries(it); }catch(e){ console.error('series fetch failed:',e); }
+  if(!s||s.partial){ delete _seriesIds[it.id];return; }
+  _seriesIds[it.id]=[...s.entries.map(e=>e.anilist_id),...s.side_anilist_ids].filter(aid=>aid!==it.anilist_id);
   // Fast path, same as setMenuOpen: the pill is already in the DOM, hidden,
   // so showing it is a display flip with no render() and no layout shift.
   const pill=document.getElementById('rs-pill-series');
-  if(pill&&state.view==='rating'&&state.rating&&curRatingItem()===it)pill.style.display=hasSeriesAnchors(it)?'block':'none';
+  if(pill&&state.view==='rating'&&state.rating&&curRatingItem()===it)pill.style.display=hasSeriesPeers(it)?'block':'none';
 }
-function hasSeriesAnchors(it){return (_seriesIds[it.id]||[]).some(id=>{const x=byId(id);return x&&x.rating;});}
+function hasSeriesPeers(it){return (_seriesIds[it.id]||[]).some(aid=>library.some(x=>x.anilist_id===aid&&x.media_type===it.media_type));}
+// FR-44: an incomplete answer never opens as a short chain. The detail page
+// says so instead, and its Retry comes back here.
 H.startRatingChain = async ()=>{
   if(state.chainLoading)return;
   const it=state.current.item;
-  state.chainLoading=true;render();
-  const [prequels,sequels]=await Promise.all([walkChain(it,'PREQUEL'),walkChain(it,'SEQUEL')]);
+  state.chainLoading=true;state.chainError=null;render();
+  let s=null;
+  try{ s=await fetchSeries(it); }catch(e){ console.error('series fetch failed:',e); }
   state.chainLoading=false;
-  const idOf=x=>typeof x==='object'?x.anilist_id:byId(x).anilist_id;
-  const seen=new Set();
-  const chain=[...prequels.slice().reverse(),it.id,...sequels].filter(x=>{
-    const aid=idOf(x);if(seen.has(aid))return false;seen.add(aid);return true;
+  if(!s||s.partial){ state.chainError=it.id;render();return; }
+  const chain=s.entries.map(e=>{
+    const m=library.find(x=>x.anilist_id===e.anilist_id&&x.media_type===e.media_type);
+    return m?m.id:{pending:true,anilist_id:e.anilist_id,title:e.title,title_english:e.title_english,cover_url:e.cover_url,year:e.start_date.year,format:e.format,media_type:e.media_type};
   });
-  openRating(chain);
+  openRating(chain,{lastRealId:it.id});
 };
 // openDetail() resets editStatus/editProgress/detailMenuOpen (unlike go('detail')
 // alone, which only clears the latter) but also stamps state.detailReturn=state.view
@@ -1517,7 +1468,7 @@ async function ensureFavoritesLoaded(){
 function openDetail(cur){
   if(state.view==='compare'){const sc=document.getElementById('main-scroll');state.compareScroll=sc?sc.scrollTop:0;}
   if(state.view&&state.view!=='detail'){state.detailReturn=state.view;state.detailReturnTab=navTab();}
-  state.current=cur;state.detailMenuOpen=false;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;
+  state.current=cur;state.detailMenuOpen=false;state.editStatus=false;state.editProgress=false;state.rewatchConfirm=null;state.chainError=null;
   if(_profileFavorites){
     cur.item._fav=_profileFavorites[cur.item.media_type].some(f=>f.anilist_id===cur.item.anilist_id);
   } else {
@@ -1546,10 +1497,11 @@ function openRating(ids,extra){
   // (e.g. Discover's "Add & rate") state.view itself is the real origin.
   const returnView=state.view==='detail'?(state.detailReturn||'library'):state.view;
   const returnTab=state.view==='detail'?state.detailReturnTab:navTab();
-  // ids[0] is always a real local id -- Rate Series only ever starts from an
-  // in-library title's own Detail page; only interior/tail hops discovered by
-  // walkChain() can be {pending:true} not-yet-imported markers.
-  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,returnTab:returnTab,lastRealId:ids[0],...extra};
+  // ids[0] can be a {pending:true} not-yet-imported step, since Rate Series runs
+  // in release order: it has no scores to prime until it's added, and Rate
+  // Series passes lastRealId, the title it was opened from, for finishChain().
+  const first=byId(ids[0]);
+  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:first?existingScores(first):{},returnView:returnView,returnTab:returnTab,lastRealId:ids[0],...extra};
   go('rating');
 }
 function curRatingItem(){const r=state.rating;return byId(r.ids[r.idx]);}
@@ -1575,7 +1527,7 @@ function anchorsFor(it,critKey,scope){
   // loadSeries()). Sort desc by the criterion either way.
   const series=scope==='series'?(_seriesIds[it.id]||[]):null;
   return library.filter(x=>x.media_type===it.media_type && x.id!==it.id && x.rating
-      && (scope==='all' || (series?series.includes(x.id):x.genres.some(g=>it.genres.includes(g)))))
+      && (scope==='all' || (series?series.includes(x.anilist_id):x.genres.some(g=>it.genres.includes(g)))))
     .map(x=>({title:x.title,title_english:x.title_english,score:x.rating[critKey]||0,cover_url:x.cover_url,media_type:x.media_type}))
     .sort((a,b)=>b.score-a.score).slice(0,6);
 }
@@ -2642,7 +2594,7 @@ function pendingImportView(){
     </div>
     <div style="display:flex;align-items:center;gap:12px;background:color-mix(in srgb,var(--accent) 8%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:12px;padding:10px 14px;margin-bottom:22px;">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M4 4v16l13-8z"/><path d="M18 4v16" stroke-linecap="round"/></svg>
-      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">Rate Series &middot; ${r.idx+1} of ${r.ids.length}</span>
+      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">Rate Series &middot; ${r.idx+1} of ${r.ids.length}${step.format?` &middot; ${esc(enumLabel(step.format))}`:''}</span>
       <div style="flex:1;"></div>
       <div data-act="backSeason" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:${r.idx>0?'pointer':'default'};opacity:${r.idx>0?1:.4};font-size:11.5px;font-weight:700;color:var(--t2);"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back a Season</div>
     </div>
@@ -2675,12 +2627,12 @@ function ratingView(){
   const score=r.scores[c.key]||5;
   const overall=computeOverall(it.media_type,r.scores);
   const isChain=r.ids.length>1||!!r.queue;
-  // Same Series (FR-8/FR-69) needs this title's relations, which arrive after
-  // this render; loadSeries() shows the pill then. Until the title has a
-  // rated franchise entry, a 'series' scope carried over from the previous
+  // Same Series (FR-8/FR-69) needs this title's franchise, which arrives after
+  // this render; loadSeries() shows the pill then. Until the title has another
+  // library entry there, a 'series' scope carried over from the previous
   // title falls back to the default.
   if(_seriesIds[it.id]===undefined)loadSeries(it);
-  const seriesShown=hasSeriesAnchors(it);
+  const seriesShown=hasSeriesPeers(it);
   if(r.anchorScope==='series'&&!seriesShown)r.anchorScope='genre';
   const anchors=anchorsFor(it,c.key,r.anchorScope);
   const allLabel='All '+(it.media_type==='manga'?'Manga':'Anime');
@@ -2748,7 +2700,7 @@ function ratingView(){
 
     ${isChain?`<div style="display:flex;align-items:center;gap:12px;background:color-mix(in srgb,var(--accent) 8%,var(--s1));border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:12px;padding:10px 14px;margin-bottom:18px;">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M4 4v16l13-8z"/><path d="M18 4v16" stroke-linecap="round"/></svg>
-      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">${r.queue?'Rate unrated':'Rate Series'} &middot; ${r.idx+1} of ${r.ids.length}</span>
+      <span style="font-family:'Overpass Mono',monospace;font-size:11.5px;color:var(--t2);font-weight:600;">${r.queue?'Rate unrated':'Rate Series'} &middot; ${r.idx+1} of ${r.ids.length}${!r.queue&&it.format?` &middot; ${esc(enumLabel(it.format))}`:''}</span>
       <div style="flex:1;"></div>
       <div data-act="backSeason" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:${r.idx>0?'pointer':'default'};opacity:${r.idx>0?1:.4};font-size:11.5px;font-weight:700;color:var(--t2);"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Back a Season</div>
       ${r.queue?`<div data-act="queueSkip" title="Next title, nothing saved" data-hover="border-color:var(--accent);color:var(--t1)" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:pointer;font-size:11.5px;font-weight:700;color:var(--t2);">Skip<svg width="12" height="12" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`:''}
@@ -2827,15 +2779,16 @@ function detailView(){
       {label:'Favourites',value:real.favourites!=null?fmtCount(real.favourites):'—'},
       {label:'All-time Rank',value:(real.rank_rated??real.rank_popular)!=null?'#'+fmtCount(real.rank_rated??real.rank_popular):'—'},
     ],
-    relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
+    relations:real.relations.map(r=>({anilist_id:r.anilist_id,type:r.type||'Related',media_type:r.media_type,title:r.title||'',title_english:r.title_english,initials:initials(r.title_english||r.title||''),cover_url:r.cover_url})),
     characters:real.characters.map(c=>({anilist_id:c.anilist_id,name:c.name||'',role:c.role||'',image_url:c.image_url})),
     recommended:real.recommended.map(rc=>({anilist_id:rc.anilist_id,title:rc.title||'',title_english:rc.title_english,thumbs:rc.thumbs!=null?String(rc.thumbs):'0',cover_url:rc.cover_url})),
   }:{rankingStats:[],relations:[],characters:[],recommended:[]};
-  // FR-44: Rate Series only makes sense when a real series exists -- shown/
-  // hidden in sync with the Relations shelf it reuses data from (both depend
-  // on the same async community fetch, same loading-then-populating pattern
+  // FR-44: Rate Series only makes sense when a real series exists: a prequel or
+  // sequel of this title's own media_type, never a manga one for an anime. It
+  // shows in sync with the Relations shelf it reuses data from (both depend on
+  // the same async community fetch, same loading-then-populating pattern
   // already used for Relations/Characters/Recommended above).
-  const hasSeries=(comm.relations||[]).some(r=>r.type==='PREQUEL'||r.type==='SEQUEL'||r.type==='Prequel'||r.type==='Sequel');
+  const hasSeries=(comm.relations||[]).some(r=>(r.type==='PREQUEL'||r.type==='SEQUEL')&&r.media_type===it.media_type);
   const rated=!!it.rating;
   const rank=rated?myRank(it):0;
   const cs=crits(it.media_type);
@@ -2908,6 +2861,12 @@ function detailView(){
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e0a24a" stroke-width="2" style="flex:0 0 auto;"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" stroke-linejoin="round"/></svg>
       <span style="font-size:12.5px;color:var(--t2);flex:1;">Couldn't load Relations/Characters/Recommended -- AniList may be temporarily unavailable.</span>
       <div data-act="retryCommunity" data-hover="border-color:#e0a24a;color:var(--t1)" style="padding:7px 14px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:pointer;font-size:12px;font-weight:700;color:var(--t2);">Retry</div>
+    </div></div>`:''}
+
+    ${state.chainError===it.id?`<div style="max-width:1180px;margin:0 auto;padding:0 38px;"><div style="display:flex;align-items:center;gap:12px;background:color-mix(in srgb,#e0a24a 10%,var(--s1));border:1px solid color-mix(in srgb,#e0a24a 35%,var(--line));border-radius:12px;padding:12px 16px;margin-top:10px;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e0a24a" stroke-width="2" style="flex:0 0 auto;"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" stroke-linejoin="round"/></svg>
+      <span style="font-size:12.5px;color:var(--t2);flex:1;">Couldn't load the whole series.</span>
+      <div data-act="startRatingChain" data-hover="border-color:#e0a24a;color:var(--t1)" style="padding:7px 14px;border-radius:8px;background:var(--s2);border:1px solid var(--line);cursor:pointer;font-size:12px;font-weight:700;color:var(--t2);">Retry</div>
     </div></div>`:''}
 
     <div style="max-width:1180px;margin:0 auto;padding:22px 38px 0;">
