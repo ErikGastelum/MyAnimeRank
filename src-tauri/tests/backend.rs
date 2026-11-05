@@ -789,15 +789,22 @@ async fn http_429_without_a_usable_retry_after_waits_the_default_then_retries() 
 async fn get_list_entry_returns_the_entry_and_score_format_in_one_request() {
     let fake = fake_anilist(|_, _| {
         (200, json!({"data": {
-            "Viewer": {"mediaListOptions": {"scoreFormat": "POINT_10_DECIMAL"}},
-            "MediaList": {"id": 77, "status": "REPEATING", "progress": 4, "repeat": 1, "score": 8.5, "updatedAt": 1_767_225_600},
+            "Viewer": {"mediaListOptions": {"scoreFormat": "POINT_10_DECIMAL",
+                "animeList": {"advancedScoring": ["Story", "Visuals"], "advancedScoringEnabled": true},
+                "mangaList": {"advancedScoring": ["Story", "Art"], "advancedScoringEnabled": false}}},
+            "MediaList": {"id": 77, "status": "REPEATING", "progress": 4, "repeat": 1, "score": 8.5,
+                "advancedScores": {"Story": 9, "Art": 7.5}, "updatedAt": 1_767_225_600},
         }}), None)
     })
     .await;
-    let (entry, score_format) = AniList::with_url(&fake.url).get_list_entry("token", 1, 42, "manga").await.unwrap();
+    let (entry, options) = AniList::with_url(&fake.url).get_list_entry("token", 1, 42, "manga").await.unwrap();
     assert_eq!(fake.calls().iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), vec![json!({"userId": 1, "mediaId": 42})]);
+    assert!(fake.calls()[0].0.contains("advancedScores"));
     assert_eq!(fake.auths(), vec![Some("Bearer token".to_string())]);
-    assert_eq!(score_format.as_deref(), Some("POINT_10_DECIMAL"));
+    let options = options.unwrap();
+    assert_eq!(options.score_format.as_deref(), Some("POINT_10_DECIMAL"));
+    assert_eq!((options.anime.enabled, options.anime.categories.clone()), (true, vec!["Story".to_string(), "Visuals".to_string()]));
+    assert_eq!((options.manga.enabled, options.manga.categories.clone()), (false, vec!["Story".to_string(), "Art".to_string()]));
     let expected = EntryState {
         list_entry_id: 77,
         status: "rereading".into(),
@@ -805,6 +812,7 @@ async fn get_list_entry_returns_the_entry_and_score_format_in_one_request() {
         repeat_count: 1,
         score: Some(8.5),
         updated_at: Some("2026-01-01T00:00:00+00:00".into()),
+        advanced_scores: Some([("Art".to_string(), 7.5), ("Story".to_string(), 9.0)].into()),
     };
     assert_eq!(entry, Some(expected));
 
@@ -1131,9 +1139,9 @@ async fn guarded_push_refuses_on_conflict_and_never_writes_to_anilist() {
 
 #[tokio::test]
 async fn guarded_push_rechecks_score_format_from_the_entry_lookup() {
-    // FR-28: a format changed on the AniList website is caught before any
-    // score is written.
-    let fake = fake_anilist(|q, _| if q.contains("MediaList(userId") { on_list("POINT_100", 1_700_000_000) } else { save_ok() }).await;
+    // FR-28: a format changed on the AniList website to one with no
+    // explicit conversion is caught before any score is written.
+    let fake = fake_anilist(|q, _| if q.contains("MediaList(userId") { on_list("POINT_5", 1_700_000_000) } else { save_ok() }).await;
     let st = state_with(&fake);
     login(&st);
     let id = synced_then_edited(&st, 9);
@@ -1141,14 +1149,16 @@ async fn guarded_push_rechecks_score_format_from_the_entry_lookup() {
     let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
     assert_eq!(out, json!({"synced_at": null, "score_format_drift": true}));
     assert!(fake.calls_containing("SaveMediaListEntry").is_empty());
-    assert_eq!(st.db.get_auth().unwrap().unwrap().score_format.as_deref(), Some("POINT_100"));
+    assert_eq!(st.db.get_auth().unwrap().unwrap().score_format.as_deref(), Some("POINT_5"));
 }
 
 #[tokio::test]
-async fn push_skips_and_reports_drift_when_score_format_is_not_decimal() {
+async fn push_skips_and_reports_drift_when_score_format_has_no_conversion() {
     let fake = fake_anilist(|q, _| {
-        if q.contains("Viewer") {
-            (200, json!({"data": {"Viewer": {"id": 1, "name": "t", "mediaListOptions": {"scoreFormat": "POINT_100"}}}}), None)
+        if q.contains("MediaList(userId") {
+            (404, json!({"data": {"Viewer": null, "MediaList": null}, "errors": [{"message": "Not Found.", "status": 404}]}), None)
+        } else if q.contains("Viewer") {
+            (200, json!({"data": {"Viewer": {"id": 1, "name": "t", "mediaListOptions": {"scoreFormat": "POINT_3"}}}}), None)
         } else {
             save_ok()
         }
@@ -1160,7 +1170,172 @@ async fn push_skips_and_reports_drift_when_score_format_is_not_decimal() {
     let (s, b) = call(&st, "POST", &format!("/sync/push/{id}"), None).await;
     assert_eq!((s, b), (200, json!({"synced_at": null, "score_format_drift": true})));
     assert!(fake.calls_containing("SaveMediaListEntry").is_empty());
-    assert_eq!(st.db.get_auth().unwrap().unwrap().score_format.as_deref(), Some("POINT_100"));
+    assert_eq!(st.db.get_auth().unwrap().unwrap().score_format.as_deref(), Some("POINT_3"));
+}
+
+// ------------------------------------------------- advanced scores (push) ----
+
+/// The Promised Neverland as rated in the stepper: overall 7.9.
+fn neverland() -> Scores {
+    Scores { story: 8.5, characters: 8.0, animation: 8.0, audio: 7.0, enjoyment: 8.0 }
+}
+
+/// get_list_entry's reply for an entry on the list, with the account's
+/// format, one list's advanced-scoring categories, and the entry's current
+/// advanced scores.
+fn on_list_advanced(format: &str, list: &str, categories: Value, enabled: bool, advanced: Value) -> Reply {
+    let mut options = json!({"scoreFormat": format,
+        "animeList": {"advancedScoring": [], "advancedScoringEnabled": false},
+        "mangaList": {"advancedScoring": [], "advancedScoringEnabled": false}});
+    options[list] = json!({"advancedScoring": categories, "advancedScoringEnabled": enabled});
+    (200, json!({"data": {"Viewer": {"mediaListOptions": options},
+        "MediaList": {"id": 1009, "status": "CURRENT", "progress": 3, "repeat": 0, "score": 7.5,
+            "advancedScores": advanced, "updatedAt": 1_700_000_000}}}), None)
+}
+
+/// Rates a synced title and runs the guarded push against `reply`; returns
+/// the one SaveMediaListEntry's variables and the media id.
+async fn push_rated(media_type: &str, s: Scores, reply: Reply) -> (Value, i64, Shared) {
+    let fake = fake_anilist(move |q, _| if q.contains("MediaList(userId") { reply.clone() } else { save_ok() }).await;
+    let st = state_with(&fake);
+    login(&st);
+    let id = st.db.insert_or_update_media(&fields(9, media_type), None).unwrap();
+    st.db.set_anilist_list_entry_id(id, 1009).unwrap();
+    st.db.set_last_synced(id, "2026-01-01T00:00:00+00:00").unwrap();
+    st.db.upsert_rating(id, &s).unwrap();
+    let out = sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
+    assert_eq!(out["score_format_drift"], false, "{out}");
+    let saves = fake.calls_containing("SaveMediaListEntry");
+    assert_eq!(saves.len(), 1);
+    let q = fake.calls().into_iter().find(|(q, _)| q.contains("SaveMediaListEntry")).unwrap().0;
+    assert!(q.contains("advancedScores: $advancedScores") && q.contains("$advancedScores: [Float]"), "{q}");
+    (saves[0].clone(), id, st)
+}
+
+const DEFAULT_CATEGORIES: [&str; 5] = ["Story", "Characters", "Visuals", "Audio", "Enjoyment"];
+
+#[tokio::test]
+async fn rating_save_sends_advanced_scores_mapped_by_name() {
+    let reply = on_list_advanced("POINT_10_DECIMAL", "animeList", json!(DEFAULT_CATEGORIES), true, json!({"Story": 0, "Enjoyment": 7.5}));
+    let (save, id, st) = push_rated("anime", neverland(), reply).await;
+    assert_eq!(save["score"], json!(7.9));
+    // Animation lands in Visuals.
+    assert_eq!(save["advancedScores"], json!([8.5, 8.0, 8.0, 7.0, 8.0]));
+    assert_eq!(st.db.get_media_by_id(id).unwrap().unwrap().rating.unwrap().overall, 7.9);
+}
+
+#[tokio::test]
+async fn advanced_scores_follow_the_accounts_order_and_keep_unknown_categories() {
+    // Reordered, differently cased, plus a category the app has no criterion for.
+    let cats = json!(["enjoyment", "Visuals", "Pacing", "Story", "Characters", "Audio"]);
+    let reply = on_list_advanced("POINT_10_DECIMAL", "animeList", cats, true, json!({"Pacing": 6.5}));
+    let (save, ..) = push_rated("anime", neverland(), reply).await;
+    assert_eq!(save["advancedScores"], json!([8.0, 8.0, 6.5, 8.5, 8.0, 7.0]));
+}
+
+#[tokio::test]
+async fn manga_advanced_scores_put_art_in_visuals_and_leave_audio_as_it_was() {
+    let s = Scores { story: 9.0, characters: 8.5, animation: 7.5, audio: 0.0, enjoyment: 9.5 };
+    let reply = on_list_advanced("POINT_10_DECIMAL", "mangaList", json!(DEFAULT_CATEGORIES), true, json!({"Audio": 3}));
+    let (save, ..) = push_rated("manga", s, reply).await;
+    assert_eq!(save["advancedScores"], json!([9.0, 8.5, 7.5, 3.0, 9.5]));
+    // An account that names it Art gets the same value there.
+    let reply = on_list_advanced("POINT_10_DECIMAL", "mangaList", json!(["Art", "Story"]), true, json!(null));
+    let (save, ..) = push_rated("manga", s, reply).await;
+    assert_eq!(save["advancedScores"], json!([7.5, 9.0]));
+}
+
+#[tokio::test]
+async fn overall_converts_explicitly_for_each_score_format_and_stays_decimal_locally() {
+    let cases = [
+        ("POINT_10_DECIMAL", json!(7.9), json!([8.5, 8.0, 8.0, 7.0, 8.0])),
+        ("POINT_100", json!(79.0), json!([85.0, 80.0, 80.0, 70.0, 80.0])),
+        // POINT_10 has no advanced scoring on AniList, so none are sent.
+        ("POINT_10", json!(8.0), Value::Null),
+    ];
+    for (format, score, advanced) in cases {
+        let reply = on_list_advanced(format, "animeList", json!(DEFAULT_CATEGORIES), true, json!({}));
+        let (save, id, st) = push_rated("anime", neverland(), reply).await;
+        assert_eq!(save["score"], score, "{format}");
+        assert_eq!(save.get("advancedScores").cloned().unwrap_or(Value::Null), advanced, "{format}");
+        assert_eq!(st.db.get_media_by_id(id).unwrap().unwrap().rating.unwrap().overall, 7.9, "{format}");
+    }
+}
+
+#[tokio::test]
+async fn no_advanced_scores_when_disabled_or_when_the_rating_is_only_anilists_seed() {
+    let reply = on_list_advanced("POINT_10_DECIMAL", "animeList", json!(DEFAULT_CATEGORIES), false, json!({}));
+    let (save, ..) = push_rated("anime", neverland(), reply).await;
+    assert!(save.get("advancedScores").is_none(), "{save}");
+
+    // FR-82: a rating seeded from AniList's overall has no real criteria.
+    let fake = fake_anilist(|q, _| {
+        if q.contains("MediaList(userId") {
+            on_list_advanced("POINT_10_DECIMAL", "animeList", json!(DEFAULT_CATEGORIES), true, json!({"Story": 9}))
+        } else {
+            save_ok()
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let id = st.db.import_remote_entry(&fields(9, "anime"), 1009, "completed", 12, 0, Some(8.0), "2026-01-01T00:00:00+00:00").unwrap();
+    st.db.update_progress(id, 11).unwrap();
+    sync::push_now_guarded(&st, id, Priority::Interactive).await.unwrap();
+    let saves = fake.calls_containing("SaveMediaListEntry");
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0]["score"], json!(8.0));
+    assert!(saves[0].get("advancedScores").is_none(), "{}", saves[0]);
+}
+
+#[tokio::test]
+async fn pull_keeps_the_local_decimal_when_anilist_holds_its_rounded_copy() {
+    // Pushed 7.9 as POINT_10 = 8; AniList reads back 8.0 later. Local stays 7.9.
+    let later = chrono::Utc::now().timestamp() + 3600;
+    let fake = fake_anilist(move |q, v| {
+        if q.contains("MediaListCollection") && v["type"] == "ANIME" {
+            (200, collection(vec![list_node(9, "ANIME", later, 8.0)]), None)
+        } else {
+            (200, collection(vec![]), None)
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    st.db.save_auth("test-token", None, 1, "tester", Some("POINT_10")).unwrap();
+    let id = st.db.insert_or_update_media(&fields(9, "anime"), None).unwrap();
+    st.db.upsert_rating(id, &neverland()).unwrap();
+    st.db.set_last_synced(id, &chrono::Utc::now().to_rfc3339()).unwrap();
+    sync::pull(&st).await.unwrap();
+    assert_eq!(st.db.get_media_by_id(id).unwrap().unwrap().rating.unwrap().overall, 7.9);
+
+    // A real change on AniList (8.0 vs local 7.2 -> 7) still lands.
+    st.db.upsert_rating(id, &scores(7.2)).unwrap();
+    st.db.set_last_synced(id, &chrono::Utc::now().to_rfc3339()).unwrap();
+    sync::pull(&st).await.unwrap();
+    assert_eq!(st.db.get_media_by_id(id).unwrap().unwrap().rating.unwrap().overall, 8.0);
+}
+
+#[test]
+fn score_conversion_and_category_names_live_in_one_table() {
+    use myanimerank_lib::scoring::{criterion_for_category, same_on_anilist, to_anilist_score};
+    assert_eq!(to_anilist_score(7.9, "POINT_10_DECIMAL"), Some(7.9));
+    assert_eq!(to_anilist_score(7.9, "POINT_10"), Some(8.0));
+    assert_eq!(to_anilist_score(7.5, "POINT_10"), Some(8.0));
+    assert_eq!(to_anilist_score(7.9, "POINT_100"), Some(79.0));
+    assert_eq!(to_anilist_score(7.25, "POINT_10_DECIMAL"), Some(7.2));
+    assert_eq!(to_anilist_score(7.9, "POINT_5"), None);
+    assert_eq!(to_anilist_score(7.9, "POINT_3"), None);
+    assert!(same_on_anilist(7.9, 8.0, Some("POINT_10")));
+    assert!(same_on_anilist(7.9, 7.9, Some("POINT_100")));
+    assert!(!same_on_anilist(7.9, 8.0, Some("POINT_10_DECIMAL")));
+    assert!(!same_on_anilist(7.9, 8.0, None));
+
+    assert_eq!(criterion_for_category("anime", "Visuals"), Some("animation"));
+    assert_eq!(criterion_for_category("anime", " audio "), Some("audio"));
+    assert_eq!(criterion_for_category("manga", "Visuals"), Some("animation"));
+    assert_eq!(criterion_for_category("manga", "Art"), Some("animation"));
+    assert_eq!(criterion_for_category("manga", "Audio"), None);
+    assert_eq!(criterion_for_category("anime", "Pacing"), None);
 }
 
 #[tokio::test]

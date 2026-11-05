@@ -12,6 +12,7 @@ pub mod config;
 pub mod db;
 pub mod limiter;
 pub mod oauth;
+pub mod scoring;
 pub mod sync;
 
 use std::collections::{BTreeSet, HashMap};

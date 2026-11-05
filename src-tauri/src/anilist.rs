@@ -4,7 +4,7 @@
 //! No MAL/Jikan calls anywhere: this is the ONLY module that talks to an
 //! external metadata API.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 
 use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields};
 use crate::limiter::{Lane, Limiter, Priority, MAX_PAUSE_WAIT};
+use crate::scoring::{self, ListOptions, LIST_OPTIONS_FIELDS};
 
 pub const ANILIST_URL: &str = "https://graphql.anilist.co";
 pub const AUTHORIZE_URL: &str = "https://anilist.co/api/v2/oauth/authorize";
@@ -94,6 +95,9 @@ pub struct EntryState {
     pub repeat_count: i64,
     pub score: Option<f64>,
     pub updated_at: Option<String>,
+    /// `MediaList.advancedScores` as AniList has them (category -> score,
+    /// in the account's format). Read only by the push lookup.
+    pub advanced_scores: Option<BTreeMap<String, f64>>,
 }
 
 /// FR-73: what looking up a friend found.
@@ -110,6 +114,7 @@ pub struct Viewer {
     pub id: i64,
     pub name: String,
     pub score_format: Option<String>,
+    pub options: ListOptions,
 }
 
 impl Default for AniList {
@@ -227,13 +232,15 @@ impl AniList {
     // app that writes to the user's real AniList account.
 
     pub async fn get_viewer(&self, token: &str) -> AlResult<Viewer> {
-        let q = "query { Viewer { id name mediaListOptions { scoreFormat } } }";
-        let data = self.graphql(q, None, Some(token), 15).await?;
+        let q = format!("query {{ Viewer {{ id name {LIST_OPTIONS_FIELDS} }} }}");
+        let data = self.graphql(&q, None, Some(token), 15).await?;
         let v = &data["Viewer"];
+        let options = ListOptions::from_json(&v["mediaListOptions"]);
         Ok(Viewer {
             id: v["id"].as_i64().ok_or_else(|| unexpected("Viewer.id missing"))?,
             name: v["name"].as_str().unwrap_or_default().to_string(),
-            score_format: str_of(&v["mediaListOptions"]["scoreFormat"]),
+            score_format: options.score_format.clone(),
+            options,
         })
     }
 
@@ -271,29 +278,50 @@ impl AniList {
         Ok(out)
     }
 
-    /// FR-24/FR-28/FR-58: one request for this title's own list entry plus a
-    /// fresh scoreFormat. When the title isn't on the list AniList 404s the
-    /// whole query (Viewer included), so score_format is None then.
-    pub async fn get_list_entry(&self, token: &str, user_id: i64, anilist_id: i64, media_type: &str) -> AlResult<(Option<EntryState>, Option<String>)> {
-        let q = "query ($userId: Int, $mediaId: Int) {
-            Viewer { mediaListOptions { scoreFormat } }
-            MediaList(userId: $userId, mediaId: $mediaId) { id status progress repeat score(format: POINT_10_DECIMAL) updatedAt } }";
-        match self.graphql(q, Some(json!({"userId": user_id, "mediaId": anilist_id})), Some(token), 15).await {
+    /// FR-24/FR-28/FR-58: one request for this title's own list entry (its
+    /// advanced scores included) plus fresh list options: scoreFormat and
+    /// the advanced-scoring categories. When the title isn't on the list
+    /// AniList 404s the whole query (Viewer included), so options are None.
+    pub async fn get_list_entry(&self, token: &str, user_id: i64, anilist_id: i64, media_type: &str) -> AlResult<(Option<EntryState>, Option<ListOptions>)> {
+        let q = format!(
+            "query ($userId: Int, $mediaId: Int) {{
+            Viewer {{ {LIST_OPTIONS_FIELDS} }}
+            MediaList(userId: $userId, mediaId: $mediaId) {{ id status progress repeat score(format: POINT_10_DECIMAL) advancedScores updatedAt }} }}"
+        );
+        match self.graphql(&q, Some(json!({"userId": user_id, "mediaId": anilist_id})), Some(token), 15).await {
             Err(AlError::NotFound(_)) => Ok((None, None)),
             Err(e) => Err(e),
             Ok(data) => {
                 let node = &data["MediaList"];
-                let entry = (!node.is_null()).then(|| list_entry(node, media_type));
-                Ok((entry, str_of(&data["Viewer"]["mediaListOptions"]["scoreFormat"])))
+                let entry = (!node.is_null()).then(|| EntryState {
+                    advanced_scores: scoring::parse_advanced_scores(&node["advancedScores"]),
+                    ..list_entry(node, media_type)
+                });
+                let options = &data["Viewer"]["mediaListOptions"];
+                Ok((entry, (!options.is_null()).then(|| ListOptions::from_json(options))))
             }
         }
     }
 
-    /// FR-24/FR-25. `score` is omitted entirely when there's no rating yet:
-    /// AniList rejects an explicit `score: null` but accepts the key absent.
-    pub async fn push_list_entry(&self, token: &str, anilist_id: i64, local_status: &str, progress: i64, repeat_count: i64, overall: Option<f64>) -> AlResult<i64> {
-        let q = "mutation ($mediaId: Int, $status: MediaListStatus, $progress: Int, $repeat: Int, $score: Float) {
-            SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress, repeat: $repeat, score: $score) {
+    /// FR-24/FR-25. `score` is already in the account's scoreFormat
+    /// (scoring::to_anilist_score), and `advanced_scores` in its category
+    /// order (scoring::advanced_scores). Each is omitted entirely when
+    /// there's nothing to send: AniList rejects an explicit `score: null`
+    /// but accepts the key absent, and an absent `advancedScores` leaves
+    /// AniList's as they are.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_list_entry(
+        &self,
+        token: &str,
+        anilist_id: i64,
+        local_status: &str,
+        progress: i64,
+        repeat_count: i64,
+        score: Option<f64>,
+        advanced_scores: Option<&[f64]>,
+    ) -> AlResult<i64> {
+        let q = "mutation ($mediaId: Int, $status: MediaListStatus, $progress: Int, $repeat: Int, $score: Float, $advancedScores: [Float]) {
+            SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress, repeat: $repeat, score: $score, advancedScores: $advancedScores) {
               id status progress updatedAt } }";
         let mut vars = json!({
             "mediaId": anilist_id,
@@ -301,8 +329,11 @@ impl AniList {
             "progress": progress,
             "repeat": repeat_count,
         });
-        if let Some(score) = overall {
+        if let Some(score) = score {
             vars["score"] = json!(score);
+        }
+        if let Some(advanced) = advanced_scores {
+            vars["advancedScores"] = json!(advanced);
         }
         let data = self.graphql(q, Some(vars), Some(token), 15).await?;
         data["SaveMediaListEntry"]["id"].as_i64().ok_or_else(|| unexpected("SaveMediaListEntry.id missing"))
@@ -1497,6 +1528,7 @@ fn list_entry(e: &Value, media_type: &str) -> EntryState {
         repeat_count: e["repeat"].as_i64().unwrap_or(0),
         score: e["score"].as_f64(),
         updated_at: e["updatedAt"].as_i64().filter(|t| *t != 0).map(iso_from_unix),
+        advanced_scores: None,
     }
 }
 

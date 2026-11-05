@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::anilist::{AlError, AniList, FriendLookup, ListEntry};
 use crate::db::{detect_conflict, now_iso, Media, SyncOutcome};
 use crate::limiter::{Lane, Priority};
+use crate::scoring::{self, ListOptions};
 use crate::Shared;
 
 const PUSH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
@@ -102,7 +103,7 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
             // One entry failing (say, a write that fails for a moment) must
             // not stop the rest. It's left untouched locally, so the next
             // pull tries it again.
-            match pull_entry(st, &entry, &now) {
+            match pull_entry(st, &entry, &now, auth.score_format.as_deref()) {
                 Ok(Pulled::Imported) => imported += 1,
                 Ok(Pulled::Updated) => updated += 1,
                 Ok(Pulled::Conflict(c)) => conflicts.push(c),
@@ -114,7 +115,17 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
     Ok(json!({"imported": imported, "updated": updated, "conflicts": conflicts}))
 }
 
-fn pull_entry(st: &Shared, entry: &ListEntry, now: &str) -> SyncResult<Pulled> {
+/// FR-23 with FR-25's conversion: when AniList's score is just what pushing
+/// the local overall in `format` left there (7.9 pushed as POINT_10 reads
+/// back 8.0), the local decimal stays.
+fn remote_score(local: &Media, remote: Option<f64>, format: Option<&str>) -> Option<f64> {
+    match (local.rating.as_ref(), remote) {
+        (Some(r), Some(s)) if scoring::same_on_anilist(r.overall, s, format) => Some(r.overall),
+        _ => remote,
+    }
+}
+
+fn pull_entry(st: &Shared, entry: &ListEntry, now: &str, format: Option<&str>) -> SyncResult<Pulled> {
     let Some(local) = st.db.get_media_by_anilist_id(entry.media.anilist_id)? else {
         // New AniList entry with no local row: import directly. Its
         // status/progress/score land exactly as AniList has them, with
@@ -147,7 +158,8 @@ fn pull_entry(st: &Shared, entry: &ListEntry, now: &str) -> SyncResult<Pulled> {
             Pulled::Conflict(conflict_entry(&local, Some((&entry.status, entry.progress, entry.updated_at.as_deref()))))
         }
         SyncOutcome::Remote => {
-            st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, entry.score, now)?;
+            let score = remote_score(&local, entry.score, format);
+            st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, score, now)?;
             Pulled::Updated
         }
         // Local wins but is pushed separately (FR-24); just mark seen.
@@ -176,7 +188,8 @@ pub async fn resolve(st: &Shared, media_id: i64, winner: &str) -> SyncResult<Val
         let remote = find_remote(st, &auth, &local)
             .await?
             .ok_or_else(|| SyncError::NotFound("remote entry not found".into()))?;
-        st.db.apply_remote_entry(media_id, &remote.status, remote.progress, remote.repeat_count, remote.score, &now)?;
+        let score = remote_score(&local, remote.score, auth.score_format.as_deref());
+        st.db.apply_remote_entry(media_id, &remote.status, remote.progress, remote.repeat_count, score, &now)?;
         st.db.set_pending_conflict(media_id, false)?;
         return Ok(json!({"status": remote.status, "progress": remote.progress}));
     }
@@ -197,14 +210,36 @@ fn queue(st: &Shared) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<i6
     st.push_queue.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What a push needs to know about the account and the entry on AniList,
+/// fetched fresh for every push (FR-28).
+#[derive(Debug, Clone, Default)]
+pub struct PushLookup {
+    /// scoreFormat and the advanced-scoring categories.
+    pub options: ListOptions,
+    /// The entry's advanced scores as AniList has them now, if it's on the list.
+    pub remote_advanced: Option<std::collections::BTreeMap<String, f64>>,
+}
+
+async fn lookup(anilist: &AniList, auth: &crate::db::Auth, local: &Media) -> SyncResult<PushLookup> {
+    let (remote, options) = anilist
+        .get_list_entry(&auth.access_token, auth.anilist_user_id, local.fields.anilist_id, &local.fields.media_type)
+        .await?;
+    let options = match options {
+        Some(o) => o,
+        // AniList nulls Viewer when the title isn't on the list.
+        None => anilist.get_viewer(&auth.access_token).await?.options,
+    };
+    Ok(PushLookup { options, remote_advanced: remote.and_then(|r| r.advanced_scores) })
+}
+
 /// FR-24/FR-25/FR-28. Transient network failures are queued for retry
 /// (FR-26); permanent errors are not, since retrying them never succeeds.
-/// `score_format` is one the caller already fetched fresh for this push;
-/// when None it is fetched here. Either way it's re-checked every push.
-pub async fn push_now(st: &Shared, media_id: i64, score_format: Option<String>, priority: Priority) -> SyncResult<Value> {
+/// `lookup` is one the caller already fetched fresh for this push; when
+/// None it is fetched here. Either way the format is re-checked every push.
+pub async fn push_now(st: &Shared, media_id: i64, lookup: Option<PushLookup>, priority: Priority) -> SyncResult<Value> {
     let auth = auth(st)?;
     let local = local(st, media_id)?;
-    match push_inner(st, &st.anilist.at(priority), &auth, &local, score_format).await {
+    match push_inner(st, &st.anilist.at(priority), &auth, &local, lookup).await {
         Err(SyncError::AniList(e)) if e.is_network() => {
             log::warn!("push failed for media_id={media_id} (network), queued for retry");
             queue(st).insert(media_id);
@@ -214,20 +249,35 @@ pub async fn push_now(st: &Shared, media_id: i64, score_format: Option<String>, 
     }
 }
 
-async fn push_inner(st: &Shared, anilist: &AniList, auth: &crate::db::Auth, local: &Media, score_format: Option<String>) -> SyncResult<Value> {
-    let score_format = match score_format {
-        Some(f) => Some(f),
-        None => anilist.get_viewer(&auth.access_token).await?.score_format,
+async fn push_inner(st: &Shared, anilist: &AniList, auth: &crate::db::Auth, local: &Media, lookup: Option<PushLookup>) -> SyncResult<Value> {
+    let lookup = match lookup {
+        Some(l) => l,
+        None => self::lookup(anilist, auth, local).await?,
     };
-    if auth.score_format != score_format {
-        st.db.update_score_format(score_format.as_deref())?;
+    let score_format = lookup.options.score_format.as_deref();
+    if auth.score_format.as_deref() != score_format {
+        st.db.update_score_format(score_format)?;
     }
-    if score_format.as_deref() != Some("POINT_10_DECIMAL") {
+    // FR-28: only formats with an explicit conversion are written to.
+    let Some(format) = score_format.filter(|f| scoring::can_push_in(Some(f))) else {
         return Ok(json!({"synced_at": null, "score_format_drift": true}));
-    }
-    let overall = local.rating.as_ref().map(|r| r.overall);
+    };
+    // The local overall keeps its decimal; only the pushed copy is converted.
+    let score = local.rating.as_ref().and_then(|r| scoring::to_anilist_score(r.overall, format));
+    let advanced = local
+        .rating
+        .as_ref()
+        .and_then(|r| scoring::advanced_scores(&local.fields.media_type, r, &lookup.options, lookup.remote_advanced.as_ref()));
     let entry_id = anilist
-        .push_list_entry(&auth.access_token, local.fields.anilist_id, &local.status, local.progress, local.repeat_count, overall)
+        .push_list_entry(
+            &auth.access_token,
+            local.fields.anilist_id,
+            &local.status,
+            local.progress,
+            local.repeat_count,
+            score,
+            advanced.as_deref(),
+        )
         .await?;
     let now = now_iso();
     st.db.set_last_synced(local.id, &now)?;
@@ -258,7 +308,7 @@ pub async fn delete_remote_entry(st: &Shared, media_id: i64) -> SyncResult<()> {
 pub async fn push_now_guarded(st: &Shared, media_id: i64, priority: Priority) -> SyncResult<Value> {
     let auth = auth(st)?;
     let local = local(st, media_id)?;
-    let (remote, score_format) = match st
+    let (remote, options) = match st
         .anilist
         .at(priority)
         .get_list_entry(&auth.access_token, auth.anilist_user_id, local.fields.anilist_id, &local.fields.media_type)
@@ -273,7 +323,14 @@ pub async fn push_now_guarded(st: &Shared, media_id: i64, priority: Priority) ->
         Err(e) => return Err(e.into()),
     };
     let Some(remote) = remote else {
-        return push_now(st, media_id, None, priority).await;
+        // Not on the list: AniList nulled Viewer too, so fetch it alone.
+        let options = st.anilist.at(priority).get_viewer(&auth.access_token).await.map_err(|e| {
+            if e.is_network() {
+                queue(st).insert(media_id);
+            }
+            SyncError::from(e)
+        })?;
+        return push_now(st, media_id, Some(PushLookup { options: options.options, remote_advanced: None }), priority).await;
     };
     if detect_conflict(local.updated_at.as_deref(), remote.updated_at.as_deref(), local.last_synced_at.as_deref())
         == SyncOutcome::Conflict
@@ -284,7 +341,8 @@ pub async fn push_now_guarded(st: &Shared, media_id: i64, priority: Priority) ->
         log::warn!("automatic push skipped for media_id={media_id}: conflict with remote change");
         return Ok(json!({"synced_at": null, "score_format_drift": false, "conflict": true}));
     }
-    push_now(st, media_id, score_format, priority).await
+    let lookup = PushLookup { options: options.unwrap_or_default(), remote_advanced: remote.advanced_scores };
+    push_now(st, media_id, Some(lookup), priority).await
 }
 
 /// Background push for a local edit: never awaited by the request, so a slow
