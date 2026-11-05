@@ -204,6 +204,8 @@ pub fn router(st: Shared) -> Router {
         .route("/sync/pending-conflicts", get(sync_pending_conflicts))
         .route("/sync/resolve/{id}", post(sync_resolve))
         .route("/sync/push/{id}", post(sync_push))
+        .route("/sync/criteria-conflicts", get(sync_criteria_conflicts))
+        .route("/sync/criteria-conflicts/{id}", post(sync_resolve_criteria))
         .route("/discover", get(get_discover))
         .route("/feed", get(get_feed))
         .route("/characters/search", get(characters_search))
@@ -436,6 +438,21 @@ async fn sync_resolve(State(st): State<Shared>, Id(id): Id, Body(body): Body<Res
         return Err(ApiError::new(400, "winner must be 'local' or 'remote'"));
     }
     ok(sync::resolve(&st, id, &body.winner).await?)
+}
+
+async fn sync_criteria_conflicts(State(st): State<Shared>) -> ApiResult {
+    ok(json!({"criteria_conflicts": st.db.get_criteria_conflicts()?}))
+}
+
+async fn sync_resolve_criteria(State(st): State<Shared>, Id(id): Id, Body(body): Body<ResolveIn>) -> ApiResult {
+    if !matches!(body.winner.as_str(), "local" | "anilist") {
+        return Err(ApiError::new(400, "winner must be 'local' or 'anilist'"));
+    }
+    match sync::resolve_criteria(&st, id, &body.winner).await {
+        Ok(v) => ok(v),
+        Err(SyncError::NotFound(m)) => Err(ApiError::new(404, m)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn sync_push(State(st): State<Shared>, Id(id): Id) -> ApiResult {

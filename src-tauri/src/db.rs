@@ -106,7 +106,28 @@ CREATE TABLE IF NOT EXISTS friend_entry (
     progress INTEGER,
     PRIMARY KEY (friend_id, anilist_id)
 );
+
+-- Criteria AniList has (advanced scores, on this app's scale) for a title
+-- whose own real criteria differ, found by the one-time backfill. Neither
+-- side is changed until the user picks one.
+CREATE TABLE IF NOT EXISTS criteria_conflict (
+    media_id INTEGER PRIMARY KEY REFERENCES media(id),
+    story REAL NOT NULL,
+    characters REAL NOT NULL,
+    animation REAL NOT NULL,
+    audio REAL NOT NULL DEFAULT 0.0,
+    enjoyment REAL NOT NULL,
+    found_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 ";
+
+/// app_meta key: the one-time advanced-score backfill has run (FR-23).
+pub const CRITERIA_BACKFILL_DONE: &str = "criteria_backfill_done";
 
 pub const ANIME_CRITERIA: [&str; 5] = ["story", "characters", "animation", "audio", "enjoyment"];
 /// Audio excluded; Art lives in the `animation` column.
@@ -178,8 +199,10 @@ pub struct Rating {
     pub enjoyment: f64,
     pub overall: f64,
     pub updated_at: String,
-    /// "app" (rated in the stepper) or "anilist" (seeded by Pull); FR-82.
-    #[serde(skip)]
+    /// "app": real criteria, rated in the stepper or taken from AniList's
+    /// advanced scores. "anilist": every criterion only copied from AniList's
+    /// overall (FR-82); the stepper shows those as unrated, and they're
+    /// never pushed as advanced scores.
     pub source: String,
 }
 
@@ -274,7 +297,7 @@ pub struct FollowedUser {
     pub avatar_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub struct Scores {
     pub story: f64,
     pub characters: f64,
@@ -284,7 +307,7 @@ pub struct Scores {
 }
 
 impl Scores {
-    fn get(&self, name: &str) -> f64 {
+    pub fn get(&self, name: &str) -> f64 {
         match name {
             "story" => self.story,
             "characters" => self.characters,
@@ -791,12 +814,13 @@ impl Db {
         progress: i64,
         repeat_count: i64,
         score: Option<f64>,
+        criteria: Option<&Scores>,
         ts: &str,
     ) -> DbResult<i64> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let media_id = Self::upsert_media(&tx, f, None)?;
-        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, ts)?;
+        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, criteria, ts)?;
         Self::set_list_entry_id(&tx, media_id, list_entry_id)?;
         tx.commit()?;
         Ok(media_id)
@@ -804,10 +828,13 @@ impl Db {
 
     /// FR-23: AniList's value wins for this entry. Applied in one transaction
     /// with the timestamp stamp, so last_synced_at can never land ahead of the
-    /// score. A nonzero remote score overwrites `overall` only (AniList never
-    /// carries the criterion breakdown); with no local rating yet, every
-    /// criterion seeds to that one value snapped to a 0.5 step, while overall
-    /// keeps AniList's exact score so the next push doesn't rewrite it.
+    /// score. `criteria` (AniList's advanced scores, already on this app's
+    /// scale) become the rating's real criteria, overall computed from them.
+    /// Without them, a nonzero remote score overwrites `overall` only; with
+    /// no local rating yet, every criterion is copied from that one value
+    /// snapped to a 0.5 step (marked 'anilist'), while overall keeps
+    /// AniList's exact score so the next push doesn't rewrite it.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_remote_entry(
         &self,
         media_id: i64,
@@ -815,14 +842,16 @@ impl Db {
         progress: i64,
         repeat_count: i64,
         score: Option<f64>,
+        criteria: Option<&Scores>,
         ts: &str,
     ) -> DbResult<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, ts)?;
+        Self::apply_remote(&tx, media_id, status, progress, repeat_count, score, criteria, ts)?;
         tx.commit()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_remote(
         tx: &Connection,
         media_id: i64,
@@ -830,12 +859,16 @@ impl Db {
         progress: i64,
         repeat_count: i64,
         score: Option<f64>,
+        criteria: Option<&Scores>,
         ts: &str,
     ) -> DbResult<()> {
         tx.execute(
             "UPDATE media SET status = ?, progress = ?, repeat_count = ?, updated_at = ?, last_synced_at = ? WHERE id = ?",
             params![status, progress, repeat_count, ts, ts, media_id],
         )?;
+        if let Some(c) = criteria {
+            return Self::write_anilist_criteria(tx, media_id, c, ts);
+        }
         // AniList's 0 means "no score entered", not a real rating.
         if let Some(score) = score.filter(|s| *s != 0.0) {
             let exists: bool = tx
@@ -860,6 +893,113 @@ impl Db {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// AniList's real criteria (advanced scores) as this title's rating,
+    /// marked real ('app'), overall computed as for any rating. Leaves
+    /// media.updated_at alone: taking AniList's values is not a local edit,
+    /// so it never triggers a push.
+    pub fn set_criteria_from_anilist(&self, media_id: i64, criteria: &Scores) -> DbResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        Self::write_anilist_criteria(&tx, media_id, criteria, &now_iso())?;
+        tx.commit()
+    }
+
+    fn write_anilist_criteria(tx: &Connection, media_id: i64, c: &Scores, ts: &str) -> DbResult<()> {
+        let media_type: String = tx.query_row("SELECT media_type FROM media WHERE id = ?", [media_id], |r| r.get(0))?;
+        let overall = compute_overall(&media_type, c);
+        let audio = if media_type == "anime" { c.audio } else { 0.0 };
+        tx.execute(
+            "INSERT INTO rating (media_id, story, characters, animation, audio, enjoyment, overall, updated_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'app')
+             ON CONFLICT(media_id) DO UPDATE SET story = ?2, characters = ?3, animation = ?4, audio = ?5,
+                enjoyment = ?6, overall = ?7, updated_at = ?8, source = 'app'",
+            params![media_id, c.story, c.characters, c.animation, audio, c.enjoyment, overall, ts],
+        )?;
+        // Whatever the backfill found for this title is settled now.
+        tx.execute("DELETE FROM criteria_conflict WHERE media_id = ?", [media_id])?;
+        Ok(())
+    }
+
+    /// The one-time backfill found AniList criteria that differ from this
+    /// title's real local ones. Replaces an earlier finding for the title.
+    pub fn save_criteria_conflict(&self, media_id: i64, anilist: &Scores) -> DbResult<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO criteria_conflict (media_id, story, characters, animation, audio, enjoyment, found_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![media_id, anilist.story, anilist.characters, anilist.animation, anilist.audio, anilist.enjoyment, now_iso()],
+        )?;
+        Ok(())
+    }
+
+    /// Every open criteria conflict: the title and, per criterion that
+    /// differs, local vs AniList.
+    pub fn get_criteria_conflicts(&self) -> DbResult<Vec<Value>> {
+        let rows: Vec<(i64, Scores)> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT media_id, story, characters, animation, audio, enjoyment FROM criteria_conflict ORDER BY media_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, Scores { story: r.get(1)?, characters: r.get(2)?, animation: r.get(3)?, audio: r.get(4)?, enjoyment: r.get(5)? }))
+            })?;
+            rows.collect::<DbResult<_>>()?
+        };
+        let mut out = Vec::new();
+        for (media_id, anilist) in rows {
+            let Some(m) = self.get_media_by_id(media_id)? else { continue };
+            let Some(r) = m.rating.as_ref() else { continue };
+            let criteria: Vec<Value> = criteria_for(&m.fields.media_type)
+                .iter()
+                .filter_map(|k| {
+                    let local = r.criterion(k).unwrap_or(0.0);
+                    let theirs = anilist.get(k);
+                    ((local - theirs).abs() > 1e-9).then(|| json!({"criterion": k, "local": local, "anilist": theirs}))
+                })
+                .collect();
+            out.push(json!({
+                "media_id": media_id,
+                "title": m.fields.title,
+                "title_english": m.fields.title_english,
+                "media_type": m.fields.media_type,
+                "criteria": criteria,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// AniList's side of an open criteria conflict, if there is one.
+    pub fn get_criteria_conflict(&self, media_id: i64) -> DbResult<Option<Scores>> {
+        self.conn()
+            .query_row(
+                "SELECT story, characters, animation, audio, enjoyment FROM criteria_conflict WHERE media_id = ?",
+                [media_id],
+                |r| Ok(Scores { story: r.get(0)?, characters: r.get(1)?, animation: r.get(2)?, audio: r.get(3)?, enjoyment: r.get(4)? }),
+            )
+            .optional()
+    }
+
+    /// The user kept the local criteria: the conflict closes, and the row
+    /// counts as edited so the push that follows writes them to AniList.
+    pub fn keep_local_criteria(&self, media_id: i64) -> DbResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM criteria_conflict WHERE media_id = ?", [media_id])?;
+        tx.execute("UPDATE media SET updated_at = ? WHERE id = ?", params![now_iso(), media_id])?;
+        tx.commit()
+    }
+
+    pub fn get_meta(&self, key: &str) -> DbResult<Option<String>> {
+        self.conn()
+            .query_row("SELECT value FROM app_meta WHERE key = ?", [key], |r| r.get(0))
+            .optional()
+            .map(Option::flatten)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> DbResult<()> {
+        self.conn().execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)", params![key, value])?;
         Ok(())
     }
 
@@ -942,6 +1082,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM rating WHERE media_id = ?", [media_id])?;
+        tx.execute("DELETE FROM criteria_conflict WHERE media_id = ?", [media_id])?;
         let n = tx.execute("DELETE FROM media WHERE id = ?", [media_id])?;
         tx.commit()?;
         Ok(n > 0)

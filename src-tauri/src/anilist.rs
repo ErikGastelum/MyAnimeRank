@@ -12,7 +12,7 @@ use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields};
+use crate::db::{normalize_score, round1, FollowedUser, FriendEntry, FriendList, MediaFields, Scores};
 use crate::limiter::{Lane, Limiter, Priority, MAX_PAUSE_WAIT};
 use crate::scoring::{self, ListOptions, LIST_OPTIONS_FIELDS};
 
@@ -85,6 +85,10 @@ pub struct ListEntry {
     pub score: Option<f64>,
     pub updated_at: Option<String>,
     pub media: MediaFields,
+    /// FR-23: AniList's advanced scores as this app's criteria, mapped by
+    /// name (scoring::criteria_from_advanced); None when AniList has no
+    /// complete set for this entry.
+    pub criteria: Option<Scores>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -251,19 +255,26 @@ impl AniList {
         str_of(&data["UpdateUser"]["mediaListOptions"]["scoreFormat"]).ok_or_else(|| unexpected("scoreFormat missing"))
     }
 
-    /// FR-23. One flat list of entries (AniList's per-status lists flattened).
+    /// FR-23. One flat list of entries (AniList's per-status lists
+    /// flattened). The same request brings the list owner's mediaListOptions
+    /// (score format, advanced-scoring categories), which say how to read
+    /// each entry's advancedScores.
     pub async fn get_media_list_collection(&self, token: &str, user_id: i64, media_type: &str) -> AlResult<Vec<ListEntry>> {
         let q = format!(
             "query ($userId: Int, $type: MediaType) {{ MediaListCollection(userId: $userId, type: $type) {{
-               lists {{ entries {{ id status progress repeat score(format: POINT_10_DECIMAL) updatedAt
+               user {{ {LIST_OPTIONS_FIELDS} }}
+               lists {{ entries {{ id status progress repeat score(format: POINT_10_DECIMAL) advancedScores updatedAt
                  media {{ {MEDIA_FIELDS} }} }} }} }} }}"
         );
         let vars = json!({"userId": user_id, "type": al_type(media_type)});
         let data = self.graphql(&q, Some(vars), Some(token), 20).await?;
+        let options = ListOptions::from_json(&data["MediaListCollection"]["user"]["mediaListOptions"]);
         let mut out = Vec::new();
         for list in arr(&data["MediaListCollection"]["lists"]) {
             for e in arr(&list["entries"]) {
                 let state = list_entry(&e, media_type);
+                let criteria = scoring::parse_advanced_scores(&e["advancedScores"])
+                    .and_then(|raw| scoring::criteria_from_advanced(media_type, &raw, &options));
                 out.push(ListEntry {
                     list_entry_id: state.list_entry_id,
                     status: state.status,
@@ -272,6 +283,7 @@ impl AniList {
                     score: state.score,
                     updated_at: state.updated_at,
                     media: map_media(&e["media"])?,
+                    criteria,
                 });
             }
         }

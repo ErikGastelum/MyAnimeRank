@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use serde_json::{json, Value};
 
 use crate::anilist::{AlError, AniList, FriendLookup, ListEntry};
-use crate::db::{detect_conflict, now_iso, Media, SyncOutcome};
+use crate::db::{detect_conflict, now_iso, Media, Scores, SyncOutcome, CRITERIA_BACKFILL_DONE};
 use crate::limiter::{Lane, Priority};
 use crate::scoring::{self, ListOptions};
 use crate::Shared;
@@ -88,12 +88,23 @@ enum Pulled {
 
 /// FR-23. One-sided changes apply automatically; both-sides-changed entries
 /// come back as conflicts and are NOT auto-resolved. At normal priority (FR-86).
+///
+/// Criteria come from AniList's advanced scores (see `criteria_step`). The
+/// first pull that reads them is also the one-time backfill: until it has
+/// gone through both lists, a title whose real local criteria differ from
+/// AniList's is never changed on either side but listed in
+/// `criteria_conflicts`, for the user to settle (`resolve_criteria`).
 pub async fn pull(st: &Shared) -> SyncResult<Value> {
     let auth = auth(st)?;
     let (mut imported, mut updated) = (0, 0);
     let mut conflicts = Vec::new();
     let now = now_iso();
     let anilist = st.anilist.at(Priority::Normal);
+    let ctx = PullContext {
+        now: &now,
+        format: auth.score_format.as_deref(),
+        backfill: st.db.get_meta(CRITERIA_BACKFILL_DONE)?.is_none(),
+    };
 
     for media_type in ["anime", "manga"] {
         let entries = anilist
@@ -103,7 +114,7 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
             // One entry failing (say, a write that fails for a moment) must
             // not stop the rest. It's left untouched locally, so the next
             // pull tries it again.
-            match pull_entry(st, &entry, &now, auth.score_format.as_deref()) {
+            match pull_entry(st, &entry, &ctx) {
                 Ok(Pulled::Imported) => imported += 1,
                 Ok(Pulled::Updated) => updated += 1,
                 Ok(Pulled::Conflict(c)) => conflicts.push(c),
@@ -112,7 +123,57 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
             }
         }
     }
-    Ok(json!({"imported": imported, "updated": updated, "conflicts": conflicts}))
+    // Both lists read: the backfill has seen every entry once.
+    if ctx.backfill {
+        st.db.set_meta(CRITERIA_BACKFILL_DONE, &now)?;
+        log::info!("advanced-score backfill done");
+    }
+    Ok(json!({
+        "imported": imported,
+        "updated": updated,
+        "conflicts": conflicts,
+        "criteria_conflicts": st.db.get_criteria_conflicts()?,
+    }))
+}
+
+struct PullContext<'a> {
+    now: &'a str,
+    format: Option<&'a str>,
+    /// The one-time advanced-score backfill hasn't finished yet.
+    backfill: bool,
+}
+
+/// What a pull does with AniList's criteria (advanced scores) for a title
+/// already in the library.
+#[derive(Debug, PartialEq)]
+enum CriteriaStep {
+    /// They become the title's real criteria.
+    Take(Scores),
+    /// Real local criteria differ, found by the backfill: neither side
+    /// changes, and the user is asked.
+    Ask(Scores),
+    Leave,
+}
+
+/// `asking`: the backfill already asked about this title and the user
+/// hasn't answered, so it keeps asking whatever AniList does meanwhile.
+fn criteria_step(local: &Media, remote: Option<&Scores>, outcome: SyncOutcome, backfill: bool, asking: bool) -> CriteriaStep {
+    let Some(remote) = remote.copied() else { return CriteriaStep::Leave };
+    // Copied values (or no rating) carry nothing AniList's real ones don't.
+    let Some(real) = local.rating.as_ref().filter(|r| r.source == "app") else {
+        return CriteriaStep::Take(remote);
+    };
+    if scoring::same_criteria(&local.fields.media_type, real, &remote) {
+        CriteriaStep::Leave
+    } else if backfill || asking {
+        // Local criteria never reached AniList before, so a later AniList
+        // updatedAt doesn't mean these criteria changed there.
+        CriteriaStep::Ask(remote)
+    } else if outcome == SyncOutcome::Remote {
+        CriteriaStep::Take(remote)
+    } else {
+        CriteriaStep::Leave
+    }
 }
 
 /// FR-23 with FR-25's conversion: when AniList's score is just what pushing
@@ -125,11 +186,14 @@ fn remote_score(local: &Media, remote: Option<f64>, format: Option<&str>) -> Opt
     }
 }
 
-fn pull_entry(st: &Shared, entry: &ListEntry, now: &str, format: Option<&str>) -> SyncResult<Pulled> {
+fn pull_entry(st: &Shared, entry: &ListEntry, ctx: &PullContext) -> SyncResult<Pulled> {
+    let (now, format) = (ctx.now, ctx.format);
     let Some(local) = st.db.get_media_by_anilist_id(entry.media.anilist_id)? else {
         // New AniList entry with no local row: import directly. Its
         // status/progress/score land exactly as AniList has them, with
-        // updated_at == last_synced_at, so the row starts in sync.
+        // updated_at == last_synced_at, so the row starts in sync. Its
+        // advanced scores, when complete, are its real criteria; otherwise
+        // the criteria are copied from the overall.
         st.db.import_remote_entry(
             &entry.media,
             entry.list_entry_id,
@@ -137,6 +201,7 @@ fn pull_entry(st: &Shared, entry: &ListEntry, now: &str, format: Option<&str>) -
             entry.progress,
             entry.repeat_count,
             entry.score,
+            entry.criteria.as_ref(),
             now,
         )?;
         return Ok(Pulled::Imported);
@@ -151,24 +216,67 @@ fn pull_entry(st: &Shared, entry: &ListEntry, now: &str, format: Option<&str>) -
         st.db.set_media_popularity(local.id, popularity)?;
     }
 
-    Ok(match detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref()) {
-        SyncOutcome::Conflict => {
-            // FR-58: same flag push_now_guarded() sets.
-            st.db.set_pending_conflict(local.id, true)?;
-            Pulled::Conflict(conflict_entry(&local, Some((&entry.status, entry.progress, entry.updated_at.as_deref()))))
-        }
+    let outcome = detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref());
+    let asking = st.db.get_criteria_conflict(local.id)?.is_some();
+    let step = criteria_step(&local, entry.criteria.as_ref(), outcome, ctx.backfill, asking);
+    if let CriteriaStep::Ask(remote) = &step {
+        st.db.save_criteria_conflict(local.id, remote)?;
+    }
+    Ok(match outcome {
         SyncOutcome::Remote => {
-            let score = remote_score(&local, entry.score, format);
-            st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, score, now)?;
+            let (score, criteria) = match &step {
+                CriteriaStep::Take(c) => (entry.score, Some(c)),
+                // Neither rating side changes while the user is asked.
+                CriteriaStep::Ask(_) => (None, None),
+                CriteriaStep::Leave => (remote_score(&local, entry.score, format), None),
+            };
+            st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, score, criteria, now)?;
             Pulled::Updated
         }
-        // Local wins but is pushed separately (FR-24); just mark seen.
-        SyncOutcome::Local => {
-            st.db.set_last_synced(local.id, now)?;
-            Pulled::Unchanged
+        other => {
+            // Only copied (or missing) criteria are taken outside a remote
+            // change; it isn't a local edit, so nothing is pushed for it.
+            let took = match &step {
+                CriteriaStep::Take(c) => {
+                    st.db.set_criteria_from_anilist(local.id, c)?;
+                    true
+                }
+                _ => false,
+            };
+            match other {
+                SyncOutcome::Conflict => {
+                    // FR-58: same flag push_now_guarded() sets.
+                    st.db.set_pending_conflict(local.id, true)?;
+                    Pulled::Conflict(conflict_entry(&local, Some((&entry.status, entry.progress, entry.updated_at.as_deref()))))
+                }
+                // Local wins but is pushed separately (FR-24); just mark seen.
+                SyncOutcome::Local => {
+                    st.db.set_last_synced(local.id, now)?;
+                    if took { Pulled::Updated } else { Pulled::Unchanged }
+                }
+                _ if took => Pulled::Updated,
+                _ => Pulled::Unchanged,
+            }
         }
-        SyncOutcome::None => Pulled::Unchanged,
     })
+}
+
+/// Settles one criteria conflict the backfill found. "anilist": AniList's
+/// criteria replace the local ones (nothing is pushed). "local": the local
+/// criteria stay and are pushed to AniList as advanced scores right away
+/// (an explicit choice, so without push_now_guarded's conflict check).
+pub async fn resolve_criteria(st: &Shared, media_id: i64, winner: &str) -> SyncResult<Value> {
+    let anilist = st
+        .db
+        .get_criteria_conflict(media_id)?
+        .ok_or_else(|| SyncError::NotFound("no criteria conflict for this title".into()))?;
+    if winner == "anilist" {
+        st.db.set_criteria_from_anilist(media_id, &anilist)?;
+        return Ok(json!({"pushed": false}));
+    }
+    st.db.keep_local_criteria(media_id)?;
+    push_now(st, media_id, None, Priority::Interactive).await?;
+    Ok(json!({"pushed": true}))
 }
 
 async fn find_remote(st: &Shared, auth: &crate::db::Auth, local: &Media) -> SyncResult<Option<ListEntry>> {
@@ -189,7 +297,8 @@ pub async fn resolve(st: &Shared, media_id: i64, winner: &str) -> SyncResult<Val
             .await?
             .ok_or_else(|| SyncError::NotFound("remote entry not found".into()))?;
         let score = remote_score(&local, remote.score, auth.score_format.as_deref());
-        st.db.apply_remote_entry(media_id, &remote.status, remote.progress, remote.repeat_count, score, &now)?;
+        // The user chose AniList's side, its criteria included.
+        st.db.apply_remote_entry(media_id, &remote.status, remote.progress, remote.repeat_count, score, remote.criteria.as_ref(), &now)?;
         st.db.set_pending_conflict(media_id, false)?;
         return Ok(json!({"status": remote.status, "progress": remote.progress}));
     }

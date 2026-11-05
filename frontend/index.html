@@ -172,6 +172,7 @@ const api={
   getStaff:(anilistId)=>apiFetch(`/staff/${anilistId}`),
   syncPull:()=>apiFetch('/sync/pull',{method:'POST'}),
   resolveConflict:(mediaId,winner)=>apiFetch(`/sync/resolve/${mediaId}`,{method:'POST',body:JSON.stringify({winner})}),
+  resolveCriteria:(mediaId,winner)=>apiFetch(`/sync/criteria-conflicts/${mediaId}`,{method:'POST',body:JSON.stringify({winner})}),
   getFeed:(type)=>apiFetch(`/feed?type=${type}`),
   getCommunity:(mediaId)=>apiFetch(`/media/${mediaId}/community`),
   getCommunityByAnilist:(anilistId)=>apiFetch(`/media/by-anilist/${anilistId}/community`),
@@ -859,6 +860,7 @@ H.pull = async ()=>{
     const resp=await api.syncPull();
     await loadRealLibrary();
     state.pendingConflicts=resp.conflicts||[];
+    state.criteriaConflicts=resp.criteria_conflicts||[];
   }catch(e){ console.error('pull failed:',e); }
   state.pulling=false;render();
 };
@@ -868,6 +870,24 @@ H.openConflicts = ()=>{
   refreshModal('modal-conflict',conflictDialog);
 };
 H.closeConflicts = ()=>{state.conflictIdx=null;setMenuOpen('modal-conflict',false);};
+H.openCriteriaConflicts = ()=>{
+  state.criteriaIdx=0;state.profileSettingsOpen=false;
+  setMenuOpen('modal-profileSettings',false);
+  refreshModal('modal-criteria',criteriaConflictDialog);
+};
+H.closeCriteriaConflicts = ()=>{state.criteriaIdx=null;setMenuOpen('modal-criteria',false);};
+// "local" keeps this app's criteria and pushes them to AniList; "anilist"
+// takes AniList's here and pushes nothing.
+H.resolveCriteria = async (el)=>{
+  const idx=state.criteriaIdx;const c=state.criteriaConflicts[idx];
+  try{
+    await api.resolveCriteria(c.media_id,el.dataset.arg);
+    await loadRealLibrary();
+  }catch(e){ console.error('resolve criteria failed:',e); }
+  state.criteriaConflicts.splice(idx,1);
+  state.criteriaIdx=state.criteriaConflicts.length?Math.min(idx,state.criteriaConflicts.length-1):null;
+  render();
+};
 H.resolveConflict = async (el)=>{
   const idx=state.conflictIdx;const c=state.pendingConflicts[idx];const winner=el.dataset.arg;
   try{
@@ -1089,11 +1109,17 @@ H.setAnchorScope = (el)=>{
   });
   const anchors=renderAnchorList();renderSliderAnchors(anchors);
 };
-H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();let v=(r.scores[c.key]||5)+d;v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;updateScoreDisplay();renderStepsNav();};
+H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();let v=(r.scores[c.key]||5)+d;v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;touchCrit();updateScoreDisplay();renderStepsNav();};
+// Keeps a copied criterion's value as this criterion's real score.
+H.useCopiedCrit = ()=>{touchCrit();updateScoreDisplay();renderStepsNav();};
 H.gotoStep = (el)=>{state.rating.step=+el.dataset.arg;updateCriterionPanel();};
 H.prevStep = ()=>{const r=state.rating;if(r.step>0){r.step--;updateCriterionPanel();}};
 H.nextStep = async ()=>{const r=state.rating;const cs=crits(curRatingItem().media_type);
   if(r.step<cs.length-1){r.step++;updateCriterionPanel();return;}
+  // A copied rating saves only once every criterion is set: go to the first
+  // one that isn't, and say why.
+  const left=untouchedCrits(curRatingItem().media_type);
+  if(left.length){r.needAll=true;r.step=cs.findIndex(c=>c.key===left[0].key);updateCriterionPanel();return;}
   // finishing this item (or advancing to the next title in a chain) is a real
   // content change — title/poster/anchors all change — so it keeps the full render()
   await commitRating();
@@ -1104,7 +1130,7 @@ H.nextStep = async ()=>{const r=state.rating;const cs=crits(curRatingItem().medi
     // The next chain position may be a not-yet-imported {pending:true} marker
     // (no local id yet) -- render() dispatches those to pendingImportView()
     // instead of the normal stepper, so there's no score/step to prime here.
-    if(typeof r.ids[r.idx]!=='object'){r.step=0;r.scores=existingScores(curRatingItem());}
+    if(typeof r.ids[r.idx]!=='object'){r.step=0;primeScores(r,curRatingItem());}
   }else{ if(r.queue)finishQueue();else finishChain();return; }
   render();
 };
@@ -1127,7 +1153,7 @@ H.startUnratedQueue = ()=>{
 H.queueSkip = ()=>{
   const r=state.rating;const id=r.ids[r.idx];
   if(r.queue[id]!=='rated')r.queue[id]='skipped';
-  if(r.idx<r.ids.length-1){r.idx++;r.step=0;r.scores=existingScores(curRatingItem());render();}
+  if(r.idx<r.ids.length-1){r.idx++;r.step=0;primeScores(r,curRatingItem());render();}
   else finishQueue();
 };
 function finishQueue(){state.rating.done=true;render();}
@@ -1136,7 +1162,7 @@ H.backSeason = ()=>{
   // Skip backward past pending/skipped markers -- "undo a skip" isn't a
   // feature here, land on the nearest real (rated or imported) step instead.
   while(i>=0 && typeof r.ids[i]==='object')i--;
-  if(i>=0){r.idx=i;r.step=0;r.scores=existingScores(curRatingItem());render();}
+  if(i>=0){r.idx=i;r.step=0;primeScores(r,curRatingItem());render();}
 };
 // Shared by H.nextStep's normal finish and H.chainSkipStep's finish -- reopens
 // Detail for the last REAL (rated or imported) title in the chain, tracked via
@@ -1155,7 +1181,7 @@ H.chainSkipStep = ()=>{
   const r=state.rating;
   if(r.idx<r.ids.length-1){
     r.idx++;
-    if(typeof r.ids[r.idx]!=='object'){r.step=0;r.scores=existingScores(curRatingItem());}
+    if(typeof r.ids[r.idx]!=='object'){r.step=0;primeScores(r,curRatingItem());}
     render();
   }else{ finishChain(); }
 };
@@ -1185,7 +1211,7 @@ H.chainAddAndRate = async ()=>{
   }
   const added=await addFromCatalog(full,'planning');
   if(!added)return;
-  r.ids[r.idx]=added.id;r.lastRealId=added.id;r.step=0;r.scores=existingScores(added);render();
+  r.ids[r.idx]=added.id;r.lastRealId=added.id;r.step=0;primeScores(r,added);render();
 };
 // A JS-tracked mousemove/pointermove drag was tried and confirmed unreliable
 // specifically inside the real WebView2 desktop window (this app's
@@ -1201,7 +1227,7 @@ H.chainAddAndRate = async ()=>{
 // the engine's own native widget internals, never JS-tracked mouse events.
 H.trackInput = (el)=>{
   const v=+el.value;
-  state.rating.scores[curCrit().key]=v;updateScoreDisplay();renderStepsNav();
+  state.rating.scores[curCrit().key]=v;touchCrit();updateScoreDisplay();renderStepsNav();
 };
 
 /* person */
@@ -1549,7 +1575,8 @@ function openRating(ids,extra){
   // ids[0] is always a real local id -- Rate Series only ever starts from an
   // in-library title's own Detail page; only interior/tail hops discovered by
   // walkChain() can be {pending:true} not-yet-imported markers.
-  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',scores:existingScores(byId(ids[0])),returnView:returnView,returnTab:returnTab,lastRealId:ids[0],...extra};
+  state.rating={ids:ids,idx:0,step:0,variant:'track',anchorScope:'genre',returnView:returnView,returnTab:returnTab,lastRealId:ids[0],...extra};
+  primeScores(state.rating,byId(ids[0]));
   go('rating');
 }
 function curRatingItem(){const r=state.rating;return byId(r.ids[r.idx]);}
@@ -1558,9 +1585,41 @@ function curCrit(){return crits(curRatingItem().media_type)[state.rating.step];}
 function existingScores(it){
   const s={};crits(it.media_type).forEach(c=>{s[c.key]=(it.rating&&it.rating[c.key])||5;});return s;
 }
+// FR-82: a rating whose criteria were only copied from AniList's overall
+// (source 'anilist') isn't a real rating. Its criteria open as unrated --
+// dimmed and shown as "~8.0" -- with the old overall as "Previous" under Live
+// Overall, until each one is set (moved, nudged, or "Use"d). Real criteria
+// (rated here, or AniList's advanced scores) open as they are.
+function primeScores(r,it){
+  r.scores=existingScores(it);
+  r.copied=!!(it&&it.rating&&it.rating.source==='anilist');
+  r.prevOverall=r.copied?it.rating.overall:null;
+  r.touched={};r.needAll=false;
+}
+function isCopiedCrit(key){const r=state.rating;return !!(r.copied&&!r.touched[key]);}
+function untouchedCrits(mt){return crits(mt).filter(c=>isCopiedCrit(c.key));}
+function fmtCrit(key,v){return (isCopiedCrit(key)?'~':'')+fmtScore(v);}
+// Live Overall counts only criteria that are real: all of them for a real
+// rating, the ones set so far for a copied one (none set: no overall yet).
+function liveOverall(it){
+  const r=state.rating;
+  if(!r.copied)return computeOverall(it.media_type,r.scores);
+  const ks=crits(it.media_type).map(c=>c.key).filter(k=>r.touched[k]);
+  if(!ks.length)return null;
+  return Math.round(ks.reduce((a,k)=>a+r.scores[k],0)/ks.length*10)/10;
+}
+function touchCrit(){const r=state.rating;r.touched[curCrit().key]=true;if(!untouchedCrits(curRatingItem().media_type).length)r.needAll=false;}
+// The line under the criterion text: what "~" means, or why Finish didn't save.
+function copiedNoteHtml(){
+  const r=state.rating;const it=curRatingItem();const c=curCrit();
+  if(isCopiedCrit(c.key))return `<span>Not rated yet: ~${fmtScore(r.scores[c.key])} is copied from your AniList overall.</span> <span data-act="useCopiedCrit" data-hover="color:var(--t1)" style="cursor:pointer;color:var(--accent);font-weight:700;">Use ${fmtScore(r.scores[c.key])}</span>`
+    +(r.needAll?` <span style="color:#e0a24a;font-weight:600;">· Set every criterion to save (${untouchedCrits(it.media_type).length} left)</span>`:'');
+  if(r.needAll)return `<span style="color:#e0a24a;font-weight:600;">Set every criterion to save (${untouchedCrits(it.media_type).length} left)</span>`;
+  return '';
+}
 async function commitRating(){
   const it=curRatingItem();const r=state.rating;const mt=it.media_type;
-  const rating={story:r.scores.story,characters:r.scores.characters,animation:r.scores.animation||0,audio:mt==='anime'?(r.scores.audio||0):0,enjoyment:r.scores.enjoyment};
+  const rating={story:r.scores.story,characters:r.scores.characters,animation:r.scores.animation||0,audio:mt==='anime'?(r.scores.audio||0):0,enjoyment:r.scores.enjoyment,source:'app'};
   rating.overall=computeOverall(mt,rating); // optimistic local value -- mirrors the server's exact formula (ported in M3)
   it.rating=rating;it.updated_at=new Date().toISOString();
   try{
@@ -1593,7 +1652,7 @@ function stepsNavHtml(){
       <div style="display:flex;align-items:center;gap:7px;">
         <div style="width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:'Overpass Mono',monospace;font-size:10px;font-weight:700;background:${cur?'var(--accent)':'transparent'};color:${cur?'#04121d':done?'var(--accent)':'var(--t4)'};border:1px solid ${cur||done?'var(--accent)':'var(--line)'};">${i+1}</div>
         <span style="font-size:12px;font-weight:600;color:${cur?'var(--t1)':'var(--t3)'};">${cc.label}</span>
-        <span style="margin-left:auto;font-family:'Overpass Mono',monospace;font-size:12px;font-weight:600;color:${r.scores[cc.key]!=null?'var(--t2)':'var(--t4)'};">${fmtScore(r.scores[cc.key])}</span>
+        <span style="margin-left:auto;font-family:'Overpass Mono',monospace;font-size:12px;font-weight:600;color:${r.scores[cc.key]!=null&&!isCopiedCrit(cc.key)?'var(--t2)':'var(--t4)'};opacity:${isCopiedCrit(cc.key)?'.6':'1'};">${fmtCrit(cc.key,r.scores[cc.key])}</span>
       </div>
     </div>`;
   }).join('');
@@ -1614,13 +1673,17 @@ function anchorListHtml(anchors){
 function updateScoreDisplay(){
   const r=state.rating;const it=curRatingItem();const c=crits(it.media_type)[r.step];
   const score=r.scores[c.key]||5;const scPct=pct(score-1,9);
-  const trackScoreEl=document.getElementById('rs-score-track');if(trackScoreEl)trackScoreEl.textContent=fmtScore(score);
-  const dialScoreEl=document.getElementById('rs-score-dial');if(dialScoreEl)dialScoreEl.textContent=fmtScore(score);
+  const dim=isCopiedCrit(c.key)?'.45':'1';
+  const trackScoreEl=document.getElementById('rs-score-track');if(trackScoreEl){trackScoreEl.textContent=fmtCrit(c.key,score);trackScoreEl.style.opacity=dim;}
+  const dialScoreEl=document.getElementById('rs-score-dial');if(dialScoreEl){dialScoreEl.textContent=fmtCrit(c.key,score);dialScoreEl.style.opacity=dim;}
+  const fillEl=document.getElementById('rs-slider-fill');if(fillEl)fillEl.style.opacity=dim;
+  const noteEl=document.getElementById('rs-copied-note');if(noteEl)noteEl.innerHTML=copiedNoteHtml();
+  const prevOvEl=document.getElementById('rs-prev-overall');if(prevOvEl)prevOvEl.style.display=r.copied&&untouchedCrits(it.media_type).length?'block':'none';
   const fill=document.getElementById('rs-slider-fill');if(fill)fill.style.width=scPct;
   const thumb=document.getElementById('rs-slider-thumb');if(thumb)thumb.style.left=scPct;
   const trackInput=document.getElementById('rs-track-input');if(trackInput&&+trackInput.value!==score)trackInput.value=score;
   const dial=document.getElementById('rs-dial');if(dial)dial.style.background=`conic-gradient(var(--accent) ${scPct}, var(--s3) 0)`;
-  const overallEl=document.getElementById('rs-overall');if(overallEl)overallEl.textContent=fmtScore(computeOverall(it.media_type,r.scores));
+  const overallEl=document.getElementById('rs-overall');if(overallEl)overallEl.textContent=fmtScore(liveOverall(it));
 }
 function renderStepsNav(){const n=document.getElementById('rs-steps');if(n)n.innerHTML=stepsNavHtml();}
 function renderAnchorList(){
@@ -1713,13 +1776,43 @@ function render(){
 function view(){
   if(state.backendUnreachable)return backendDownView();
   if(state.booting)return bootView();
-  return (state.connected ? shell() : loginGate()) + importModal() + discoverSearchModal() + pickModal() + profileSettingsModal() + rewatchDialog() + conflictDialog();
+  return (state.connected ? shell() : loginGate()) + importModal() + discoverSearchModal() + pickModal() + profileSettingsModal() + rewatchDialog() + conflictDialog() + criteriaConflictDialog();
 }
 
 // FR-58: per-entry conflict resolution UI. Doesn't exist in the original mock
 // at all -- genuinely new. Mirrors rewatchDialog()'s visual pattern (icon +
 // label header, body copy, two-button footer) since that's the established
 // "confirm a consequential choice" dialog style in this app.
+// The one-time advanced-score backfill found titles whose criteria here
+// differ from AniList's advanced scores. Nothing changed on either side;
+// the user picks per title. Same look as conflictDialog().
+function criteriaConflictDialog(){
+  const list=state.criteriaConflicts;const idx=state.criteriaIdx;
+  const open=!!(list&&list.length&&idx!=null&&list[idx]);
+  const c=open?list[idx]:{title:'',media_type:'anime',criteria:[]};
+  const label=k=>(crits(c.media_type).find(x=>x.key===k)||{label:k}).label;
+  const rows=c.criteria.map(d=>`<div style="display:flex;padding:7px 10px;border-top:1px solid var(--line2);font-size:13px;">
+      <span style="flex:1;font-weight:600;">${esc(label(d.criterion))}</span>
+      <span style="width:80px;text-align:right;font-family:'Overpass Mono',monospace;">${fmtScore(d.local)}</span>
+      <span style="width:80px;text-align:right;font-family:'Overpass Mono',monospace;">${fmtScore(d.anilist)}</span></div>`).join('');
+  return `<div id="modal-criteria" data-act="closeCriteriaConflicts" style="position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(4,5,7,.8);backdrop-filter:blur(4px);opacity:${open?'1':'0'};pointer-events:${open?'auto':'none'};">
+    <div data-act="stop" style="width:460px;max-width:100%;background:var(--s1);border:1px solid var(--line);border-radius:18px;padding:24px;box-shadow:0 30px 80px rgba(0,0,0,.6);">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <span style="font-family:'Overpass Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.3px;color:#e0a24a;">Rating differs from AniList (${open?idx+1:0}/${list?list.length:0})</span>
+      </div>
+      <p style="font-size:14px;font-weight:700;margin-bottom:10px;">${esc(displayTitle(c))}</p>
+      <p style="font-size:12.5px;color:var(--t3);line-height:1.5;margin-bottom:14px;">Your criteria here don't match this title's advanced scores on AniList. Nothing has been changed on either side. Pick which to keep.</p>
+      <div style="background:var(--s2);border:1px solid var(--line2);border-radius:11px;margin-bottom:20px;">
+        <div style="display:flex;padding:7px 10px;font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--t4);text-transform:uppercase;"><span style="flex:1;">Criterion</span><span style="width:80px;text-align:right;">This app</span><span style="width:80px;text-align:right;">AniList</span></div>
+        ${rows}
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div data-act="resolveCriteria" data-arg="local" title="Keeps these and writes them to AniList" style="flex:1;padding:12px;border-radius:11px;background:var(--s3);border:1px solid var(--line);color:var(--t2);font-weight:600;font-size:13px;cursor:pointer;text-align:center;">Keep this app's</div>
+        <div data-act="resolveCriteria" data-arg="anilist" style="flex:1;padding:12px;border-radius:11px;background:var(--accent);color:#04121d;font-weight:700;font-size:13px;cursor:pointer;text-align:center;">Use AniList's</div>
+      </div>
+    </div>
+  </div>`;
+}
 function conflictDialog(){
   // Always rendered (see profileSettingsModal's convention) -- open/closed is
   // a pure opacity/pointer-events flip via setMenuOpen, never a render().
@@ -2597,6 +2690,7 @@ function profileSettingsModal(){
       <div data-act="disconnect" style="padding:12px;border-radius:10px;text-align:center;cursor:pointer;font-weight:700;font-size:13px;margin-bottom:10px;background:var(--s3);color:#e57373;border:1px solid var(--line);">Disconnect AniList</div>
       <div data-act="pull" data-hover="border-color:var(--accent)" style="padding:12px;border-radius:10px;text-align:center;cursor:${state.pulling?'default':'pointer'};font-weight:600;font-size:13px;background:var(--s3);border:1px solid var(--line);color:var(--t2);">${pullLabel}</div>
       ${state.pendingConflicts&&state.pendingConflicts.length?`<div data-act="openConflicts" data-hover="border-color:#e0a24a" style="margin-top:10px;padding:10px 12px;border-radius:10px;cursor:pointer;background:color-mix(in srgb,#e0a24a 12%,transparent);border:1px solid color-mix(in srgb,#e0a24a 35%,transparent);color:#e0a24a;font-size:12px;font-weight:600;text-align:center;">${state.pendingConflicts.length} conflict(s) need review &rarr;</div>`:''}
+      ${state.criteriaConflicts&&state.criteriaConflicts.length?`<div data-act="openCriteriaConflicts" data-hover="border-color:#e0a24a" style="margin-top:10px;padding:10px 12px;border-radius:10px;cursor:pointer;background:color-mix(in srgb,#e0a24a 12%,transparent);border:1px solid color-mix(in srgb,#e0a24a 35%,transparent);color:#e0a24a;font-size:12px;font-weight:600;text-align:center;">${state.criteriaConflicts.length} rating(s) differ from AniList &rarr;</div>`:''}
     </div>
   </div>`;
 }
@@ -2673,7 +2767,9 @@ function queueSummaryView(){
 function ratingView(){
   const r=state.rating;const it=curRatingItem();const cs=crits(it.media_type);const c=cs[r.step];
   const score=r.scores[c.key]||5;
-  const overall=computeOverall(it.media_type,r.scores);
+  const overall=liveOverall(it);
+  const dim=isCopiedCrit(c.key)?'.45':'1';
+  const showPrev=r.copied&&untouchedCrits(it.media_type).length>0;
   const isChain=r.ids.length>1||!!r.queue;
   // Same Series (FR-8/FR-69) needs this title's relations, which arrive after
   // this render; loadSeries() shows the pill then. Until the title has a
@@ -2697,14 +2793,14 @@ function ratingView(){
   const control = `<div style="position:relative;margin-top:auto;padding-top:24px;min-height:210px;">
       <div id="score-widget-track" style="position:absolute;inset:0;opacity:${r.variant==='track'?'1':'0'};pointer-events:${r.variant==='track'?'auto':'none'};">
         <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:18px;">
-          <div style="display:flex;align-items:baseline;gap:3px;"><span id="rs-score-track" style="font-family:'Overpass Mono',monospace;font-size:64px;font-weight:700;line-height:.9;letter-spacing:-2px;">${fmtScore(score)}</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;color:var(--t4);">/10</span></div>
+          <div style="display:flex;align-items:baseline;gap:3px;"><span id="rs-score-track" style="font-family:'Overpass Mono',monospace;font-size:64px;font-weight:700;line-height:.9;letter-spacing:-2px;opacity:${dim};">${fmtCrit(c.key,score)}</span><span style="font-family:'Overpass Mono',monospace;font-size:20px;color:var(--t4);">/10</span></div>
           <div style="display:flex;gap:8px;">
             <div data-act="nudge" data-arg="-0.5" data-hover="border-color:var(--accent);color:var(--t1)" style="width:42px;height:42px;border-radius:10px;background:var(--s3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t2);font-size:22px;">−</div>
             <div data-act="nudge" data-arg="0.5" data-hover="border-color:var(--accent);color:var(--t1)" style="width:42px;height:42px;border-radius:10px;background:var(--s3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--t2);font-size:22px;">+</div>
           </div>
         </div>
         <div style="position:relative;height:46px;display:flex;align-items:center;user-select:none;">
-          <div style="position:absolute;left:0;right:0;height:8px;border-radius:5px;background:var(--s3);overflow:hidden;pointer-events:none;"><div id="rs-slider-fill" style="position:absolute;left:0;top:0;bottom:0;width:${scPct};background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 55%,#000),var(--accent));border-radius:5px;"></div></div>
+          <div style="position:absolute;left:0;right:0;height:8px;border-radius:5px;background:var(--s3);overflow:hidden;pointer-events:none;"><div id="rs-slider-fill" style="position:absolute;left:0;top:0;bottom:0;width:${scPct};opacity:${dim};background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 55%,#000),var(--accent));border-radius:5px;"></div></div>
           <div id="rs-slider-anchors" style="position:absolute;inset:0;pointer-events:none;">${sliderTicksHtml(anchors)}</div>
           <div id="rs-slider-thumb" style="position:absolute;left:${scPct};top:50%;transform:translate(-50%,-50%);width:26px;height:26px;border-radius:50%;background:var(--t1);box-shadow:0 2px 8px rgba(0,0,0,.5),0 0 0 4px color-mix(in srgb,var(--accent) 30%,transparent);border:3px solid var(--accent);pointer-events:none;"></div>
           <input id="rs-track-input" type="range" min="1" max="10" step="0.5" value="${score}" data-input="trackInput" style="position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;opacity:0;cursor:pointer;-webkit-appearance:none;appearance:none;background:transparent;" />
@@ -2713,7 +2809,7 @@ function ratingView(){
       </div>
       <div id="score-widget-dial" style="position:absolute;inset:0;display:flex;align-items:center;gap:30px;opacity:${r.variant==='dial'?'1':'0'};pointer-events:${r.variant==='dial'?'auto':'none'};">
         <div id="rs-dial" style="position:relative;width:170px;height:170px;border-radius:50%;background:conic-gradient(var(--accent) ${scPct}, var(--s3) 0);display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
-          <div style="position:absolute;inset:14px;border-radius:50%;background:var(--s1);display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px solid var(--line2);"><span id="rs-score-dial" style="font-family:'Overpass Mono',monospace;font-size:46px;font-weight:700;line-height:.9;letter-spacing:-1px;">${fmtScore(score)}</span><span style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:2px;">out of 10</span></div>
+          <div style="position:absolute;inset:14px;border-radius:50%;background:var(--s1);display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px solid var(--line2);"><span id="rs-score-dial" style="font-family:'Overpass Mono',monospace;font-size:46px;font-weight:700;line-height:.9;letter-spacing:-1px;opacity:${dim};">${fmtCrit(c.key,score)}</span><span style="font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:2px;">out of 10</span></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;gap:12px;">
           <div data-act="nudge" data-arg="0.5" data-hover="border-color:var(--accent);color:var(--t1)" style="height:52px;border-radius:12px;background:var(--s3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;font-weight:600;color:var(--t2);"><span style="font-size:22px;">+</span> 0.5</div>
@@ -2757,7 +2853,7 @@ function ratingView(){
     <div style="display:flex;align-items:center;gap:16px;background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:20px;">
       <div style="flex:0 0 52px;height:72px;border-radius:7px;position:relative;overflow:hidden;background:${cover(it.title)};display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);"><span style="font-family:'Overpass Mono',monospace;font-weight:700;font-size:16px;color:rgba(255,255,255,.82);">${esc(initials(displayTitle(it)))}</span>${povr(it.cover_url,displayTitle(it))}</div>
       <div style="min-width:0;flex:1;"><div style="display:flex;align-items:center;gap:10px;"><span style="font-weight:700;font-size:17px;">${esc(displayTitle(it))}</span>${pill(it.media_type)}</div><div style="font-size:12px;color:var(--t4);margin-top:2px;">${esc(it.title_native)}</div></div>
-      <div style="text-align:right;"><div style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--t4);text-transform:uppercase;">live overall</div><div id="rs-overall" style="font-family:'Overpass Mono',monospace;font-size:28px;font-weight:700;color:var(--accent);line-height:1;">${fmtScore(overall)}</div></div>
+      <div style="text-align:right;"><div style="font-family:'Overpass Mono',monospace;font-size:9px;letter-spacing:1px;color:var(--t4);text-transform:uppercase;">live overall</div><div id="rs-overall" style="font-family:'Overpass Mono',monospace;font-size:28px;font-weight:700;color:var(--accent);line-height:1;">${fmtScore(overall)}</div><div id="rs-prev-overall" style="display:${showPrev?'block':'none'};font-family:'Overpass Mono',monospace;font-size:11px;color:var(--t4);margin-top:4px;">Previous: ${fmtScore(r.prevOverall)}</div></div>
     </div>
 
     <div id="rs-steps" style="display:flex;gap:8px;margin-bottom:22px;">${steps}</div>
@@ -2772,6 +2868,7 @@ function ratingView(){
             <div id="rs-stepnum" style="font-family:'Overpass Mono',monospace;font-size:11px;letter-spacing:2px;color:var(--accent);text-transform:uppercase;">Criterion ${r.step+1} / ${cs.length}</div>
             <h2 id="rs-label" style="font-size:30px;font-weight:700;letter-spacing:-.5px;margin-top:6px;">${c.label}</h2>
             <p id="rs-desc" style="font-size:13.5px;color:var(--t3);line-height:1.5;margin-top:8px;">${c.desc}</p>
+            <p id="rs-copied-note" style="font-size:12px;color:var(--t4);line-height:1.5;margin-top:8px;">${copiedNoteHtml()}</p>
           </div>
           <div style="flex:0 0 150px;position:relative;width:150px;aspect-ratio:2/3;border-radius:14px;background:${cover(it.title)};box-shadow:0 12px 40px rgba(0,0,0,.4),inset 0 0 0 1px rgba(255,255,255,.06);overflow:hidden;display:flex;align-items:center;justify-content:center;">
             ${it.cover_url?`<img src="${esc(it.cover_url)}" alt="${esc(displayTitle(it))}" onerror="this.style.display='none'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" />`:''}
@@ -3394,9 +3491,12 @@ async function loadRealLibrary(){
 // Pull first, then load, so the library the user first sees is already
 // post-pull (no stale-then-refreshed flash). Shared by app open and login.
 async function pullThenLoadLibrary(){
-  try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; }
+  try{ const resp=await api.syncPull(); state.pendingConflicts=resp.conflicts||[]; state.criteriaConflicts=resp.criteria_conflicts||[]; }
   catch(e){ /* non-fatal -- a slow/unreachable AniList never blocks login or the library from loading */ }
   await loadRealLibrary();
+  // Ask about differing criteria once per session, without waiting for the
+  // user to find them under Account & Sync.
+  if(state.criteriaConflicts&&state.criteriaConflicts.length&&!state.criteriaAsked){state.criteriaAsked=true;state.criteriaIdx=0;render();}
 }
 
 (async function boot(){
