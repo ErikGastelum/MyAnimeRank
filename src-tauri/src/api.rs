@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::anilist::{self, AlError, FriendLookup, PickCheck, PickFilters, PickPool, PickSize, PICK_BUDGET, PICK_DEPTH};
-use crate::db::{self, AnchorError, Auth, MediaFields, Scores};
+use crate::db::{self, AnchorError, Auth, MediaFields, Rating, Scores};
 use crate::limiter::Priority;
 use crate::sync::{self, SyncError};
 use crate::{oauth, Shared};
@@ -170,9 +170,13 @@ fn is_half_step_in_range(v: f64) -> bool {
 }
 
 /// FR-6: manga audio must be exactly 0.0; anime audio is a normal criterion.
-fn validate_scores(media_type: &str, s: &Scores) -> Result<(), ApiError> {
+/// Every criterion is 1.0-10.0 in 0.5 steps, except one left exactly as
+/// stored: AniList's advanced scores come in unsnapped (8.3), and saving
+/// them untouched must keep them, not fail.
+fn validate_scores(media_type: &str, s: &Scores, stored: Option<&Rating>) -> Result<(), ApiError> {
+    let ok = |name: &str, v: f64| is_half_step_in_range(v) || stored.and_then(|r| r.criterion(name)).is_some_and(|old| old == v);
     for (name, v) in [("story", s.story), ("characters", s.characters), ("animation", s.animation), ("enjoyment", s.enjoyment)] {
-        if !is_half_step_in_range(v) {
+        if !ok(name, v) {
             return Err(ApiError::new(422, format!("{name} must be between 1.0 and 10.0 in 0.5 increments")));
         }
     }
@@ -180,7 +184,7 @@ fn validate_scores(media_type: &str, s: &Scores) -> Result<(), ApiError> {
         if s.audio != 0.0 {
             return Err(ApiError::new(422, "audio must be 0.0 for manga"));
         }
-    } else if !is_half_step_in_range(s.audio) {
+    } else if !ok("audio", s.audio) {
         return Err(ApiError::new(422, "audio must be between 1.0 and 10.0 in 0.5 increments for anime"));
     }
     Ok(())
@@ -359,7 +363,7 @@ async fn get_media_by_anilist(State(st): State<Shared>, Id(anilist_id): Id) -> A
 
 async fn put_rating(State(st): State<Shared>, Id(id): Id, Body(scores): Body<Scores>) -> ApiResult {
     let media = st.db.get_media_by_id(id)?.ok_or_else(|| ApiError::new(404, "media not found"))?;
-    validate_scores(&media.fields.media_type, &scores)?;
+    validate_scores(&media.fields.media_type, &scores, media.rating.as_ref())?;
     let (overall, media_type) = st.db.upsert_rating(id, &scores)?.ok_or_else(|| ApiError::new(404, "media not found"))?;
     // FR-24/FR-25: local changes push automatically in the background.
     sync::spawn_push(&st, id);

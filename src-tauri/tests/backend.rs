@@ -4277,10 +4277,14 @@ fn advanced_scores_read_back_by_name_and_format() {
         manga: AdvancedScoring { enabled: true, categories: vec![] },
     };
     let raw = |pairs: &[(&str, f64)]| pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect();
-    // POINT_10_DECIMAL as is, snapped to 0.5 steps (7.3 -> 7.5).
+    // POINT_10_DECIMAL kept exactly, never snapped (7.3 stays 7.3).
     let anime = raw(&[("story", 8.5), ("Characters", 8.0), ("Visuals", 7.3), ("Audio", 7.0), ("Enjoyment", 8.0)]);
     let c = criteria_from_advanced("anime", &anime, &options("POINT_10_DECIMAL")).unwrap();
-    assert_eq!((c.story, c.characters, c.animation, c.audio, c.enjoyment), (8.5, 8.0, 7.5, 7.0, 8.0));
+    assert_eq!((c.story, c.characters, c.animation, c.audio, c.enjoyment), (8.5, 8.0, 7.3, 7.0, 8.0));
+    // POINT_100: 83 -> 8.3, 77 -> 7.7.
+    let hundred = raw(&[("Story", 83.0), ("Characters", 77.0), ("Visuals", 80.0), ("Audio", 70.0), ("Enjoyment", 85.0)]);
+    let c = criteria_from_advanced("anime", &hundred, &options("POINT_100")).unwrap();
+    assert_eq!((c.story, c.characters, c.animation, c.audio, c.enjoyment), (8.3, 7.7, 8.0, 7.0, 8.5));
     // Manga's Art can be named Art.
     let manga = raw(&[("Story", 9.0), ("Characters", 8.5), ("Art", 7.5), ("Enjoyment", 9.5)]);
     let c = criteria_from_advanced("manga", &manga, &options("POINT_10_DECIMAL")).unwrap();
@@ -4434,4 +4438,59 @@ async fn the_stepper_gets_real_criteria_and_knows_copied_ones() {
     let (_, lib) = call(&st, "GET", "/library", None).await;
     let sources: Vec<Value> = lib["results"].as_array().unwrap().iter().map(|m| m["rating"]["source"].clone()).collect();
     assert!(sources.contains(&json!("anilist")) && sources.contains(&json!("app")), "{sources:?}");
+}
+
+#[tokio::test]
+async fn pulled_exact_scores_survive_an_untouched_save_and_snap_only_when_moved() {
+    let fake = fake_anilist(|q, v| {
+        if q.contains("MediaListCollection") {
+            let node = advanced_node(1, "ANIME", 1_700_000_000, 7.9, json!({"Story": 83, "Characters": 77, "Visuals": 80, "Audio": 70, "Enjoyment": 85}));
+            (200, collection_with(if v["type"] == "ANIME" { vec![node] } else { vec![] }, "POINT_100", true), None)
+        } else {
+            (500, json!({}), None) // the background push after a save; not what this test checks
+        }
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    sync::pull(&st).await.unwrap();
+    // (8.3 + 7.7 + 8 + 7 + 8.5) / 5 = 7.9
+    assert_eq!(criteria_of(&st, 1), (vec![8.3, 7.7, 8.0, 7.0, 8.5], 7.9, "app".into()));
+    let id = st.db.get_media_by_anilist_id(1).unwrap().unwrap().id;
+    let path = format!("/media/{id}/rating");
+
+    // Saved untouched: every exact value stays as it was.
+    let untouched = json!({"story": 8.3, "characters": 7.7, "animation": 8.0, "audio": 7.0, "enjoyment": 8.5});
+    let (s, b) = call(&st, "PUT", &path, Some(untouched)).await;
+    assert_eq!((s, b["overall"].clone()), (200, json!(7.9)));
+    assert_eq!(criteria_of(&st, 1).0, vec![8.3, 7.7, 8.0, 7.0, 8.5]);
+
+    // Story moved (to the 0.5 grid), the rest untouched.
+    let moved = json!({"story": 8.5, "characters": 7.7, "animation": 8.0, "audio": 7.0, "enjoyment": 8.5});
+    assert_eq!(call(&st, "PUT", &path, Some(moved)).await.0, 200);
+    assert_eq!(criteria_of(&st, 1).0, vec![8.5, 7.7, 8.0, 7.0, 8.5]);
+
+    // An off-grid value that isn't the stored one is still refused.
+    let invented = json!({"story": 8.4, "characters": 7.7, "animation": 8.0, "audio": 7.0, "enjoyment": 8.5});
+    assert_eq!(call(&st, "PUT", &path, Some(invented)).await.0, 422);
+    // ...including the old exact 8.3, now that Story is 8.5.
+    let back = json!({"story": 8.3, "characters": 7.7, "animation": 8.0, "audio": 7.0, "enjoyment": 8.5});
+    assert_eq!(call(&st, "PUT", &path, Some(back)).await.0, 422);
+}
+
+#[tokio::test]
+async fn a_difference_that_is_only_snapping_is_never_a_conflict() {
+    // Local 8.5 / 8.0 rated here; AniList 8.3 / 7.8 snap to the same.
+    let fake = fake_anilist(|_, v| {
+        let node = advanced_node(2, "ANIME", 1_700_000_000, 7.9, json!({"Story": 8.3, "Characters": 7.8, "Visuals": 8, "Audio": 7, "Enjoyment": 8}));
+        (200, collection_with(if v["type"] == "ANIME" { vec![node] } else { vec![] }, "POINT_10_DECIMAL", true), None)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    rated_locally(&st, 2, neverland());
+    let out = sync::pull(&st).await.unwrap();
+    assert_eq!(out["criteria_conflicts"], json!([]));
+    // Nothing changes locally either.
+    assert_eq!(criteria_of(&st, 2), (vec![8.5, 8.0, 8.0, 7.0, 8.0], 7.9, "app".into()));
 }

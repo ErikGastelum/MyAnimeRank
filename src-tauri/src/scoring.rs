@@ -168,8 +168,10 @@ pub fn parse_advanced_scores(v: &Value) -> Option<BTreeMap<String, f64>> {
 }
 
 /// An AniList advanced score (in `format`) on this app's 1.0-10.0 scale,
-/// snapped to a 0.5 step as every criterion is. None for 0 ("not scored")
-/// and for formats without advanced scoring.
+/// kept EXACTLY (8.3 stays 8.3, POINT_100's 83 is 8.3): only moving the
+/// stepper snaps a criterion to a 0.5 step, so a pull followed by a save
+/// never changes a score nobody touched. None for 0 ("not scored") and for
+/// formats without advanced scoring. Below 1.0 is raised to the scale's 1.0.
 fn from_anilist_advanced(score: f64, format: &str) -> Option<f64> {
     if score <= 0.0 {
         return None;
@@ -179,7 +181,7 @@ fn from_anilist_advanced(score: f64, format: &str) -> Option<f64> {
         "POINT_10_DECIMAL" => score,
         _ => return None,
     };
-    Some(snap_to_half_step(s))
+    Some(round1(s).clamp(1.0, 10.0))
 }
 
 /// FR-23: AniList's advanced scores for one entry as this app's criteria,
@@ -212,9 +214,13 @@ pub fn criteria_from_advanced(media_type: &str, raw: &BTreeMap<String, f64>, opt
     })
 }
 
-/// Whether a rating's criteria are the same as `other` for this media type.
+/// Whether a rating's criteria match AniList's `other` for this media type,
+/// up to the 0.5-step snapping: a local 8.5 rated here and AniList's exact
+/// 8.3 are the same score on this app's grid, never a conflict.
 pub fn same_criteria(media_type: &str, rating: &Rating, other: &Scores) -> bool {
-    criteria_for(media_type)
-        .iter()
-        .all(|k| (rating.criterion(k).unwrap_or(0.0) - other.get(k)).abs() < 1e-9)
+    criteria_for(media_type).iter().all(|k| {
+        let local = rating.criterion(k).unwrap_or(0.0);
+        let theirs = other.get(k);
+        (local - theirs).abs() < 1e-9 || (snap_to_half_step(local) - snap_to_half_step(theirs)).abs() < 1e-9
+    })
 }

@@ -1109,7 +1109,12 @@ H.setAnchorScope = (el)=>{
   });
   const anchors=renderAnchorList();renderSliderAnchors(anchors);
 };
-H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();let v=(r.scores[c.key]||5)+d;v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;touchCrit();updateScoreDisplay();renderStepsNav();};
+// A criterion can hold AniList's exact advanced score (8.3); it snaps only
+// when moved, and then to the neighbouring 0.5 step in that direction
+// (8.3: + is 8.5, - is 8.0), never skipping one.
+H.nudge = (el)=>{const d=+el.dataset.arg;const r=state.rating;const c=curCrit();const cur=r.scores[c.key]||5;
+  const onGrid=Math.abs(cur*2-Math.round(cur*2))<1e-9;
+  let v=onGrid?cur+d:(d>0?Math.ceil(cur*2)/2:Math.floor(cur*2)/2);v=Math.max(1,Math.min(10,Math.round(v*2)/2));r.scores[c.key]=v;touchCrit();updateScoreDisplay();renderStepsNav();};
 // Keeps a copied criterion's value as this criterion's real score.
 H.useCopiedCrit = ()=>{touchCrit();updateScoreDisplay();renderStepsNav();};
 H.gotoStep = (el)=>{state.rating.step=+el.dataset.arg;updateCriterionPanel();};
