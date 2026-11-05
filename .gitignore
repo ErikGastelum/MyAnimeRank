@@ -4,6 +4,10 @@ library.db.bak
 myanimrank.db
 backups/
 local_config.toml
+local_config.py
+*.secret
+.env
+.env.*
 
 # Private tooling config (kept on disk, not published)
 .claude/
