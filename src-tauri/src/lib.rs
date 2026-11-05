@@ -160,7 +160,10 @@ pub fn run() {
 /// `myanimerank --serve [port]`: the same API plus the page on
 /// http://127.0.0.1:<port>, for frontend work in a normal browser (what
 /// `uvicorn main:app --port 8420` used to be). Uses `MYANIMERANK_DB` or
-/// `./library.db`.
+/// `./library.db`. `MYANIMERANK_ANILIST_URL` points every AniList request
+/// (pulls, background pushes, lookups) at another GraphQL endpoint, e.g. a
+/// local fake for UI checks that must not reach AniList at all. Dev mode
+/// only: the desktop app always talks to AniList.
 pub fn serve(port: u16) {
     init_logging();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -175,7 +178,14 @@ pub fn serve(port: u16) {
             }
         };
         let config = config::Config::load(None);
-        let state = AppState::new(db, anilist::AniList::default(), config);
+        let anilist = match std::env::var("MYANIMERANK_ANILIST_URL") {
+            Ok(url) if !url.is_empty() => {
+                log::warn!("AniList requests go to {url}, not AniList");
+                anilist::AniList::with_url(&url)
+            }
+            _ => anilist::AniList::default(),
+        };
+        let state = AppState::new(db, anilist, config);
         tokio::spawn(sync::retry_loop(state.clone()));
         tokio::spawn(sync::friend_queue_loop(state.clone(), sync::FRIEND_QUEUE_SPACING));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.expect("bind dev port");

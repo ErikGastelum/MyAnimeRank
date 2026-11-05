@@ -4494,3 +4494,28 @@ async fn a_difference_that_is_only_snapping_is_never_a_conflict() {
     // Nothing changes locally either.
     assert_eq!(criteria_of(&st, 2), (vec![8.5, 8.0, 8.0, 7.0, 8.0], 7.9, "app".into()));
 }
+
+#[test]
+fn an_advanced_score_of_zero_is_unscored_never_raised_to_one() {
+    use myanimerank_lib::scoring::{criteria_from_advanced, AdvancedScoring, ListOptions};
+    let options = |format: &str| ListOptions {
+        score_format: Some(format.into()),
+        anime: AdvancedScoring { enabled: true, categories: vec![] },
+        manga: AdvancedScoring { enabled: true, categories: vec![] },
+    };
+    let set = |enjoyment: f64, scale: f64| -> std::collections::BTreeMap<String, f64> {
+        [("Story", 8.5), ("Characters", 8.0), ("Visuals", 8.0), ("Audio", 7.0), ("Enjoyment", enjoyment)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), if *k == "Enjoyment" { *v } else { v * scale }))
+            .collect()
+    };
+    // 0 means "not scored" in both formats: no complete set, so None (the
+    // title keeps copied criteria), never a criterion of 1.0.
+    assert!(criteria_from_advanced("anime", &set(0.0, 1.0), &options("POINT_10_DECIMAL")).is_none());
+    assert!(criteria_from_advanced("anime", &set(0.0, 10.0), &options("POINT_100")).is_none());
+    // A real score below the app's scale is not 0: it is raised to 1.0.
+    let c = criteria_from_advanced("anime", &set(0.4, 1.0), &options("POINT_10_DECIMAL")).unwrap();
+    assert_eq!(c.enjoyment, 1.0);
+    let c = criteria_from_advanced("anime", &set(4.0, 10.0), &options("POINT_100")).unwrap();
+    assert_eq!(c.enjoyment, 1.0);
+}
