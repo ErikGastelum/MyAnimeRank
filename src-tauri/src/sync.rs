@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use serde_json::{json, Value};
 
 use crate::anilist::{AlError, AniList, FriendLookup, ListEntry};
-use crate::db::{detect_conflict, now_iso, Media, Scores, SyncOutcome, CRITERIA_BACKFILL_DONE};
+use crate::db::{detect_conflict, now_iso, Media, Scores, SyncOutcome};
 use crate::limiter::{Lane, Priority};
 use crate::scoring::{self, ListOptions};
 use crate::Shared;
@@ -89,22 +89,19 @@ enum Pulled {
 /// FR-23. One-sided changes apply automatically; both-sides-changed entries
 /// come back as conflicts and are NOT auto-resolved. At normal priority (FR-86).
 ///
-/// Criteria come from AniList's advanced scores (see `criteria_step`). The
-/// first pull that reads them is also the one-time backfill: until it has
-/// gone through both lists, a title whose real local criteria differ from
-/// AniList's is never changed on either side but listed in
-/// `criteria_conflicts`, for the user to settle (`resolve_criteria`).
+/// Criteria come from AniList's advanced scores (see `criteria_step`). A
+/// title whose real local criteria differ from AniList's, where it can't be
+/// told which side changed them, is changed on neither side and listed in
+/// `criteria_conflicts` for the user to settle (`resolve_criteria`). Every
+/// rating saved before advanced scores were read is in that position the
+/// first time it's compared.
 pub async fn pull(st: &Shared) -> SyncResult<Value> {
     let auth = auth(st)?;
     let (mut imported, mut updated) = (0, 0);
     let mut conflicts = Vec::new();
     let now = now_iso();
     let anilist = st.anilist.at(Priority::Normal);
-    let ctx = PullContext {
-        now: &now,
-        format: auth.score_format.as_deref(),
-        backfill: st.db.get_meta(CRITERIA_BACKFILL_DONE)?.is_none(),
-    };
+    let ctx = PullContext { now: &now, format: auth.score_format.as_deref() };
 
     for media_type in ["anime", "manga"] {
         let entries = anilist
@@ -123,11 +120,6 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
             }
         }
     }
-    // Both lists read: the backfill has seen every entry once.
-    if ctx.backfill {
-        st.db.set_meta(CRITERIA_BACKFILL_DONE, &now)?;
-        log::info!("advanced-score backfill done");
-    }
     Ok(json!({
         "imported": imported,
         "updated": updated,
@@ -139,8 +131,6 @@ pub async fn pull(st: &Shared) -> SyncResult<Value> {
 struct PullContext<'a> {
     now: &'a str,
     format: Option<&'a str>,
-    /// The one-time advanced-score backfill hasn't finished yet.
-    backfill: bool,
 }
 
 /// What a pull does with AniList's criteria (advanced scores) for a title
@@ -149,30 +139,41 @@ struct PullContext<'a> {
 enum CriteriaStep {
     /// They become the title's real criteria.
     Take(Scores),
-    /// Real local criteria differ, found by the backfill: neither side
-    /// changes, and the user is asked.
+    /// Real local criteria differ and it can't be told which side changed
+    /// them: neither side changes, and the user is asked.
     Ask(Scores),
+    /// Both sides already agree: remembered as the agreed criteria.
+    Agree(Scores),
+    /// Only this app changed them; its next push sends them.
     Leave,
 }
 
-/// `asking`: the backfill already asked about this title and the user
-/// hasn't answered, so it keeps asking whatever AniList does meanwhile.
-fn criteria_step(local: &Media, remote: Option<&Scores>, outcome: SyncOutcome, backfill: bool, asking: bool) -> CriteriaStep {
+/// Decides by the criteria both sides last agreed on (`synced`), never by
+/// the entry's updatedAt, which moves for any change. A real local rating
+/// is only replaced when it is still what was agreed and AniList's differ;
+/// with nothing agreed yet (any rating from before advanced scores were
+/// read), or both sides changed, or a question already open (`asking`),
+/// the user is asked.
+fn criteria_step(local: &Media, remote: Option<&Scores>, synced: Option<&Scores>, asking: bool) -> CriteriaStep {
     let Some(remote) = remote.copied() else { return CriteriaStep::Leave };
     // Copied values (or no rating) carry nothing AniList's real ones don't.
     let Some(real) = local.rating.as_ref().filter(|r| r.source == "app") else {
         return CriteriaStep::Take(remote);
     };
-    if scoring::same_criteria(&local.fields.media_type, real, &remote) {
-        CriteriaStep::Leave
-    } else if backfill || asking {
-        // Local criteria never reached AniList before, so a later AniList
-        // updatedAt doesn't mean these criteria changed there.
-        CriteriaStep::Ask(remote)
-    } else if outcome == SyncOutcome::Remote {
-        CriteriaStep::Take(remote)
-    } else {
-        CriteriaStep::Leave
+    let mt = &local.fields.media_type;
+    let same = |a: &Scores, b: &Scores| scoring::same_criteria(mt, a, b);
+    let mine = real.scores();
+    if same(&mine, &remote) {
+        return CriteriaStep::Agree(remote);
+    }
+    match synced {
+        _ if asking => CriteriaStep::Ask(remote),
+        // AniList's are still the agreed ones: only this app changed.
+        Some(base) if same(&remote, base) => CriteriaStep::Leave,
+        // This app's are still the agreed ones: only AniList changed.
+        Some(base) if same(&mine, base) => CriteriaStep::Take(remote),
+        // Both changed, or never compared.
+        _ => CriteriaStep::Ask(remote),
     }
 }
 
@@ -218,9 +219,12 @@ fn pull_entry(st: &Shared, entry: &ListEntry, ctx: &PullContext) -> SyncResult<P
 
     let outcome = detect_conflict(local.updated_at.as_deref(), entry.updated_at.as_deref(), local.last_synced_at.as_deref());
     let asking = st.db.get_criteria_conflict(local.id)?.is_some();
-    let step = criteria_step(&local, entry.criteria.as_ref(), outcome, ctx.backfill, asking);
-    if let CriteriaStep::Ask(remote) = &step {
-        st.db.save_criteria_conflict(local.id, remote)?;
+    let synced = st.db.get_criteria_synced(local.id)?;
+    let step = criteria_step(&local, entry.criteria.as_ref(), synced.as_ref(), asking);
+    match &step {
+        CriteriaStep::Ask(remote) => st.db.save_criteria_conflict(local.id, remote)?,
+        CriteriaStep::Agree(remote) => st.db.set_criteria_synced(local.id, remote)?,
+        _ => {}
     }
     Ok(match outcome {
         SyncOutcome::Remote => {
@@ -228,14 +232,16 @@ fn pull_entry(st: &Shared, entry: &ListEntry, ctx: &PullContext) -> SyncResult<P
                 CriteriaStep::Take(c) => (entry.score, Some(c)),
                 // Neither rating side changes while the user is asked.
                 CriteriaStep::Ask(_) => (None, None),
-                CriteriaStep::Leave => (remote_score(&local, entry.score, format), None),
+                // This app's criteria are the newer ones: its overall stays too.
+                CriteriaStep::Leave if entry.criteria.is_some() => (None, None),
+                CriteriaStep::Leave | CriteriaStep::Agree(_) => (remote_score(&local, entry.score, format), None),
             };
             st.db.apply_remote_entry(local.id, &entry.status, entry.progress, entry.repeat_count, score, criteria, now)?;
             Pulled::Updated
         }
         other => {
-            // Only copied (or missing) criteria are taken outside a remote
-            // change; it isn't a local edit, so nothing is pushed for it.
+            // Taking AniList's criteria isn't a local edit, so nothing is
+            // pushed for it.
             let took = match &step {
                 CriteriaStep::Take(c) => {
                     st.db.set_criteria_from_anilist(local.id, c)?;
@@ -390,6 +396,10 @@ async fn push_inner(st: &Shared, anilist: &AniList, auth: &crate::db::Auth, loca
         .await?;
     let now = now_iso();
     st.db.set_last_synced(local.id, &now)?;
+    // AniList now has exactly these criteria.
+    if let (Some(_), Some(r)) = (&advanced, &local.rating) {
+        st.db.set_criteria_synced(local.id, &r.scores())?;
+    }
     // A brand-new local-only entry gets its list entry id from its first push.
     if local.anilist_list_entry_id.is_none() {
         st.db.set_anilist_list_entry_id(local.id, entry_id)?;

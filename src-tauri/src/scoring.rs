@@ -214,13 +214,12 @@ pub fn criteria_from_advanced(media_type: &str, raw: &BTreeMap<String, f64>, opt
     })
 }
 
-/// Whether a rating's criteria match AniList's `other` for this media type,
-/// up to the 0.5-step snapping: a local 8.5 rated here and AniList's exact
-/// 8.3 are the same score on this app's grid, never a conflict.
-pub fn same_criteria(media_type: &str, rating: &Rating, other: &Scores) -> bool {
+/// Whether two sets of criteria match for this media type, up to the
+/// 0.5-step snapping: a local 8.5 rated here and AniList's exact 8.3 are
+/// the same score on this app's grid, never a conflict.
+pub fn same_criteria(media_type: &str, a: &Scores, b: &Scores) -> bool {
     criteria_for(media_type).iter().all(|k| {
-        let local = rating.criterion(k).unwrap_or(0.0);
-        let theirs = other.get(k);
-        (local - theirs).abs() < 1e-9 || (snap_to_half_step(local) - snap_to_half_step(theirs)).abs() < 1e-9
+        let (x, y) = (a.get(k), b.get(k));
+        (x - y).abs() < 1e-9 || (snap_to_half_step(x) - snap_to_half_step(y)).abs() < 1e-9
     })
 }

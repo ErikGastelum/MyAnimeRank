@@ -108,8 +108,8 @@ CREATE TABLE IF NOT EXISTS friend_entry (
 );
 
 -- Criteria AniList has (advanced scores, on this app's scale) for a title
--- whose own real criteria differ, found by the one-time backfill. Neither
--- side is changed until the user picks one.
+-- whose own real criteria differ and can't be settled from criteria_synced.
+-- Neither side is changed until the user picks one.
 CREATE TABLE IF NOT EXISTS criteria_conflict (
     media_id INTEGER PRIMARY KEY REFERENCES media(id),
     story REAL NOT NULL,
@@ -120,14 +120,22 @@ CREATE TABLE IF NOT EXISTS criteria_conflict (
     found_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS app_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT
+-- The criteria this app and AniList last agreed on for a title: taken from
+-- AniList, pushed to it, or found equal on both sides. Pull compares both
+-- sides against it to tell who changed the criteria; the entry's updatedAt
+-- can't, since it moves for any change (progress, a push) and with clock
+-- skew. A title without a row has never been compared, so a real local
+-- rating that differs from AniList's is asked about, never overwritten:
+-- that covers every rating saved before advanced scores were read.
+CREATE TABLE IF NOT EXISTS criteria_synced (
+    media_id INTEGER PRIMARY KEY REFERENCES media(id),
+    story REAL NOT NULL,
+    characters REAL NOT NULL,
+    animation REAL NOT NULL,
+    audio REAL NOT NULL DEFAULT 0.0,
+    enjoyment REAL NOT NULL
 );
 ";
-
-/// app_meta key: the one-time advanced-score backfill has run (FR-23).
-pub const CRITERIA_BACKFILL_DONE: &str = "criteria_backfill_done";
 
 pub const ANIME_CRITERIA: [&str; 5] = ["story", "characters", "animation", "audio", "enjoyment"];
 /// Audio excluded; Art lives in the `animation` column.
@@ -207,6 +215,17 @@ pub struct Rating {
 }
 
 impl Rating {
+    /// The criteria as Scores (a missing animation reads as 0.0).
+    pub fn scores(&self) -> Scores {
+        Scores {
+            story: self.story,
+            characters: self.characters,
+            animation: self.animation.unwrap_or(0.0),
+            audio: self.audio,
+            enjoyment: self.enjoyment,
+        }
+    }
+
     pub fn criterion(&self, name: &str) -> Option<f64> {
         match name {
             "story" => Some(self.story),
@@ -918,13 +937,13 @@ impl Db {
                 enjoyment = ?6, overall = ?7, updated_at = ?8, source = 'app'",
             params![media_id, c.story, c.characters, c.animation, audio, c.enjoyment, overall, ts],
         )?;
-        // Whatever the backfill found for this title is settled now.
+        // Both sides agree now: whatever was asked about this title is settled.
         tx.execute("DELETE FROM criteria_conflict WHERE media_id = ?", [media_id])?;
-        Ok(())
+        Self::write_criteria_synced(tx, media_id, c)
     }
 
-    /// The one-time backfill found AniList criteria that differ from this
-    /// title's real local ones. Replaces an earlier finding for the title.
+    /// Pull found AniList criteria that differ from this title's real local
+    /// ones and couldn't tell which side changed. Replaces an earlier finding.
     pub fn save_criteria_conflict(&self, media_id: i64, anilist: &Scores) -> DbResult<()> {
         self.conn().execute(
             "INSERT OR REPLACE INTO criteria_conflict (media_id, story, characters, animation, audio, enjoyment, found_at)
@@ -991,15 +1010,26 @@ impl Db {
         tx.commit()
     }
 
-    pub fn get_meta(&self, key: &str) -> DbResult<Option<String>> {
+    /// The criteria this app and AniList last agreed on (see criteria_synced).
+    pub fn get_criteria_synced(&self, media_id: i64) -> DbResult<Option<Scores>> {
         self.conn()
-            .query_row("SELECT value FROM app_meta WHERE key = ?", [key], |r| r.get(0))
+            .query_row(
+                "SELECT story, characters, animation, audio, enjoyment FROM criteria_synced WHERE media_id = ?",
+                [media_id],
+                |r| Ok(Scores { story: r.get(0)?, characters: r.get(1)?, animation: r.get(2)?, audio: r.get(3)?, enjoyment: r.get(4)? }),
+            )
             .optional()
-            .map(Option::flatten)
     }
 
-    pub fn set_meta(&self, key: &str, value: &str) -> DbResult<()> {
-        self.conn().execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)", params![key, value])?;
+    pub fn set_criteria_synced(&self, media_id: i64, c: &Scores) -> DbResult<()> {
+        Self::write_criteria_synced(&self.conn(), media_id, c)
+    }
+
+    fn write_criteria_synced(conn: &Connection, media_id: i64, c: &Scores) -> DbResult<()> {
+        conn.execute(
+            "INSERT OR REPLACE INTO criteria_synced (media_id, story, characters, animation, audio, enjoyment) VALUES (?, ?, ?, ?, ?, ?)",
+            params![media_id, c.story, c.characters, c.animation, c.audio, c.enjoyment],
+        )?;
         Ok(())
     }
 
@@ -1083,6 +1113,7 @@ impl Db {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM rating WHERE media_id = ?", [media_id])?;
         tx.execute("DELETE FROM criteria_conflict WHERE media_id = ?", [media_id])?;
+        tx.execute("DELETE FROM criteria_synced WHERE media_id = ?", [media_id])?;
         let n = tx.execute("DELETE FROM media WHERE id = ?", [media_id])?;
         tx.commit()?;
         Ok(n > 0)

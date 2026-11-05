@@ -4405,7 +4405,7 @@ async fn backfill_replaces_copied_criteria_and_asks_about_real_ones_that_differ(
 }
 
 #[tokio::test]
-async fn after_the_backfill_a_remote_change_brings_anilists_criteria() {
+async fn criteria_changed_only_on_anilist_since_they_last_agreed_are_taken() {
     let later = chrono::Utc::now().timestamp() + 3600;
     let fake = fake_anilist(move |_, v| {
         let node = advanced_node(5, "ANIME", later, 8.0, json!({"Story": 9, "Characters": 8, "Visuals": 8, "Audio": 7, "Enjoyment": 8}));
@@ -4414,8 +4414,10 @@ async fn after_the_backfill_a_remote_change_brings_anilists_criteria() {
     .await;
     let st = state_with(&fake);
     login(&st);
-    st.db.set_meta(db::CRITERIA_BACKFILL_DONE, "2026-01-01T00:00:00+00:00").unwrap();
-    rated_locally(&st, 5, neverland());
+    // Both sides agreed on these (say, pushed by this app); AniList's Story
+    // has changed since, this app's criteria haven't.
+    let id = rated_locally(&st, 5, neverland());
+    st.db.set_criteria_synced(id, &neverland()).unwrap();
     let out = sync::pull(&st).await.unwrap();
     assert_eq!(out["criteria_conflicts"], json!([]));
     assert_eq!(criteria_of(&st, 5), (vec![9.0, 8.0, 8.0, 7.0, 8.0], 8.0, "app".into()));
@@ -4518,4 +4520,137 @@ fn an_advanced_score_of_zero_is_unscored_never_raised_to_one() {
     assert_eq!(c.enjoyment, 1.0);
     let c = criteria_from_advanced("anime", &set(4.0, 10.0), &options("POINT_100")).unwrap();
     assert_eq!(c.enjoyment, 1.0);
+}
+
+// ------------------------------- ratings saved before advanced scores ----
+
+/// The Promised Neverland's AniList entry: overall 7.9, advanced scores
+/// with Enjoyment 7.5 (or none), last changed at `updated_at`.
+fn neverland_on_anilist(updated_at: i64, advanced: Value) -> Value {
+    collection_with(vec![advanced_node(101, "ANIME", updated_at, 7.9, advanced)], "POINT_10_DECIMAL", true)
+}
+
+fn anilist_enjoyment_7_5() -> Value {
+    json!({"Story": 8.5, "Characters": 8, "Visuals": 8, "Audio": 7, "Enjoyment": 7.5})
+}
+
+#[tokio::test]
+async fn a_stepper_rating_from_an_old_build_that_differs_from_anilist_is_asked_about_never_taken() {
+    // Whether AniList's entry looks older or newer than the last sync
+    // (a push, a progress edit, clock skew) must not matter.
+    for offset in [-3600_i64, 3600] {
+        let reply = Arc::new(Mutex::new(neverland_on_anilist(1_700_000_000, Value::Null)));
+        let r = reply.clone();
+        let fake = fake_anilist(move |q, v| {
+            if q.contains("MediaListCollection") && v["type"] == "ANIME" {
+                (200, r.lock().unwrap().clone(), None)
+            } else if q.contains("MediaListCollection") {
+                (200, collection_with(vec![], "POINT_10_DECIMAL", true), None)
+            } else {
+                save_ok()
+            }
+        })
+        .await;
+        let st = state_with(&fake);
+        login(&st);
+
+        // The old build's history: a pull that read no advanced scores
+        // imported the title with copied criteria; then it was rated in
+        // the stepper and that rating was pushed (overall only).
+        sync::pull(&st).await.unwrap();
+        let id = st.db.get_media_by_anilist_id(101).unwrap().unwrap().id;
+        assert_eq!(criteria_of(&st, 101).2, "anilist");
+        let (s, _) = call(&st, "PUT", &format!("/media/{id}/rating"), Some(json!({"story": 8.5, "characters": 8.0, "animation": 8.0, "audio": 7.0, "enjoyment": 8.0}))).await;
+        assert_eq!(s, 200);
+        let synced = chrono::Utc::now();
+        st.db.set_last_synced(id, &synced.to_rfc3339()).unwrap();
+        assert_eq!(st.db.get_criteria_synced(id).unwrap(), None, "the old build never compared criteria");
+        let saves_before = fake.calls_containing("SaveMediaListEntry").len();
+
+        // This build's pull sees AniList's Enjoyment 7.5.
+        *reply.lock().unwrap() = neverland_on_anilist(synced.timestamp() + offset, anilist_enjoyment_7_5());
+        let out = sync::pull(&st).await.unwrap();
+        assert_eq!(criteria_of(&st, 101), (vec![8.5, 8.0, 8.0, 7.0, 8.0], 7.9, "app".into()), "offset {offset}");
+        assert_eq!(
+            out["criteria_conflicts"],
+            json!([{"media_id": id, "title": "Title 101", "title_english": null, "media_type": "anime",
+                "criteria": [{"criterion": "enjoyment", "local": 8.0, "anilist": 7.5}]}]),
+            "offset {offset}"
+        );
+        // Asked again on every pull until answered, never taken meanwhile.
+        let again = sync::pull(&st).await.unwrap();
+        assert_eq!(again["criteria_conflicts"].as_array().unwrap().len(), 1);
+        assert_eq!(criteria_of(&st, 101).0[4], 8.0);
+        // And nothing was written to AniList by any of these pulls.
+        assert_eq!(fake.calls_containing("SaveMediaListEntry").len(), saves_before);
+    }
+}
+
+#[tokio::test]
+async fn a_rating_from_before_the_copied_marker_existed_counts_as_real() {
+    // A library file older than rating.source: the one-time classification
+    // marks only all-equal criteria (how Pull copied them) as copied.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        drop(Db::open(&path).unwrap()); // today's media table, then the old rating table
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE rating;
+             CREATE TABLE rating (media_id INTEGER PRIMARY KEY REFERENCES media(id), story REAL NOT NULL,
+                characters REAL NOT NULL, animation REAL, audio REAL NOT NULL DEFAULT 0.0,
+                enjoyment REAL NOT NULL, overall REAL NOT NULL, updated_at TEXT NOT NULL);
+             INSERT INTO media (id, anilist_id, media_type, title, genres, tags, producers, status, progress, anilist_list_entry_id, updated_at, last_synced_at)
+                VALUES (1, 101, 'anime', 'The Promised Neverland', '[]', '[]', '[]', 'completed', 12, 1101,
+                        '2026-10-01T00:00:00+00:00', '2026-10-01T00:00:00+00:00'),
+                       (2, 102, 'anime', 'Copied', '[]', '[]', '[]', 'completed', 12, 1102,
+                        '2026-10-01T00:00:00+00:00', '2026-10-01T00:00:00+00:00');
+             INSERT INTO rating VALUES (1, 8.5, 8.0, 8.0, 7.0, 8.0, 7.9, '2026-10-01T00:00:00+00:00');
+             INSERT INTO rating VALUES (2, 8.0, 8.0, 8.0, 8.0, 8.0, 7.8, '2026-10-01T00:00:00+00:00');",
+        )
+        .unwrap();
+    }
+    let fake = fake_anilist(|_, v| {
+        let entries = if v["type"] == "ANIME" {
+            vec![
+                advanced_node(101, "ANIME", 1_800_000_000, 7.9, anilist_enjoyment_7_5()),
+                advanced_node(102, "ANIME", 1_800_000_000, 7.8, json!({"Story": 7.5, "Characters": 8, "Visuals": 8, "Audio": 7.5, "Enjoyment": 8})),
+            ]
+        } else {
+            vec![]
+        };
+        (200, collection_with(entries, "POINT_10_DECIMAL", true), None)
+    })
+    .await;
+    let st = AppState::new(Db::open(&path).unwrap(), AniList::with_url(&fake.url), Config { client_id: "1".into() });
+    login(&st);
+    assert_eq!(criteria_of(&st, 101).2, "app");
+    assert_eq!(criteria_of(&st, 102).2, "anilist");
+
+    let out = sync::pull(&st).await.unwrap();
+    // The real one is asked about and kept; the copied one is replaced.
+    assert_eq!(criteria_of(&st, 101), (vec![8.5, 8.0, 8.0, 7.0, 8.0], 7.9, "app".into()));
+    assert_eq!(out["criteria_conflicts"].as_array().unwrap().iter().map(|c| c["media_id"].clone()).collect::<Vec<_>>(), vec![json!(1)]);
+    assert_eq!(criteria_of(&st, 102), (vec![7.5, 8.0, 8.0, 7.5, 8.0], 7.8, "app".into()));
+    assert!(fake.calls_containing("SaveMediaListEntry").is_empty());
+}
+
+#[tokio::test]
+async fn criteria_changed_only_here_since_they_last_agreed_stay_and_push() {
+    // Agreed on Enjoyment 7.5 (taken from AniList); since then rated 8.0
+    // here, and AniList still has 7.5: not a conflict, nothing taken.
+    let later = chrono::Utc::now().timestamp() + 3600;
+    let fake = fake_anilist(move |_, v| {
+        let entries = if v["type"] == "ANIME" { vec![advanced_node(101, "ANIME", later, 7.8, anilist_enjoyment_7_5())] } else { vec![] };
+        (200, collection_with(entries, "POINT_10_DECIMAL", true), None)
+    })
+    .await;
+    let st = state_with(&fake);
+    login(&st);
+    let id = rated_locally(&st, 101, neverland());
+    st.db.set_criteria_synced(id, &Scores { enjoyment: 7.5, ..neverland() }).unwrap();
+    let out = sync::pull(&st).await.unwrap();
+    assert_eq!(out["criteria_conflicts"], json!([]));
+    // Criteria and overall stay this app's, even though AniList's entry is newer.
+    assert_eq!(criteria_of(&st, 101), (vec![8.5, 8.0, 8.0, 7.0, 8.0], 7.9, "app".into()));
 }
